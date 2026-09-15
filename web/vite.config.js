@@ -27,7 +27,7 @@ export default defineConfig({
       },
       {
         find: "@moritzbrantner/input-bindings",
-        replacement: vendor("packages", "input-bindings", "src", "index.ts"),
+        replacement: vendor("packages", "input-bindings", "src", "public.ts"),
       },
     ],
   },
