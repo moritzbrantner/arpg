@@ -1,0 +1,45 @@
+:root {
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  color: #eee8dc;
+  background: #11100f;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html, body, #root { width: 100%; height: 100%; margin: 0; }
+button, input, select { font: inherit; }
+button, input, select { color: inherit; background: #24211e; border: 1px solid #514a42; border-radius: 5px; }
+button { padding: 0.5rem 0.8rem; cursor: pointer; }
+button:hover { border-color: #8e7a56; }
+button:disabled { opacity: 0.5; cursor: default; }
+input, select { padding: 0.55rem 0.65rem; width: 100%; }
+
+.game-shell { position: relative; width: 100%; height: 100%; overflow: hidden; background: #11100f; }
+.game-canvas { display: block; width: 100%; height: 100%; }
+.game-header { position: absolute; inset: 0 0 auto 0; display: flex; justify-content: space-between; align-items: center; padding: 0.8rem 1rem; background: linear-gradient(#11100fdd, transparent); pointer-events: none; }
+.game-header > div { display: flex; gap: 0.8rem; align-items: baseline; }
+.game-header span { color: #b6aa96; font-size: 0.88rem; }
+.game-header button { pointer-events: auto; }
+.hud { position: absolute; left: 1rem; bottom: 1rem; width: min(32rem, calc(100% - 2rem)); padding: 0.75rem 0.9rem; background: #171513dc; border: 1px solid #3e3933; border-radius: 6px; }
+.hud p { margin: 0.35rem 0 0; color: #bdb3a3; font-size: 0.85rem; }
+.health { height: 0.55rem; background: #351a19; border: 1px solid #6a322f; overflow: hidden; }
+.health span { display: block; height: 100%; background: #a7463f; }
+
+.settings-backdrop { position: absolute; inset: 0; display: flex; justify-content: flex-end; background: #0008; }
+.settings-panel { width: min(48rem, 94vw); height: 100%; overflow: auto; padding: 1.4rem; background: #171513; border-left: 1px solid #3e3933; box-shadow: -14px 0 40px #0008; }
+.settings-panel > header { display: flex; justify-content: space-between; gap: 1rem; align-items: start; border-bottom: 1px solid #38332e; padding-bottom: 1rem; }
+.settings-panel h1 { margin: 0; font-size: 1.6rem; }
+.settings-panel h2 { margin: 0 0 0.75rem; font-size: 1.05rem; }
+.settings-panel p { color: #bdb3a3; }
+.settings-panel section { padding: 1.1rem 0; border-bottom: 1px solid #302c28; }
+.settings-panel label { display: grid; gap: 0.4rem; margin: 0.7rem 0; color: #d7cfc2; }
+.settings-actions { display: flex; gap: 0.6rem; flex-wrap: wrap; margin: 0.7rem 0; }
+.settings-note { font-size: 0.85rem; }
+.checkbox-row { display: flex !important; grid-template-columns: none; align-items: center; gap: 0.6rem !important; }
+.checkbox-row input { width: auto; }
+.keybindings-section { border-bottom: 0 !important; }
+
+@media (max-width: 700px) {
+  .game-header > div { flex-direction: column; gap: 0.15rem; }
+  .settings-panel { width: 100%; }
+}
