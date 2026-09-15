@@ -16,6 +16,7 @@ The browser slice currently proves:
 - local Rust/Wasm play;
 - host-authoritative peer co-op using `multiplayer-setup-service` for rendezvous and direct WebRTC data channels for commands/snapshots;
 - the same `ArpgGame` exercised through `game-server::MatchRuntime`, with an equivalence test requiring the dedicated-runtime and direct-local paths to produce the same typed snapshot for the same input stream;
+- a runnable TLS/WebTransport dedicated server using the shared `game-server` transport, reconnect, recovery, tick, and shutdown machinery;
 - GitHub Pages build/deployment for browser acceptance.
 
 This is deliberately not yet a content-complete ARPG. The slice exists to prove the foundations before inventory, loot, skills, progression, richer AI, assets, persistence, or larger levels are built on top.
@@ -39,7 +40,7 @@ Neither renderer nor network transport is a source of gameplay truth.
 
 - **Local** — the browser runs `arpg-core` through `arpg-web-wasm`.
 - **Peer-hosted co-op** — one browser runs that same Rust/Wasm authority; guests submit sequenced commands and consume host snapshots. `multiplayer-setup-service` remains payload-opaque setup infrastructure.
-- **Dedicated online** — `arpg-game-server` adapts the same core/protocol into `game-server`. The MVP proves the actual `MatchRuntime` boundary in deterministic tests; a production WebTransport/TLS launcher is a later deployment slice and is not claimed here.
+- **Dedicated online** — `arpg-game-server` adapts the same core/protocol into `game-server` and includes a runnable TLS/WebTransport host. The MVP proves the actual `MatchRuntime` boundary with deterministic equivalence tests. Wiring the browser menu to that dedicated endpoint is the next client-facing slice.
 
 Peer-hosted co-op is a convenience/trust mode, not an anti-cheat boundary. The host can cheat. Dedicated play is the trusted authority model.
 
@@ -65,6 +66,16 @@ bun run dev
 The web build downloads the accepted browser sources from `input-bindings` and `multiplayer-setup-service`, verifies their exact Git blob hashes, and then builds the Rust/Wasm package. Generated vendored sources and Wasm output are not committed.
 
 For peer co-op, run or deploy `multiplayer-setup-service` separately and enter its URL in **Settings → Peer co-op**. Local development defaults to `http://127.0.0.1:8787`. GitHub Pages requires an HTTPS/WSS deployment whose `ALLOWED_ORIGINS` includes the ARPG Pages origin.
+
+Dedicated server:
+
+```sh
+ARPG_SERVER_CERT_PEM=cert.pem \
+ARPG_SERVER_KEY_PEM=key.pem \
+cargo run -p arpg-game-server --bin server
+```
+
+The dedicated host defaults to UDP port `4433` and session path `/arpg`. Optional configuration is available through `ARPG_SERVER_PORT`, `ARPG_SERVER_SESSION_PATH`, `ARPG_SERVER_RECOVERY_PATH`, and `ARPG_SERVER_DRAIN_GRACE_MS`.
 
 ## Pinned foundations
 
