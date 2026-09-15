@@ -3,6 +3,11 @@
 use std::error::Error;
 use std::fmt;
 
+use arpg_core::{ArpgCommand, ArpgSnapshot};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+
+pub const PROTOCOL_VERSION: u16 = 1;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProtocolError {
     message: String,
@@ -29,12 +34,86 @@ impl fmt::Display for ProtocolError {
 impl Error for ProtocolError {}
 
 /// Game-specific command/snapshot encoding independent of transport topology.
-///
-/// The same codec is consumed by dedicated-server WebTransport and by the
-/// browser peer-host path after WebRTC connectivity has been established.
 pub trait WireProtocol<Command, Snapshot>: Send + Sync + 'static {
     fn encode_command(&self, command: &Command) -> Result<Vec<u8>, ProtocolError>;
     fn decode_command(&self, payload: &[u8]) -> Result<Command, ProtocolError>;
     fn encode_snapshot(&self, snapshot: &Snapshot) -> Result<Vec<u8>, ProtocolError>;
     fn decode_snapshot(&self, payload: &[u8]) -> Result<Snapshot, ProtocolError>;
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct JsonProtocol;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VersionedPayload<T> {
+    protocol_version: u16,
+    payload: T,
+}
+
+impl WireProtocol<ArpgCommand, ArpgSnapshot> for JsonProtocol {
+    fn encode_command(&self, command: &ArpgCommand) -> Result<Vec<u8>, ProtocolError> {
+        encode(command)
+    }
+
+    fn decode_command(&self, payload: &[u8]) -> Result<ArpgCommand, ProtocolError> {
+        decode(payload)
+    }
+
+    fn encode_snapshot(&self, snapshot: &ArpgSnapshot) -> Result<Vec<u8>, ProtocolError> {
+        encode(snapshot)
+    }
+
+    fn decode_snapshot(&self, payload: &[u8]) -> Result<ArpgSnapshot, ProtocolError> {
+        decode(payload)
+    }
+}
+
+fn encode<T: Serialize + Clone>(payload: &T) -> Result<Vec<u8>, ProtocolError> {
+    serde_json::to_vec(&VersionedPayload {
+        protocol_version: PROTOCOL_VERSION,
+        payload: payload.clone(),
+    })
+    .map_err(|error| ProtocolError::new(format!("encode failed: {error}")))
+}
+
+fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, ProtocolError> {
+    let envelope: VersionedPayload<T> = serde_json::from_slice(bytes)
+        .map_err(|error| ProtocolError::new(format!("decode failed: {error}")))?;
+    if envelope.protocol_version != PROTOCOL_VERSION {
+        return Err(ProtocolError::new(format!(
+            "unsupported ARPG protocol version {}",
+            envelope.protocol_version
+        )));
+    }
+    Ok(envelope.payload)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arpg_core::{ArpgGame, AuthoritativeGame};
+
+    #[test]
+    fn command_round_trip_is_versioned() {
+        let protocol = JsonProtocol;
+        let command = ArpgCommand::SetMovement { x: -1, z: 1 };
+        let bytes = protocol.encode_command(&command).unwrap();
+        assert!(
+            String::from_utf8(bytes.clone())
+                .unwrap()
+                .contains("protocolVersion")
+        );
+        assert_eq!(protocol.decode_command(&bytes).unwrap(), command);
+    }
+
+    #[test]
+    fn snapshot_round_trip_preserves_authoritative_state() {
+        let mut game = ArpgGame::new().unwrap();
+        game.add_player(1).unwrap();
+        let snapshot = game.snapshot().unwrap();
+        let protocol = JsonProtocol;
+        let bytes = protocol.encode_snapshot(&snapshot).unwrap();
+        assert_eq!(protocol.decode_snapshot(&bytes).unwrap(), snapshot);
+    }
 }

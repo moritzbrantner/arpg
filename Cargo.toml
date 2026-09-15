@@ -3,6 +3,7 @@ members = [
   "crates/arpg-core",
   "crates/arpg-protocol",
   "crates/arpg-game-server",
+  "crates/arpg-web-wasm",
 ]
 resolver = "3"
 
@@ -17,6 +18,11 @@ publish = false
 arpg-core = { path = "crates/arpg-core" }
 arpg-protocol = { path = "crates/arpg-protocol" }
 game-server = { git = "https://github.com/moritzbrantner/game-server.git", rev = "81cad7a4d80849d13c37120a411d3a053c46f9a0" }
+physics-engine = { git = "https://github.com/moritzbrantner/physics-engine.git", rev = "43cb991ac2fce267654fc0c8a1b29984c1162428" }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+tokio = { version = "=1.53.1", features = ["macros", "rt-multi-thread", "signal", "sync"] }
+wasm-bindgen = "=0.2.128"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

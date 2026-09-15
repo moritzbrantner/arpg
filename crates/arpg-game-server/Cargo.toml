@@ -10,6 +10,7 @@ publish.workspace = true
 arpg-core.workspace = true
 arpg-protocol.workspace = true
 game-server.workspace = true
+tokio.workspace = true
 
 [lints]
 workspace = true

@@ -241,4 +241,42 @@ mod tests {
         assert_eq!(error.to_string(), "expected one command byte");
         assert!(adapter.game().commands.is_empty());
     }
+
+    #[test]
+    fn real_arpg_snapshot_matches_the_game_server_runtime_path() {
+        use arpg_core::{ArpgCommand, ArpgGame};
+        use arpg_protocol::JsonProtocol;
+        use game_server::{MatchRuntime, RECONNECT_TOKEN_BYTES, ReconnectToken};
+
+        let command = ArpgCommand::SetMovement { x: 1, z: 0 };
+        let protocol = JsonProtocol;
+
+        let mut local = ArpgGame::new().unwrap();
+        local.add_player(1).unwrap();
+        local
+            .apply_command(PlayerCommand::new(1, 1, command).unwrap())
+            .unwrap();
+        for _ in 0..12 {
+            local.advance_tick().unwrap();
+        }
+        let local_snapshot = local.snapshot().unwrap();
+
+        let adapter = GameServerAdapter::new(ArpgGame::new().unwrap(), JsonProtocol);
+        let mut runtime = MatchRuntime::new(adapter, 120);
+        let lease = runtime
+            .admit(ReconnectToken([7; RECONNECT_TOKEN_BYTES]))
+            .unwrap();
+        assert_eq!(lease.player_id, 1);
+        let encoded = protocol.encode_command(&command).unwrap();
+        runtime
+            .submit_command(lease.player_id, lease.connection_epoch, 1, &encoded)
+            .unwrap();
+        for _ in 0..12 {
+            runtime.advance_tick().unwrap();
+        }
+        let server_snapshot = runtime.snapshot().unwrap();
+        let decoded = protocol.decode_snapshot(&server_snapshot.payload).unwrap();
+
+        assert_eq!(decoded, local_snapshot);
+    }
 }
