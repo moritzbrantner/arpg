@@ -269,12 +269,7 @@ mod tests {
         assert_eq!(lease.player_id, 1);
         let encoded = protocol.encode_command(&command).unwrap();
         runtime
-            .submit_command(
-                lease.player_id,
-                lease.connection_epoch,
-                1,
-                &encoded,
-            )
+            .submit_command(lease.player_id, lease.connection_epoch, 1, &encoded)
             .unwrap();
         for _ in 0..12 {
             runtime.advance_tick().unwrap();
