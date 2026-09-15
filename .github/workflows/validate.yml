@@ -1,0 +1,22 @@
+name: Validate
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    uses: moritzbrantner/reusable-workflows/.github/workflows/validate-repo.yml@28a77d034ce18595e5f058f81e8063ea67d23bd9
+    with:
+      bun_version: ""
+      node_version: ""
+      install_command: ""
+      cache_bun: false
+      cache_cargo: true
+      format_command: cargo fmt --all -- --check
+      lint_command: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      test_command: cargo test --workspace --all-features
+      artifact_paths: ""
