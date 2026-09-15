@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "vendor": "node scripts/vendor-foundations.mjs",
-    "wasm": "wasm-pack build ../crates/arpg-web-wasm --target web --out-dir ../../web/src/wasm --out-name arpg_web_wasm",
+    "wasm": "wasm-pack build ../crates/arpg-web-wasm --target web --out-dir ../../web/src/wasm --out-name arpg_web_wasm -- --locked",
     "build": "bun run vendor && bun run wasm && vite build",
     "dev": "bun run vendor && bun run wasm && vite"
   },
