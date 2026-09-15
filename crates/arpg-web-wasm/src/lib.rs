@@ -58,10 +58,7 @@ impl WasmGame {
     #[wasm_bindgen(js_name = snapshotJson)]
     pub fn snapshot_json(&self) -> Result<String, JsValue> {
         let snapshot = self.game.snapshot().map_err(js_error)?;
-        let bytes = self
-            .protocol
-            .encode_snapshot(&snapshot)
-            .map_err(js_error)?;
+        let bytes = self.protocol.encode_snapshot(&snapshot).map_err(js_error)?;
         String::from_utf8(bytes).map_err(js_error)
     }
 }
