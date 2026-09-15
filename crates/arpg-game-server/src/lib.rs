@@ -60,7 +60,10 @@ where
         sequence: u32,
         payload: &[u8],
     ) -> Result<(), SimulationError> {
-        let command = self.protocol.decode_command(payload).map_err(map_protocol_error)?;
+        let command = self
+            .protocol
+            .decode_command(payload)
+            .map_err(map_protocol_error)?;
         let command = PlayerCommand::new(player_id, sequence, command).map_err(map_game_error)?;
         self.game.apply_command(command).map_err(map_game_error)
     }
@@ -135,7 +138,10 @@ mod tests {
             self.players.remove(&player_id)
         }
 
-        fn apply_command(&mut self, command: PlayerCommand<Self::Command>) -> Result<(), GameError> {
+        fn apply_command(
+            &mut self,
+            command: PlayerCommand<Self::Command>,
+        ) -> Result<(), GameError> {
             if !self.players.contains(&command.player_id) {
                 return Err(GameError::new("unknown player"));
             }
