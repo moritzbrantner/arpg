@@ -20,3 +20,25 @@ jobs:
       lint_command: cargo clippy --workspace --all-targets --all-features -- -D warnings
       test_command: cargo test --workspace --all-features
       artifact_paths: ""
+
+  web:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.0
+          targets: wasm32-unknown-unknown
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked --version 0.13.1
+      - name: Install web dependencies
+        working-directory: web
+        run: bun install
+      - name: Build browser MVP
+        working-directory: web
+        run: bun run build
