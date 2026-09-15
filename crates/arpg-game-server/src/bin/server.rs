@@ -17,13 +17,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .ok()
         .and_then(|value| value.parse::<u16>().ok())
         .unwrap_or(DEFAULT_PORT);
-    let certificate_pem = PathBuf::from(
-        env::var("ARPG_SERVER_CERT_PEM").unwrap_or_else(|_| "cert.pem".to_owned()),
-    );
+    let certificate_pem =
+        PathBuf::from(env::var("ARPG_SERVER_CERT_PEM").unwrap_or_else(|_| "cert.pem".to_owned()));
     let private_key_pem =
         PathBuf::from(env::var("ARPG_SERVER_KEY_PEM").unwrap_or_else(|_| "key.pem".to_owned()));
     let session_path = env::var("ARPG_SERVER_SESSION_PATH").unwrap_or_else(|_| "/arpg".to_owned());
-    let recovery_path = env::var("ARPG_SERVER_RECOVERY_PATH").ok().map(PathBuf::from);
+    let recovery_path = env::var("ARPG_SERVER_RECOVERY_PATH")
+        .ok()
+        .map(PathBuf::from);
     let drain_grace_ms = env::var("ARPG_SERVER_DRAIN_GRACE_MS")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
