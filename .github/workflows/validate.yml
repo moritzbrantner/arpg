@@ -42,3 +42,11 @@ jobs:
       - name: Build browser MVP
         working-directory: web
         run: bun run build
+      - name: Capture generated lockfiles
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: generated-lockfiles
+          path: |
+            Cargo.lock
+            web/bun.lock
+          if-no-files-found: error
