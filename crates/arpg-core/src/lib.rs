@@ -11,7 +11,7 @@ pub type PlayerId = u32;
 pub const TICK_HZ: u16 = 60;
 pub const MAX_PLAYERS: usize = 4;
 pub const WORLD_UNITS_PER_METER: i32 = 100;
-const PLAYER_SPEED: i32 = 7 * TICK_HZ as i32;
+const PLAYER_SPEED: i32 = 420;
 const PLAYER_DIAGONAL_SPEED: i32 = 297;
 const PLAYER_BODY_BASE: u64 = 1_000;
 const STATIC_BODY_BASE: u64 = 10_000;
@@ -215,11 +215,7 @@ impl ArpgGame {
         let x = i32::from(state.movement_x.clamp(-1, 1));
         let z = i32::from(state.movement_z.clamp(-1, 1));
         if x != 0 && z != 0 {
-            Vec3i::new(
-                x * PLAYER_DIAGONAL_SPEED,
-                0,
-                z * PLAYER_DIAGONAL_SPEED,
-            )
+            Vec3i::new(x * PLAYER_DIAGONAL_SPEED, 0, z * PLAYER_DIAGONAL_SPEED)
         } else {
             Vec3i::new(x * PLAYER_SPEED, 0, z * PLAYER_SPEED)
         }
