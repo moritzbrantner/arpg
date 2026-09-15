@@ -187,14 +187,9 @@ function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [profile, setProfile] = useState(loadProfile);
   const [graphics, setGraphics] = useState(loadGraphics);
-  const [setupUrl, setSetupUrl] = useState(() => {
-    const params = new URLSearchParams(location.search);
-    return (
-      params.get("setup") ??
-      localStorage.getItem(SETUP_URL_KEY) ??
-      "http://127.0.0.1:8787"
-    );
-  });
+  const [setupUrl, setSetupUrl] = useState(
+    () => localStorage.getItem(SETUP_URL_KEY) ?? "http://127.0.0.1:8787",
+  );
   const [lobbyCode, setLobbyCode] = useState("");
   const [joinCode, setJoinCode] = useState(
     () => new URLSearchParams(location.search).get("join") ?? "",
@@ -505,11 +500,10 @@ function App() {
   };
 
   const copyInvite = async () => {
-    const url = new URL(location.href);
+    const url = new URL(location.pathname, location.origin);
     url.searchParams.set("join", lobbyCode);
-    url.searchParams.set("setup", setupUrl);
     await navigator.clipboard.writeText(url.toString());
-    setStatus("Invite URL copied; capability tokens were not included");
+    setStatus("Invite URL copied with public lobby code only");
   };
 
   return (
