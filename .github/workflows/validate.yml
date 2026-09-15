@@ -4,11 +4,11 @@ on:
   push:
   pull_request:
 
-permissions:
-  contents: read
-
 jobs:
   rust:
+    permissions:
+      contents: read
+      packages: read
     uses: moritzbrantner/reusable-workflows/.github/workflows/validate-repo.yml@28a77d034ce18595e5f058f81e8063ea67d23bd9
     with:
       bun_version: ""
