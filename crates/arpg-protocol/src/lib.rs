@@ -6,7 +6,7 @@ use std::fmt;
 use arpg_core::{ArpgCommand, ArpgSnapshot};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProtocolError {
@@ -99,21 +99,21 @@ mod tests {
         let protocol = JsonProtocol;
         let command = ArpgCommand::SetMovement { x: -1, z: 1 };
         let bytes = protocol.encode_command(&command).unwrap();
-        assert!(
-            String::from_utf8(bytes.clone())
-                .unwrap()
-                .contains("protocolVersion")
-        );
+        let encoded = String::from_utf8(bytes.clone()).unwrap();
+        assert!(encoded.contains("\"protocolVersion\":2"));
         assert_eq!(protocol.decode_command(&bytes).unwrap(), command);
     }
 
     #[test]
-    fn snapshot_round_trip_preserves_authoritative_state() {
-        let mut game = ArpgGame::new().unwrap();
+    fn snapshot_round_trip_preserves_authoritative_run_seed() {
+        let mut game = ArpgGame::new_with_seed(0xCAFE_BABE).unwrap();
         game.add_player(1).unwrap();
         let snapshot = game.snapshot().unwrap();
         let protocol = JsonProtocol;
         let bytes = protocol.encode_snapshot(&snapshot).unwrap();
-        assert_eq!(protocol.decode_snapshot(&bytes).unwrap(), snapshot);
+        let decoded = protocol.decode_snapshot(&bytes).unwrap();
+        assert_eq!(decoded, snapshot);
+        assert_eq!(decoded.run_seed, 0xCAFE_BABE);
+        assert_eq!(decoded.schema_version, 2);
     }
 }
