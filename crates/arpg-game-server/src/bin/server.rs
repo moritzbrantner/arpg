@@ -5,7 +5,8 @@ use game_server::{DEFAULT_RECONNECT_GRACE_TICKS, WebTransportConfig, serve_with_
 use std::env;
 use std::error::Error;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::process;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 
 const DEFAULT_PORT: u16 = 4433;
@@ -29,8 +30,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(DEFAULT_DRAIN_GRACE_MS);
+    let run_seed = selected_run_seed()?;
 
-    let simulation = GameServerAdapter::new(ArpgGame::new()?, JsonProtocol);
+    eprintln!("ARPG run seed: {run_seed}");
+    let simulation = GameServerAdapter::new(ArpgGame::new_with_seed(run_seed)?, JsonProtocol);
     let (shutdown_sender, shutdown_receiver) = mpsc::channel(1);
     install_shutdown_forwarder(shutdown_sender)?;
 
@@ -49,6 +52,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
     )
     .await?;
     Ok(())
+}
+
+fn selected_run_seed() -> Result<u32, Box<dyn Error>> {
+    if let Ok(value) = env::var("ARPG_RUN_SEED") {
+        return Ok(value.parse()?);
+    }
+
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    Ok((nanos as u32)
+        ^ ((nanos >> 32) as u32)
+        ^ ((nanos >> 64) as u32)
+        ^ process::id())
 }
 
 #[cfg(unix)]
