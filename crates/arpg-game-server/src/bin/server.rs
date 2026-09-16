@@ -60,10 +60,7 @@ fn selected_run_seed() -> Result<u32, Box<dyn Error>> {
     }
 
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-    Ok((nanos as u32)
-        ^ ((nanos >> 32) as u32)
-        ^ ((nanos >> 64) as u32)
-        ^ process::id())
+    Ok((nanos as u32) ^ ((nanos >> 32) as u32) ^ ((nanos >> 64) as u32) ^ process::id())
 }
 
 #[cfg(unix)]
