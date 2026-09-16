@@ -8,6 +8,7 @@ use physics_engine::{BodyId, RigidBody, Vec3i, World, WorldConfig};
 use serde::{Deserialize, Serialize};
 
 pub type PlayerId = u32;
+pub type RunSeed = u32;
 pub const TICK_HZ: u16 = 60;
 pub const MAX_PLAYERS: usize = 4;
 pub const WORLD_UNITS_PER_METER: i32 = 100;
@@ -19,7 +20,7 @@ const PLAYER_HALF_EXTENTS: Vec3i = Vec3i::new(30, 50, 30);
 const PLAYER_Y: i32 = 50;
 const ATTACK_RANGE: i64 = 220;
 const ATTACK_DAMAGE: u16 = 25;
-const DEFAULT_DUNGEON_SEED: u64 = 0xA4_2026_0916;
+const DEFAULT_DUNGEON_SEED: RunSeed = 0xA420_0916;
 const ARENA_HALF_WIDTH: i32 = 900;
 const ARENA_HALF_DEPTH: i32 = 650;
 const WALL_HALF_THICKNESS: i32 = 25;
@@ -102,6 +103,7 @@ pub enum ArpgCommand {
 #[serde(rename_all = "camelCase")]
 pub struct ArpgSnapshot {
     pub schema_version: u16,
+    pub run_seed: RunSeed,
     pub tick: u64,
     pub world_units_per_meter: i32,
     pub players: Vec<PlayerSnapshot>,
@@ -188,6 +190,7 @@ impl DungeonRng {
 
 #[derive(Debug)]
 pub struct ArpgGame {
+    run_seed: RunSeed,
     tick: u64,
     world: World,
     players: BTreeMap<PlayerId, PlayerState>,
@@ -207,12 +210,12 @@ impl ArpgGame {
         Self::new_with_seed(DEFAULT_DUNGEON_SEED)
     }
 
-    pub fn new_with_seed(seed: u64) -> Result<Self, GameError> {
+    pub fn new_with_seed(run_seed: RunSeed) -> Result<Self, GameError> {
         let mut world = World::new(WorldConfig {
             gravity: Vec3i::ZERO,
             ..WorldConfig::default()
         });
-        let static_colliders = procedural_dungeon_colliders(seed);
+        let static_colliders = procedural_dungeon_colliders(run_seed);
         for collider in &static_colliders {
             world
                 .add_body(RigidBody::fixed(
@@ -224,6 +227,7 @@ impl ArpgGame {
         }
 
         Ok(Self {
+            run_seed,
             tick: 0,
             world,
             players: BTreeMap::new(),
@@ -247,6 +251,10 @@ impl ArpgGame {
             ],
             static_colliders,
         })
+    }
+
+    pub fn run_seed(&self) -> RunSeed {
+        self.run_seed
     }
 
     fn player_body_id(player_id: PlayerId) -> BodyId {
@@ -410,7 +418,8 @@ impl AuthoritativeGame for ArpgGame {
             .collect::<Result<Vec<_>, GameError>>()?;
 
         Ok(ArpgSnapshot {
-            schema_version: 1,
+            schema_version: 2,
+            run_seed: self.run_seed,
             tick: self.tick,
             world_units_per_meter: WORLD_UNITS_PER_METER,
             players,
@@ -429,9 +438,9 @@ impl AuthoritativeGame for ArpgGame {
     }
 }
 
-fn procedural_dungeon_colliders(seed: u64) -> Vec<StaticColliderSnapshot> {
+fn procedural_dungeon_colliders(seed: RunSeed) -> Vec<StaticColliderSnapshot> {
     let mut colliders = Vec::new();
-    let mut rng = DungeonRng::new(seed);
+    let mut rng = DungeonRng::new(u64::from(seed));
     let left_partition_x = rng.range_i32(-160, -40);
     let right_partition_x = rng.range_i32(300, 460);
     let horizontal_partition_z = rng.range_i32(-80, 120);
@@ -644,6 +653,19 @@ mod tests {
         assert_eq!(first, replay);
         assert_ne!(first, different_seed);
         assert!(first.len() > 4, "expected generated internal room walls");
+    }
+
+    #[test]
+    fn snapshot_carries_run_seed_for_replay() {
+        let game = ArpgGame::new_with_seed(0xDEAD_BEEF).unwrap();
+        let snapshot = game.snapshot().unwrap();
+        assert_eq!(snapshot.schema_version, 2);
+        assert_eq!(snapshot.run_seed, 0xDEAD_BEEF);
+        assert_eq!(game.run_seed(), snapshot.run_seed);
+        assert_eq!(
+            snapshot.static_colliders,
+            procedural_dungeon_colliders(snapshot.run_seed)
+        );
     }
 
     #[test]
