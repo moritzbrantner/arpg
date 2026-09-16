@@ -557,10 +557,7 @@ fn generate_dungeon(seed: RunSeed) -> GeneratedDungeon {
         );
     }
 
-    let rows = [
-        (interior_z_min, lower_z_max),
-        (upper_z_min, interior_z_max),
-    ];
+    let rows = [(interior_z_min, lower_z_max), (upper_z_min, interior_z_max)];
     let rooms = generated_rooms(columns, rows);
     let start_room = rooms
         .iter()
@@ -786,7 +783,10 @@ mod tests {
         assert_eq!(first.rooms, replay.rooms);
         assert_eq!(first.static_colliders, replay.static_colliders);
         assert_eq!(first.player_spawns, replay.player_spawns);
-        assert_eq!(monster_layout(&first.monsters), monster_layout(&replay.monsters));
+        assert_eq!(
+            monster_layout(&first.monsters),
+            monster_layout(&replay.monsters)
+        );
         assert_ne!(first.rooms, different_seed.rooms);
         assert!(
             first.static_colliders.len() > 4,
@@ -916,7 +916,8 @@ mod tests {
             .body(ArpgGame::player_body_id(1))
             .unwrap()
             .position();
-        game.monsters[0].position = Vec3i::new(player_position.x + 100, PLAYER_Y, player_position.z);
+        game.monsters[0].position =
+            Vec3i::new(player_position.x + 100, PLAYER_Y, player_position.z);
         for sequence in 1..=4 {
             game.apply_command(
                 PlayerCommand::new(1, sequence, ArpgCommand::PrimaryAttack).unwrap(),
