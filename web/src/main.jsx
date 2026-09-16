@@ -184,7 +184,7 @@ function App() {
   const sessionRef = useRef(null);
   const peerPlayersRef = useRef(new Map());
   const sequenceRef = useRef(0);
-  const initialRunSeedRef = useRef(requestedRunSeed());
+  const initialRunSeedRef = useRef(requestedRunSeed() ?? freshRunSeed());
   const movementRef = useRef({
     forward: false,
     backward: false,
@@ -403,8 +403,7 @@ function App() {
     initWasm()
       .then(() => {
         if (cancelled) return;
-        createAuthority(initialRunSeedRef.current ?? freshRunSeed());
-        initialRunSeedRef.current = null;
+        createAuthority(initialRunSeedRef.current);
         setReady(true);
         setStatus("Local Rust/Wasm authority");
       })
