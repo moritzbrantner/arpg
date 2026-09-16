@@ -128,6 +128,7 @@ pub struct RoomSnapshot {
 }
 
 impl RoomSnapshot {
+    #[cfg(test)]
     fn contains_xz(&self, position: Vec3i) -> bool {
         position.x >= self.min_x
             && position.x <= self.max_x
