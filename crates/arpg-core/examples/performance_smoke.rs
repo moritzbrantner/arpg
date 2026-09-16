@@ -8,7 +8,8 @@ const TICKS: u64 = 3_600;
 fn run_journey() -> arpg_core::ArpgSnapshot {
     let mut game = ArpgGame::new().expect("built-in ARPG fixture must be valid");
     for player_id in 1..=4 {
-        game.add_player(player_id).expect("player fixture must be valid");
+        game.add_player(player_id)
+            .expect("player fixture must be valid");
     }
 
     let mut sequences = [1_u32; 4];
@@ -40,12 +41,8 @@ fn run_journey() -> arpg_core::ArpgSnapshot {
             for player_id in 1..=4 {
                 let index = usize::try_from(player_id - 1).expect("bounded player index");
                 game.apply_command(
-                    PlayerCommand::new(
-                        player_id,
-                        sequences[index],
-                        ArpgCommand::PrimaryAttack,
-                    )
-                    .expect("attack command sequence is valid"),
+                    PlayerCommand::new(player_id, sequences[index], ArpgCommand::PrimaryAttack)
+                        .expect("attack command sequence is valid"),
                 )
                 .expect("attack command must remain valid");
                 sequences[index] += 1;
@@ -59,7 +56,8 @@ fn run_journey() -> arpg_core::ArpgSnapshot {
         }
     }
 
-    game.snapshot().expect("final ARPG snapshot must remain valid")
+    game.snapshot()
+        .expect("final ARPG snapshot must remain valid")
 }
 
 fn main() {
@@ -71,7 +69,10 @@ fn main() {
         let snapshot = run_journey();
         elapsed_ns.push(started.elapsed().as_nanos());
         if let Some(reference) = &expected {
-            assert_eq!(&snapshot, reference, "ARPG performance journey became nondeterministic");
+            assert_eq!(
+                &snapshot, reference,
+                "ARPG performance journey became nondeterministic"
+            );
         } else {
             expected = Some(snapshot);
         }
