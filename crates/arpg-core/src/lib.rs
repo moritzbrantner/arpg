@@ -8,6 +8,7 @@ use physics_engine::{BodyId, RigidBody, Vec3i, World, WorldConfig};
 use serde::{Deserialize, Serialize};
 
 pub type PlayerId = u32;
+pub type RoomId = u32;
 pub type RunSeed = u32;
 pub const TICK_HZ: u16 = 60;
 pub const MAX_PLAYERS: usize = 4;
@@ -28,6 +29,8 @@ const WALL_HALF_HEIGHT: i32 = 100;
 const DOOR_HALF_WIDTH: i32 = 90;
 const PARTITION_MARGIN: i32 = 25;
 const DOOR_EDGE_MARGIN: i32 = 140;
+const ROOM_SPAWN_MARGIN: i32 = 100;
+const PLAYER_SPAWN_OFFSET: i32 = 60;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GameError {
@@ -106,9 +109,43 @@ pub struct ArpgSnapshot {
     pub run_seed: RunSeed,
     pub tick: u64,
     pub world_units_per_meter: i32,
+    pub rooms: Vec<RoomSnapshot>,
     pub players: Vec<PlayerSnapshot>,
     pub monsters: Vec<MonsterSnapshot>,
     pub static_colliders: Vec<StaticColliderSnapshot>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomSnapshot {
+    pub id: RoomId,
+    pub min_x: i32,
+    pub max_x: i32,
+    pub min_z: i32,
+    pub max_z: i32,
+    pub kind: RoomKind,
+    pub neighbors: Vec<RoomId>,
+}
+
+impl RoomSnapshot {
+    #[cfg(test)]
+    fn contains_xz(&self, position: Vec3i) -> bool {
+        position.x >= self.min_x
+            && position.x <= self.max_x
+            && position.z >= self.min_z
+            && position.z <= self.max_z
+    }
+
+    fn center(&self) -> (i32, i32) {
+        ((self.min_x + self.max_x) / 2, (self.min_z + self.max_z) / 2)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RoomKind {
+    Start,
+    Combat,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -123,6 +160,7 @@ pub struct PlayerSnapshot {
 #[serde(rename_all = "camelCase")]
 pub struct MonsterSnapshot {
     pub id: u32,
+    pub room_id: RoomId,
     pub position: [i32; 3],
     pub health: u16,
     pub alive: bool,
@@ -154,6 +192,7 @@ struct PlayerState {
 #[derive(Clone, Copy, Debug)]
 struct MonsterState {
     id: u32,
+    room_id: RoomId,
     position: Vec3i,
     health: u16,
 }
@@ -189,12 +228,22 @@ impl DungeonRng {
 }
 
 #[derive(Debug)]
+struct GeneratedDungeon {
+    rooms: Vec<RoomSnapshot>,
+    static_colliders: Vec<StaticColliderSnapshot>,
+    player_spawns: [Vec3i; MAX_PLAYERS],
+    monsters: Vec<MonsterState>,
+}
+
+#[derive(Debug)]
 pub struct ArpgGame {
     run_seed: RunSeed,
     tick: u64,
     world: World,
     players: BTreeMap<PlayerId, PlayerState>,
     last_sequences: BTreeMap<PlayerId, u32>,
+    rooms: Vec<RoomSnapshot>,
+    player_spawns: [Vec3i; MAX_PLAYERS],
     monsters: Vec<MonsterState>,
     static_colliders: Vec<StaticColliderSnapshot>,
 }
@@ -215,7 +264,12 @@ impl ArpgGame {
             gravity: Vec3i::ZERO,
             ..WorldConfig::default()
         });
-        let static_colliders = procedural_dungeon_colliders(run_seed);
+        let GeneratedDungeon {
+            rooms,
+            static_colliders,
+            player_spawns,
+            monsters,
+        } = generate_dungeon(run_seed);
         for collider in &static_colliders {
             world
                 .add_body(RigidBody::fixed(
@@ -232,23 +286,9 @@ impl ArpgGame {
             world,
             players: BTreeMap::new(),
             last_sequences: BTreeMap::new(),
-            monsters: vec![
-                MonsterState {
-                    id: 1,
-                    position: Vec3i::new(-500, PLAYER_Y, -350),
-                    health: 100,
-                },
-                MonsterState {
-                    id: 2,
-                    position: Vec3i::new(150, PLAYER_Y, 300),
-                    health: 100,
-                },
-                MonsterState {
-                    id: 3,
-                    position: Vec3i::new(650, PLAYER_Y, -300),
-                    health: 100,
-                },
-            ],
+            rooms,
+            player_spawns,
+            monsters,
             static_colliders,
         })
     }
@@ -324,7 +364,7 @@ impl AuthoritativeGame for ArpgGame {
             return Err(GameError::new("ARPG MVP player capacity reached"));
         }
 
-        let spawn = spawn_position(self.players.len());
+        let spawn = self.player_spawns[self.players.len()];
         self.world
             .add_body(RigidBody::dynamic(
                 Self::player_body_id(player_id),
@@ -418,16 +458,18 @@ impl AuthoritativeGame for ArpgGame {
             .collect::<Result<Vec<_>, GameError>>()?;
 
         Ok(ArpgSnapshot {
-            schema_version: 2,
+            schema_version: 3,
             run_seed: self.run_seed,
             tick: self.tick,
             world_units_per_meter: WORLD_UNITS_PER_METER,
+            rooms: self.rooms.clone(),
             players,
             monsters: self
                 .monsters
                 .iter()
                 .map(|monster| MonsterSnapshot {
                     id: monster.id,
+                    room_id: monster.room_id,
                     position: vec_to_array(monster.position),
                     health: monster.health,
                     alive: monster.health > 0,
@@ -438,7 +480,7 @@ impl AuthoritativeGame for ArpgGame {
     }
 }
 
-fn procedural_dungeon_colliders(seed: RunSeed) -> Vec<StaticColliderSnapshot> {
+fn generate_dungeon(seed: RunSeed) -> GeneratedDungeon {
     let mut colliders = Vec::new();
     let mut rng = DungeonRng::new(u64::from(seed));
     let left_partition_x = rng.range_i32(-160, -40);
@@ -516,7 +558,103 @@ fn procedural_dungeon_colliders(seed: RunSeed) -> Vec<StaticColliderSnapshot> {
         );
     }
 
-    colliders
+    let rows = [(interior_z_min, lower_z_max), (upper_z_min, interior_z_max)];
+    let rooms = generated_rooms(columns, rows);
+    let start_room = rooms
+        .iter()
+        .find(|room| room.kind == RoomKind::Start)
+        .expect("generated dungeon must contain a start room");
+    let player_spawns = generated_player_spawns(start_room);
+    let monsters = generated_monsters(&rooms, &mut rng);
+
+    GeneratedDungeon {
+        rooms,
+        static_colliders: colliders,
+        player_spawns,
+        monsters,
+    }
+}
+
+fn generated_rooms(columns: [(i32, i32); 3], rows: [(i32, i32); 2]) -> Vec<RoomSnapshot> {
+    let neighbors = [
+        vec![2, 4],
+        vec![1, 3, 5],
+        vec![2, 6],
+        vec![1, 5],
+        vec![2, 4, 6],
+        vec![3, 5],
+    ];
+    let mut rooms = Vec::with_capacity(6);
+    for (row_index, &(min_z, max_z)) in rows.iter().enumerate() {
+        for (column_index, &(min_x, max_x)) in columns.iter().enumerate() {
+            let index = row_index * columns.len() + column_index;
+            let id = u32::try_from(index + 1).expect("room id must fit u32");
+            rooms.push(RoomSnapshot {
+                id,
+                min_x,
+                max_x,
+                min_z,
+                max_z,
+                kind: if id == 1 {
+                    RoomKind::Start
+                } else {
+                    RoomKind::Combat
+                },
+                neighbors: neighbors[index].clone(),
+            });
+        }
+    }
+    rooms
+}
+
+fn generated_player_spawns(start_room: &RoomSnapshot) -> [Vec3i; MAX_PLAYERS] {
+    let (center_x, center_z) = start_room.center();
+    [
+        Vec3i::new(
+            center_x - PLAYER_SPAWN_OFFSET,
+            PLAYER_Y,
+            center_z - PLAYER_SPAWN_OFFSET,
+        ),
+        Vec3i::new(
+            center_x - PLAYER_SPAWN_OFFSET,
+            PLAYER_Y,
+            center_z + PLAYER_SPAWN_OFFSET,
+        ),
+        Vec3i::new(
+            center_x + PLAYER_SPAWN_OFFSET,
+            PLAYER_Y,
+            center_z - PLAYER_SPAWN_OFFSET,
+        ),
+        Vec3i::new(
+            center_x + PLAYER_SPAWN_OFFSET,
+            PLAYER_Y,
+            center_z + PLAYER_SPAWN_OFFSET,
+        ),
+    ]
+}
+
+fn generated_monsters(rooms: &[RoomSnapshot], rng: &mut DungeonRng) -> Vec<MonsterState> {
+    rooms
+        .iter()
+        .filter(|room| room.kind == RoomKind::Combat)
+        .enumerate()
+        .map(|(index, room)| MonsterState {
+            id: u32::try_from(index + 1).expect("monster id must fit u32"),
+            room_id: room.id,
+            position: Vec3i::new(
+                rng.range_i32(
+                    room.min_x + ROOM_SPAWN_MARGIN,
+                    room.max_x - ROOM_SPAWN_MARGIN,
+                ),
+                PLAYER_Y,
+                rng.range_i32(
+                    room.min_z + ROOM_SPAWN_MARGIN,
+                    room.max_z - ROOM_SPAWN_MARGIN,
+                ),
+            ),
+            health: 100,
+        })
+        .collect()
 }
 
 fn push_vertical_wall_with_door(
@@ -595,16 +733,6 @@ fn push_wall(
     });
 }
 
-fn spawn_position(index: usize) -> Vec3i {
-    const SPAWNS: [Vec3i; MAX_PLAYERS] = [
-        Vec3i::new(-650, PLAYER_Y, -350),
-        Vec3i::new(-650, PLAYER_Y, -230),
-        Vec3i::new(-530, PLAYER_Y, -350),
-        Vec3i::new(-530, PLAYER_Y, -230),
-    ];
-    SPAWNS[index]
-}
-
 fn physics_error(error: impl fmt::Display) -> GameError {
     GameError::new(format!("physics-engine: {error}"))
 }
@@ -619,6 +747,8 @@ const fn array_to_vec(value: [i32; 3]) -> Vec3i {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
 
     #[test]
@@ -647,31 +777,98 @@ mod tests {
 
     #[test]
     fn procedural_dungeon_is_seeded_and_deterministic() {
-        let first = procedural_dungeon_colliders(42);
-        let replay = procedural_dungeon_colliders(42);
-        let different_seed = procedural_dungeon_colliders(43);
-        assert_eq!(first, replay);
-        assert_ne!(first, different_seed);
-        assert!(first.len() > 4, "expected generated internal room walls");
-    }
+        let first = generate_dungeon(42);
+        let replay = generate_dungeon(42);
+        let different_seed = generate_dungeon(43);
 
-    #[test]
-    fn snapshot_carries_run_seed_for_replay() {
-        let game = ArpgGame::new_with_seed(0xDEAD_BEEF).unwrap();
-        let snapshot = game.snapshot().unwrap();
-        assert_eq!(snapshot.schema_version, 2);
-        assert_eq!(snapshot.run_seed, 0xDEAD_BEEF);
-        assert_eq!(game.run_seed(), snapshot.run_seed);
+        assert_eq!(first.rooms, replay.rooms);
+        assert_eq!(first.static_colliders, replay.static_colliders);
+        assert_eq!(first.player_spawns, replay.player_spawns);
         assert_eq!(
-            snapshot.static_colliders,
-            procedural_dungeon_colliders(snapshot.run_seed)
+            monster_layout(&first.monsters),
+            monster_layout(&replay.monsters)
+        );
+        assert_ne!(first.rooms, different_seed.rooms);
+        assert!(
+            first.static_colliders.len() > 4,
+            "expected generated internal room walls"
         );
     }
 
     #[test]
+    fn generated_room_graph_is_connected_and_symmetric() {
+        let dungeon = generate_dungeon(42);
+        assert_eq!(dungeon.rooms.len(), 6);
+
+        let mut seen = BTreeSet::new();
+        let mut pending = vec![dungeon.rooms[0].id];
+        while let Some(room_id) = pending.pop() {
+            if !seen.insert(room_id) {
+                continue;
+            }
+            let room = dungeon
+                .rooms
+                .iter()
+                .find(|room| room.id == room_id)
+                .expect("neighbor must reference an existing room");
+            for &neighbor_id in &room.neighbors {
+                let neighbor = dungeon
+                    .rooms
+                    .iter()
+                    .find(|candidate| candidate.id == neighbor_id)
+                    .expect("neighbor must reference an existing room");
+                assert!(
+                    neighbor.neighbors.contains(&room.id),
+                    "room {} -> {} connection must be symmetric",
+                    room.id,
+                    neighbor_id
+                );
+                pending.push(neighbor_id);
+            }
+        }
+        assert_eq!(seen.len(), dungeon.rooms.len());
+    }
+
+    #[test]
+    fn generated_spawns_stay_inside_their_rooms() {
+        let dungeon = generate_dungeon(0xC0FF_EE11);
+        let start_room = dungeon
+            .rooms
+            .iter()
+            .find(|room| room.kind == RoomKind::Start)
+            .unwrap();
+        for spawn in dungeon.player_spawns {
+            assert!(start_room.contains_xz(spawn));
+        }
+        for monster in &dungeon.monsters {
+            let room = dungeon
+                .rooms
+                .iter()
+                .find(|room| room.id == monster.room_id)
+                .unwrap();
+            assert_eq!(room.kind, RoomKind::Combat);
+            assert!(room.contains_xz(monster.position));
+        }
+    }
+
+    #[test]
+    fn snapshot_carries_run_seed_and_room_semantics_for_replay() {
+        let game = ArpgGame::new_with_seed(0xDEAD_BEEF).unwrap();
+        let snapshot = game.snapshot().unwrap();
+        let generated = generate_dungeon(snapshot.run_seed);
+        assert_eq!(snapshot.schema_version, 3);
+        assert_eq!(snapshot.run_seed, 0xDEAD_BEEF);
+        assert_eq!(game.run_seed(), snapshot.run_seed);
+        assert_eq!(snapshot.rooms, generated.rooms);
+        assert_eq!(snapshot.static_colliders, generated.static_colliders);
+        assert_eq!(snapshot.monsters.len(), generated.monsters.len());
+        assert!(snapshot.monsters.iter().all(|monster| monster.room_id > 1));
+    }
+
+    #[test]
     fn procedural_dungeon_keeps_outer_boundary_stable() {
-        let first = procedural_dungeon_colliders(1);
-        let second = procedural_dungeon_colliders(2);
+        let first = generate_dungeon(1).static_colliders;
+        let second = generate_dungeon(2).static_colliders;
         assert_eq!(&first[..4], &second[..4]);
         assert_eq!(first[0].position, [0, PLAYER_Y, -ARENA_HALF_DEPTH]);
         assert_eq!(first[1].position, [0, PLAYER_Y, ARENA_HALF_DEPTH]);
@@ -715,6 +912,13 @@ mod tests {
     fn primary_attack_is_core_owned_and_deterministic() {
         let mut game = ArpgGame::new().unwrap();
         game.add_player(1).unwrap();
+        let player_position = game
+            .world
+            .body(ArpgGame::player_body_id(1))
+            .unwrap()
+            .position();
+        game.monsters[0].position =
+            Vec3i::new(player_position.x + 100, PLAYER_Y, player_position.z);
         for sequence in 1..=4 {
             game.apply_command(
                 PlayerCommand::new(1, sequence, ArpgCommand::PrimaryAttack).unwrap(),
@@ -741,5 +945,12 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(error.message(), "command sequence is stale");
+    }
+
+    fn monster_layout(monsters: &[MonsterState]) -> Vec<(u32, RoomId, [i32; 3])> {
+        monsters
+            .iter()
+            .map(|monster| (monster.id, monster.room_id, vec_to_array(monster.position)))
+            .collect()
     }
 }
