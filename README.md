@@ -9,11 +9,12 @@ The MVP is intentionally an **integration proof**: gameplay truth lives in one d
 The browser slice currently proves:
 
 - WASD top-down movement with diagonal normalization;
-- a bounded dungeon with walls and pillars resolved by `physics-engine`;
+- a procedurally partitioned, seeded dungeon whose walls and doorways are resolved by `physics-engine`;
 - an isometric follow camera and simple 3D scene rendered through `3d-lab`;
 - nearby primary attacks against deterministic monster state;
 - a settings menu with graphics controls and the reusable `input-bindings` keybinding editor;
 - local Rust/Wasm play;
+- one fresh 32-bit run seed per new authority, carried in authoritative snapshots so multiplayer and replay evidence identify the exact generated dungeon;
 - host-authoritative peer co-op using `multiplayer-setup-service` for rendezvous and direct WebRTC data channels for commands/snapshots;
 - the same `ArpgGame` exercised through `game-server::MatchRuntime`, with an equivalence test requiring the dedicated-runtime and direct-local paths to produce the same typed snapshot for the same input stream;
 - a runnable TLS/WebTransport dedicated server using the shared `game-server` transport, reconnect, recovery, tick, and shutdown machinery;
@@ -43,6 +44,8 @@ Neither renderer nor network transport is a source of gameplay truth.
 - **Dedicated online** — `arpg-game-server` adapts the same core/protocol into `game-server` and includes a runnable TLS/WebTransport host. The MVP proves the actual `MatchRuntime` boundary with deterministic equivalence tests. Wiring the browser menu to that dedicated endpoint is the next client-facing slice.
 
 Peer-hosted co-op is a convenience/trust mode, not an anti-cheat boundary. The host can cheat. Dedicated play is the trusted authority model.
+
+Every new local or peer-hosted authority receives a fresh browser-generated run seed. Guests do not generate an alternate seed: they receive the host's seed as part of the authoritative snapshot. For deterministic local reproduction, open the browser with `?seed=<u32>`; starting another local game afterward intentionally creates a fresh seed.
 
 ## Run locally
 
@@ -75,7 +78,7 @@ ARPG_SERVER_KEY_PEM=key.pem \
 cargo run -p arpg-game-server --bin server
 ```
 
-The dedicated host defaults to UDP port `4433` and session path `/arpg`. Optional configuration is available through `ARPG_SERVER_PORT`, `ARPG_SERVER_SESSION_PATH`, `ARPG_SERVER_RECOVERY_PATH`, and `ARPG_SERVER_DRAIN_GRACE_MS`.
+The dedicated host defaults to UDP port `4433` and session path `/arpg`. Optional configuration is available through `ARPG_SERVER_PORT`, `ARPG_SERVER_SESSION_PATH`, `ARPG_SERVER_RECOVERY_PATH`, and `ARPG_SERVER_DRAIN_GRACE_MS`. A fresh run seed is generated once when the process starts and logged for replay evidence; set `ARPG_RUN_SEED=<u32>` to reproduce a known run exactly.
 
 ## Pinned foundations
 

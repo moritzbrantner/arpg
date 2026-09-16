@@ -13,7 +13,7 @@ import "./styles.css";
 const PROFILE_KEY = "arpg-input-profile-v1";
 const SETUP_URL_KEY = "arpg-setup-service-url-v1";
 const GRAPHICS_KEY = "arpg-graphics-v1";
-const PROTOCOL_VERSION = 1;
+const PROTOCOL_VERSION = 2;
 const gameplayContext = { op: "context", id: "gameplay" };
 
 const physical = (id, action, code, when = gameplayContext) => ({
@@ -78,6 +78,19 @@ function loadGraphics() {
     // Invalid local presentation settings fall back to known-safe defaults.
   }
   return { shadows: true, pixelRatioLimit: 2 };
+}
+
+function freshRunSeed() {
+  const values = new Uint32Array(1);
+  globalThis.crypto.getRandomValues(values);
+  return values[0];
+}
+
+function requestedRunSeed() {
+  const raw = new URLSearchParams(location.search).get("seed");
+  if (raw === null) return null;
+  const parsed = Number(raw);
+  return Number.isInteger(parsed) && parsed >= 0 && parsed <= 0xffff_ffff ? parsed : null;
 }
 
 function encodeCommand(payload) {
@@ -171,6 +184,7 @@ function App() {
   const sessionRef = useRef(null);
   const peerPlayersRef = useRef(new Map());
   const sequenceRef = useRef(0);
+  const initialRunSeedRef = useRef(requestedRunSeed() ?? freshRunSeed());
   const movementRef = useRef({
     forward: false,
     backward: false,
@@ -225,9 +239,9 @@ function App() {
     }
   };
 
-  const createAuthority = () => {
+  const createAuthority = (runSeed = freshRunSeed()) => {
     gameRef.current?.free?.();
-    const game = new WasmGame();
+    const game = new WasmGame(runSeed);
     game.addPlayer(1);
     gameRef.current = game;
     sequenceRef.current = 0;
@@ -389,7 +403,7 @@ function App() {
     initWasm()
       .then(() => {
         if (cancelled) return;
-        createAuthority();
+        createAuthority(initialRunSeedRef.current);
         setReady(true);
         setStatus("Local Rust/Wasm authority");
       })
@@ -555,6 +569,7 @@ function App() {
               <p>
                 Current mode: <strong>{mode}</strong>
                 {playerId ? ` · player ${playerId}` : ""}
+                {snapshot ? ` · run seed ${snapshot.runSeed}` : ""}
               </p>
               <button type="button" onClick={startLocal}>
                 Start local game
