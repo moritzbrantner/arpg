@@ -11,14 +11,22 @@ pub type PlayerId = u32;
 pub const TICK_HZ: u16 = 60;
 pub const MAX_PLAYERS: usize = 4;
 pub const WORLD_UNITS_PER_METER: i32 = 100;
-const PLAYER_SPEED: i32 = 420;
-const PLAYER_DIAGONAL_SPEED: i32 = 297;
+const PLAYER_SPEED: i32 = 260;
+const PLAYER_DIAGONAL_SPEED: i32 = 184;
 const PLAYER_BODY_BASE: u64 = 1_000;
 const STATIC_BODY_BASE: u64 = 10_000;
 const PLAYER_HALF_EXTENTS: Vec3i = Vec3i::new(30, 50, 30);
 const PLAYER_Y: i32 = 50;
 const ATTACK_RANGE: i64 = 220;
 const ATTACK_DAMAGE: u16 = 25;
+const DEFAULT_DUNGEON_SEED: u64 = 0xA4_2026_0916;
+const ARENA_HALF_WIDTH: i32 = 900;
+const ARENA_HALF_DEPTH: i32 = 650;
+const WALL_HALF_THICKNESS: i32 = 25;
+const WALL_HALF_HEIGHT: i32 = 100;
+const DOOR_HALF_WIDTH: i32 = 90;
+const PARTITION_MARGIN: i32 = 25;
+const DOOR_EDGE_MARGIN: i32 = 140;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GameError {
@@ -148,6 +156,36 @@ struct MonsterState {
     health: u16,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct DungeonRng {
+    state: u64,
+}
+
+impl DungeonRng {
+    fn new(seed: u64) -> Self {
+        Self {
+            state: if seed == 0 {
+                0x9E37_79B9_7F4A_7C15
+            } else {
+                seed
+            },
+        }
+    }
+
+    fn next_u32(&mut self) -> u32 {
+        self.state ^= self.state << 13;
+        self.state ^= self.state >> 7;
+        self.state ^= self.state << 17;
+        (self.state >> 32) as u32
+    }
+
+    fn range_i32(&mut self, min: i32, max: i32) -> i32 {
+        debug_assert!(min <= max);
+        let span = u32::try_from(max - min + 1).expect("dungeon range must fit u32");
+        min + i32::try_from(self.next_u32() % span).expect("range sample must fit i32")
+    }
+}
+
 #[derive(Debug)]
 pub struct ArpgGame {
     tick: u64,
@@ -166,11 +204,15 @@ impl Default for ArpgGame {
 
 impl ArpgGame {
     pub fn new() -> Result<Self, GameError> {
+        Self::new_with_seed(DEFAULT_DUNGEON_SEED)
+    }
+
+    pub fn new_with_seed(seed: u64) -> Result<Self, GameError> {
         let mut world = World::new(WorldConfig {
             gravity: Vec3i::ZERO,
             ..WorldConfig::default()
         });
-        let static_colliders = built_in_colliders();
+        let static_colliders = procedural_dungeon_colliders(seed);
         for collider in &static_colliders {
             world
                 .add_body(RigidBody::fixed(
@@ -189,17 +231,17 @@ impl ArpgGame {
             monsters: vec![
                 MonsterState {
                     id: 1,
-                    position: Vec3i::new(-250, PLAYER_Y, -200),
+                    position: Vec3i::new(-500, PLAYER_Y, -350),
                     health: 100,
                 },
                 MonsterState {
                     id: 2,
-                    position: Vec3i::new(300, PLAYER_Y, 180),
+                    position: Vec3i::new(150, PLAYER_Y, 300),
                     health: 100,
                 },
                 MonsterState {
                     id: 3,
-                    position: Vec3i::new(500, PLAYER_Y, -320),
+                    position: Vec3i::new(650, PLAYER_Y, -300),
                     health: 100,
                 },
             ],
@@ -387,70 +429,169 @@ impl AuthoritativeGame for ArpgGame {
     }
 }
 
-fn built_in_colliders() -> Vec<StaticColliderSnapshot> {
-    let definitions = [
+fn procedural_dungeon_colliders(seed: u64) -> Vec<StaticColliderSnapshot> {
+    let mut colliders = Vec::new();
+    let mut rng = DungeonRng::new(seed);
+    let left_partition_x = rng.range_i32(-160, -40);
+    let right_partition_x = rng.range_i32(300, 460);
+    let horizontal_partition_z = rng.range_i32(-80, 120);
+
+    push_wall(
+        &mut colliders,
+        [0, PLAYER_Y, -ARENA_HALF_DEPTH],
+        [ARENA_HALF_WIDTH, WALL_HALF_HEIGHT, WALL_HALF_THICKNESS],
+    );
+    push_wall(
+        &mut colliders,
+        [0, PLAYER_Y, ARENA_HALF_DEPTH],
+        [ARENA_HALF_WIDTH, WALL_HALF_HEIGHT, WALL_HALF_THICKNESS],
+    );
+    push_wall(
+        &mut colliders,
+        [-ARENA_HALF_WIDTH, PLAYER_Y, 0],
+        [WALL_HALF_THICKNESS, WALL_HALF_HEIGHT, ARENA_HALF_DEPTH],
+    );
+    push_wall(
+        &mut colliders,
+        [ARENA_HALF_WIDTH, PLAYER_Y, 0],
+        [WALL_HALF_THICKNESS, WALL_HALF_HEIGHT, ARENA_HALF_DEPTH],
+    );
+
+    let interior_z_min = -ARENA_HALF_DEPTH + WALL_HALF_THICKNESS;
+    let interior_z_max = ARENA_HALF_DEPTH - WALL_HALF_THICKNESS;
+    let lower_z_max = horizontal_partition_z - PARTITION_MARGIN;
+    let upper_z_min = horizontal_partition_z + PARTITION_MARGIN;
+    for partition_x in [left_partition_x, right_partition_x] {
+        let lower_door = rng.range_i32(
+            interior_z_min + DOOR_EDGE_MARGIN,
+            lower_z_max - DOOR_EDGE_MARGIN,
+        );
+        push_vertical_wall_with_door(
+            &mut colliders,
+            partition_x,
+            interior_z_min,
+            lower_z_max,
+            lower_door,
+        );
+        let upper_door = rng.range_i32(
+            upper_z_min + DOOR_EDGE_MARGIN,
+            interior_z_max - DOOR_EDGE_MARGIN,
+        );
+        push_vertical_wall_with_door(
+            &mut colliders,
+            partition_x,
+            upper_z_min,
+            interior_z_max,
+            upper_door,
+        );
+    }
+
+    let interior_x_min = -ARENA_HALF_WIDTH + WALL_HALF_THICKNESS;
+    let interior_x_max = ARENA_HALF_WIDTH - WALL_HALF_THICKNESS;
+    let columns = [
+        (interior_x_min, left_partition_x - PARTITION_MARGIN),
         (
-            0,
-            [0, PLAYER_Y, -650],
-            [900, 100, 25],
-            StaticColliderKind::Wall,
+            left_partition_x + PARTITION_MARGIN,
+            right_partition_x - PARTITION_MARGIN,
         ),
-        (
-            1,
-            [0, PLAYER_Y, 650],
-            [900, 100, 25],
-            StaticColliderKind::Wall,
-        ),
-        (
-            2,
-            [-900, PLAYER_Y, 0],
-            [25, 100, 650],
-            StaticColliderKind::Wall,
-        ),
-        (
-            3,
-            [900, PLAYER_Y, 0],
-            [25, 100, 650],
-            StaticColliderKind::Wall,
-        ),
-        (
-            4,
-            [0, PLAYER_Y, 0],
-            [55, 100, 55],
-            StaticColliderKind::Pillar,
-        ),
-        (
-            5,
-            [280, PLAYER_Y, -120],
-            [55, 100, 55],
-            StaticColliderKind::Pillar,
-        ),
-        (
-            6,
-            [-120, PLAYER_Y, 300],
-            [55, 100, 55],
-            StaticColliderKind::Pillar,
-        ),
+        (right_partition_x + PARTITION_MARGIN, interior_x_max),
     ];
-    definitions
-        .into_iter()
-        .map(
-            |(index, position, half_extents, kind)| StaticColliderSnapshot {
-                id: STATIC_BODY_BASE + index,
-                position,
-                half_extents,
-                kind,
-            },
-        )
-        .collect()
+    for (x_min, x_max) in columns {
+        let doorway = rng.range_i32(x_min + DOOR_EDGE_MARGIN, x_max - DOOR_EDGE_MARGIN);
+        push_horizontal_wall_with_door(
+            &mut colliders,
+            horizontal_partition_z,
+            x_min,
+            x_max,
+            doorway,
+        );
+    }
+
+    colliders
+}
+
+fn push_vertical_wall_with_door(
+    colliders: &mut Vec<StaticColliderSnapshot>,
+    x: i32,
+    z_min: i32,
+    z_max: i32,
+    doorway_z: i32,
+) {
+    push_vertical_wall_segment(colliders, x, z_min, doorway_z - DOOR_HALF_WIDTH);
+    push_vertical_wall_segment(colliders, x, doorway_z + DOOR_HALF_WIDTH, z_max);
+}
+
+fn push_vertical_wall_segment(
+    colliders: &mut Vec<StaticColliderSnapshot>,
+    x: i32,
+    z_min: i32,
+    z_max: i32,
+) {
+    if z_max <= z_min {
+        return;
+    }
+    let half_depth = (z_max - z_min) / 2;
+    if half_depth == 0 {
+        return;
+    }
+    push_wall(
+        colliders,
+        [x, PLAYER_Y, z_min + half_depth],
+        [WALL_HALF_THICKNESS, WALL_HALF_HEIGHT, half_depth],
+    );
+}
+
+fn push_horizontal_wall_with_door(
+    colliders: &mut Vec<StaticColliderSnapshot>,
+    z: i32,
+    x_min: i32,
+    x_max: i32,
+    doorway_x: i32,
+) {
+    push_horizontal_wall_segment(colliders, z, x_min, doorway_x - DOOR_HALF_WIDTH);
+    push_horizontal_wall_segment(colliders, z, doorway_x + DOOR_HALF_WIDTH, x_max);
+}
+
+fn push_horizontal_wall_segment(
+    colliders: &mut Vec<StaticColliderSnapshot>,
+    z: i32,
+    x_min: i32,
+    x_max: i32,
+) {
+    if x_max <= x_min {
+        return;
+    }
+    let half_width = (x_max - x_min) / 2;
+    if half_width == 0 {
+        return;
+    }
+    push_wall(
+        colliders,
+        [x_min + half_width, PLAYER_Y, z],
+        [half_width, WALL_HALF_HEIGHT, WALL_HALF_THICKNESS],
+    );
+}
+
+fn push_wall(
+    colliders: &mut Vec<StaticColliderSnapshot>,
+    position: [i32; 3],
+    half_extents: [i32; 3],
+) {
+    let index = u64::try_from(colliders.len()).expect("dungeon collider count must fit u64");
+    colliders.push(StaticColliderSnapshot {
+        id: STATIC_BODY_BASE + index,
+        position,
+        half_extents,
+        kind: StaticColliderKind::Wall,
+    });
 }
 
 fn spawn_position(index: usize) -> Vec3i {
     const SPAWNS: [Vec3i; MAX_PLAYERS] = [
-        Vec3i::new(-400, PLAYER_Y, -200),
-        Vec3i::new(-400, PLAYER_Y, -80),
-        Vec3i::new(-280, PLAYER_Y, -200),
-        Vec3i::new(-280, PLAYER_Y, -80),
+        Vec3i::new(-650, PLAYER_Y, -350),
+        Vec3i::new(-650, PLAYER_Y, -230),
+        Vec3i::new(-530, PLAYER_Y, -350),
+        Vec3i::new(-530, PLAYER_Y, -230),
     ];
     SPAWNS[index]
 }
@@ -480,6 +621,43 @@ mod tests {
     }
 
     #[test]
+    fn movement_speed_is_tuned_for_precise_room_navigation() {
+        let cardinal = ArpgGame::movement_velocity(PlayerState {
+            movement_x: 1,
+            movement_z: 0,
+            health: 100,
+        });
+        let diagonal = ArpgGame::movement_velocity(PlayerState {
+            movement_x: 1,
+            movement_z: 1,
+            health: 100,
+        });
+        assert_eq!(cardinal, Vec3i::new(260, 0, 0));
+        assert_eq!(diagonal, Vec3i::new(184, 0, 184));
+    }
+
+    #[test]
+    fn procedural_dungeon_is_seeded_and_deterministic() {
+        let first = procedural_dungeon_colliders(42);
+        let replay = procedural_dungeon_colliders(42);
+        let different_seed = procedural_dungeon_colliders(43);
+        assert_eq!(first, replay);
+        assert_ne!(first, different_seed);
+        assert!(first.len() > 4, "expected generated internal room walls");
+    }
+
+    #[test]
+    fn procedural_dungeon_keeps_outer_boundary_stable() {
+        let first = procedural_dungeon_colliders(1);
+        let second = procedural_dungeon_colliders(2);
+        assert_eq!(&first[..4], &second[..4]);
+        assert_eq!(first[0].position, [0, PLAYER_Y, -ARENA_HALF_DEPTH]);
+        assert_eq!(first[1].position, [0, PLAYER_Y, ARENA_HALF_DEPTH]);
+        assert_eq!(first[2].position, [-ARENA_HALF_WIDTH, PLAYER_Y, 0]);
+        assert_eq!(first[3].position, [ARENA_HALF_WIDTH, PLAYER_Y, 0]);
+    }
+
+    #[test]
     fn wasd_style_movement_is_driven_through_physics_engine() {
         let mut game = ArpgGame::new().unwrap();
         game.add_player(1).unwrap();
@@ -501,14 +679,14 @@ mod tests {
         let mut game = ArpgGame::new().unwrap();
         game.add_player(1).unwrap();
         game.apply_command(
-            PlayerCommand::new(1, 1, ArpgCommand::SetMovement { x: 1, z: 0 }).unwrap(),
+            PlayerCommand::new(1, 1, ArpgCommand::SetMovement { x: -1, z: 0 }).unwrap(),
         )
         .unwrap();
-        for _ in 0..400 {
+        for _ in 0..800 {
             game.advance_tick().unwrap();
         }
         let x = game.snapshot().unwrap().players[0].position[0];
-        assert!(x <= 845, "player crossed the east wall: {x}");
+        assert!(x >= -845, "player crossed the west wall: {x}");
     }
 
     #[test]
