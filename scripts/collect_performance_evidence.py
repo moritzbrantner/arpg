@@ -50,7 +50,7 @@ def main() -> None:
     if result.get("deterministic") is not True:
         raise RuntimeError("performance probe did not establish deterministic repeated output")
 
-    source_revision = os.environ.get("GITHUB_SHA") or run("git", "rev-parse", "HEAD")
+    source_revision = os.environ.get("ARPG_SOURCE_REVISION") or run("git", "rev-parse", "HEAD")
     source_dirty = bool(run("git", "status", "--porcelain"))
     rustc = run("rustc", "--version")
     environment_payload = {
