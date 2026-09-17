@@ -30,14 +30,18 @@ execFileSync("openssl", [
   "subjectAltName=DNS:localhost,IP:127.0.0.1",
 ]);
 
-const publicKeyPem = execFileSync("openssl", ["x509", "-in", certificatePem, "-pubkey", "-noout"]);
-const publicKeyDer = execFileSync("openssl", ["pkey", "-pubin", "-outform", "DER"], {
-  input: publicKeyPem,
-});
-const spkiHash = createHash("sha256").update(publicKeyDer).digest("base64");
+const certificateDer = execFileSync("openssl", [
+  "x509",
+  "-in",
+  certificatePem,
+  "-outform",
+  "DER",
+]);
+const certificateSha256 = createHash("sha256").update(certificateDer).digest("hex");
 
 process.env.ARPG_E2E_CERT_PEM = certificatePem;
 process.env.ARPG_E2E_KEY_PEM = privateKeyPem;
+process.env.ARPG_E2E_CERT_SHA256 = certificateSha256;
 
 export default defineConfig({
   testDir: "./e2e",
@@ -48,12 +52,8 @@ export default defineConfig({
   use: {
     baseURL: "http://127.0.0.1:4173",
     headless: true,
-    ignoreHTTPSErrors: true,
     launchOptions: {
-      args: [
-        `--ignore-certificate-errors-spki-list=${spkiHash}`,
-        "--enable-unsafe-webgpu",
-      ],
+      args: ["--enable-unsafe-webgpu"],
     },
   },
   webServer: {
