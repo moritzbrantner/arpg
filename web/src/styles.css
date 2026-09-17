@@ -7,6 +7,7 @@
 
 * { box-sizing: border-box; }
 html, body, #root { width: 100%; height: 100%; margin: 0; }
+body { overscroll-behavior: none; }
 button, input, select { font: inherit; }
 button, input, select { color: inherit; background: #24211e; border: 1px solid #514a42; border-radius: 5px; }
 button { padding: 0.5rem 0.8rem; cursor: pointer; }
@@ -15,15 +16,26 @@ button:disabled { opacity: 0.5; cursor: default; }
 input, select { padding: 0.55rem 0.65rem; width: 100%; }
 
 .game-shell { position: relative; width: 100%; height: 100%; overflow: hidden; background: #11100f; }
-.game-canvas { display: block; width: 100%; height: 100%; }
-.game-header { position: absolute; inset: 0 0 auto 0; display: flex; justify-content: space-between; align-items: center; padding: 0.8rem 1rem; background: linear-gradient(#11100fdd, transparent); pointer-events: none; }
+.game-canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+.game-header { position: absolute; inset: 0 0 auto 0; display: flex; justify-content: space-between; align-items: center; padding: max(0.8rem, env(safe-area-inset-top)) max(1rem, env(safe-area-inset-right)) 0.8rem max(1rem, env(safe-area-inset-left)); background: linear-gradient(#11100fdd, transparent); pointer-events: none; }
 .game-header > div { display: flex; gap: 0.8rem; align-items: baseline; }
 .game-header span { color: #b6aa96; font-size: 0.88rem; }
 .game-header button { pointer-events: auto; }
-.hud { position: absolute; left: 1rem; bottom: 1rem; width: min(32rem, calc(100% - 2rem)); padding: 0.75rem 0.9rem; background: #171513dc; border: 1px solid #3e3933; border-radius: 6px; }
+.hud { position: absolute; left: 1rem; bottom: 1rem; width: min(32rem, calc(100% - 2rem)); padding: 0.75rem 0.9rem; background: #171513dc; border: 1px solid #3e3933; border-radius: 6px; pointer-events: none; }
 .hud p { margin: 0.35rem 0 0; color: #bdb3a3; font-size: 0.85rem; }
 .health { height: 0.55rem; background: #351a19; border: 1px solid #6a322f; overflow: hidden; }
 .health span { display: block; height: 100%; background: #a7463f; }
+.mobile-controls-hint { display: none; }
+
+.mobile-controls { display: none; position: absolute; inset: auto 0 0; align-items: flex-end; justify-content: space-between; gap: 2rem; padding: 1rem max(1rem, env(safe-area-inset-right)) max(1rem, env(safe-area-inset-bottom)) max(1rem, env(safe-area-inset-left)); pointer-events: none; }
+.virtual-stick,
+.touch-attack { pointer-events: auto; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+.virtual-stick { position: relative; width: clamp(6.75rem, 24vw, 8.25rem); aspect-ratio: 1; border: 1px solid #8e7a5688; border-radius: 50%; background: #171513a6; box-shadow: inset 0 0 0 1px #0008, 0 0.4rem 1.5rem #0008; touch-action: none; }
+.virtual-stick::before { content: ""; position: absolute; inset: 24%; border: 1px solid #8e7a564f; border-radius: 50%; }
+.virtual-stick[aria-disabled="true"] { opacity: 0.4; }
+.virtual-stick-knob { position: absolute; left: 29%; top: 29%; width: 42%; height: 42%; border: 1px solid #d6b45faa; border-radius: 50%; background: #6b5b3fe6; box-shadow: 0 0.25rem 0.8rem #0009; pointer-events: none; will-change: transform; }
+.touch-attack { width: clamp(5.25rem, 20vw, 6.5rem); aspect-ratio: 1; border-radius: 50%; border-color: #9f564f; background: #682f2be6; font-weight: 700; letter-spacing: 0.02em; touch-action: manipulation; box-shadow: 0 0.4rem 1.5rem #0008; }
+.touch-attack:active { transform: scale(0.96); background: #7b3832; }
 
 .settings-backdrop { position: absolute; inset: 0; display: flex; justify-content: flex-end; background: #0008; }
 .settings-panel { width: min(48rem, 94vw); height: 100%; overflow: auto; padding: 1.4rem; background: #171513; border-left: 1px solid #3e3933; box-shadow: -14px 0 40px #0008; }
@@ -39,7 +51,15 @@ input, select { padding: 0.55rem 0.65rem; width: 100%; }
 .checkbox-row input { width: auto; }
 .keybindings-section { border-bottom: 0 !important; }
 
+@media (hover: none) and (pointer: coarse), (max-width: 760px) {
+  .mobile-controls { display: flex; }
+  .desktop-controls-hint { display: none; }
+  .mobile-controls-hint { display: block; }
+  .hud { left: max(0.75rem, env(safe-area-inset-left)); bottom: calc(9.5rem + env(safe-area-inset-bottom)); width: min(26rem, calc(100% - 1.5rem - env(safe-area-inset-left) - env(safe-area-inset-right))); padding: 0.6rem 0.7rem; }
+  .hud p { font-size: 0.78rem; }
+}
+
 @media (max-width: 700px) {
   .game-header > div { flex-direction: column; gap: 0.15rem; }
-  .settings-panel { width: 100%; }
+  .settings-panel { width: 100%; padding-top: max(1.4rem, env(safe-area-inset-top)); padding-right: max(1.4rem, env(safe-area-inset-right)); padding-bottom: max(1.4rem, env(safe-area-inset-bottom)); padding-left: max(1.4rem, env(safe-area-inset-left)); }
 }
