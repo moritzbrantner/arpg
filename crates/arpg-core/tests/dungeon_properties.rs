@@ -113,8 +113,16 @@ fn snapshot_for_seed(seed: u32) -> arpg_core::ArpgSnapshot {
 
 fn assert_room_geometry(seed: u32, rooms: &[RoomSnapshot]) {
     for room in rooms {
-        assert!(room.min_x < room.max_x, "seed {seed}: room {} x bounds", room.id);
-        assert!(room.min_z < room.max_z, "seed {seed}: room {} z bounds", room.id);
+        assert!(
+            room.min_x < room.max_x,
+            "seed {seed}: room {} x bounds",
+            room.id
+        );
+        assert!(
+            room.min_z < room.max_z,
+            "seed {seed}: room {} z bounds",
+            room.id
+        );
     }
 
     for (index, left) in rooms.iter().enumerate() {
@@ -172,11 +180,18 @@ fn assert_room_graph(seed: u32, rooms: &[RoomSnapshot], doors: &[arpg_core::Door
             pending.push_back(*neighbor_id);
         }
     }
-    assert_eq!(seen.len(), rooms.len(), "seed {seed}: graph must be connected");
+    assert_eq!(
+        seen.len(),
+        rooms.len(),
+        "seed {seed}: graph must be connected"
+    );
 
     let mut connections = BTreeSet::new();
     for door in doors {
-        assert!(door.half_extents.iter().all(|extent| *extent > 0), "seed {seed}");
+        assert!(
+            door.half_extents.iter().all(|extent| *extent > 0),
+            "seed {seed}"
+        );
         let room_a = room_by_id
             .get(&door.room_a)
             .expect("door room_a must exist");
@@ -207,11 +222,7 @@ fn assert_static_geometry(seed: u32, colliders: &[StaticColliderSnapshot]) {
     }
 }
 
-fn assert_unique_ids(
-    seed: u32,
-    kind: &str,
-    ids: impl IntoIterator<Item = u64>,
-) {
+fn assert_unique_ids(seed: u32, kind: &str, ids: impl IntoIterator<Item = u64>) {
     let mut seen = BTreeSet::new();
     for id in ids {
         assert!(seen.insert(id), "seed {seed}: duplicate {kind} id {id}");
