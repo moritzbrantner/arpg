@@ -229,8 +229,8 @@ export class DedicatedGameSession {
     if (welcome.playerId !== previous.playerId) {
       throw new Error("Dedicated reconnect changed authoritative player identity");
     }
-    if (welcome.connectionEpoch === previous.connectionEpoch) {
-      throw new Error("Dedicated reconnect did not rotate the connection epoch");
+    if (welcome.connectionEpoch <= previous.connectionEpoch) {
+      throw new Error("Dedicated reconnect did not advance the connection epoch");
     }
   }
 
@@ -280,7 +280,6 @@ export class DedicatedGameSession {
         this.callbacks.onSnapshot?.(decodeGameServerSnapshot(value));
       }
     } catch (error) {
-      this.callbacks.onError?.(error);
       this.handleTransportFailure(transport, generation, error);
     } finally {
       reader.releaseLock();
@@ -331,8 +330,7 @@ export class DedicatedGameSession {
   async runReconnectLoop() {
     if (!this.reconnectRequested || this.closedByClient || !this.welcome) return;
     this.reconnectRequested = false;
-    const graceMilliseconds = reconnectGraceMilliseconds(this.welcome);
-    const deadline = this.now() + graceMilliseconds;
+    let deadline = this.now() + reconnectGraceMilliseconds(this.welcome);
     let retryDelay = 0;
     let lastError = null;
     this.callbacks.onStateChange?.("connecting");
@@ -346,11 +344,15 @@ export class DedicatedGameSession {
       }
 
       const token = this.welcome.reconnectToken;
+      const attemptedToken = reconnectTokenHex(token);
       try {
         await this.openTransport(reconnectEndpoint(this.endpoint, token), true);
         return;
       } catch (error) {
         lastError = error;
+        if (this.welcome && reconnectTokenHex(this.welcome.reconnectToken) !== attemptedToken) {
+          deadline = this.now() + reconnectGraceMilliseconds(this.welcome);
+        }
         retryDelay =
           retryDelay === 0
             ? this.reconnectDelayMs
