@@ -83,6 +83,13 @@ async function expectCanvasChanged(page, canvas, action, message) {
   expect(before.equals(after), message).toBe(false);
 }
 
+async function openSettings(page) {
+  const settings = page.locator('[aria-label="Settings menu"]');
+  await page.keyboard.press("Escape");
+  await expect(settings).toBeVisible();
+  return settings;
+}
+
 test("built browser game composes Wasm authority, input, renderer, HUD, and settings", async ({
   page,
 }) => {
@@ -110,9 +117,7 @@ test("built browser game composes Wasm authority, input, renderer, HUD, and sett
   await page.keyboard.press("Space");
   await expect(status).not.toContainText(/failed|rejected|stopped|error/i);
 
-  await page.getByRole("button", { name: "Settings" }).click();
-  const settings = page.locator('[aria-label="Settings menu"]');
-  await expect(settings).toBeVisible();
+  const settings = await openSettings(page);
   await expect(settings).toContainText("Current mode: local · player 1 · run seed 42");
   await settings.getByLabel("Pixel ratio limit").selectOption("1");
   await settings.getByRole("button", { name: "Close" }).click();
@@ -167,8 +172,7 @@ test("reusable keybinding editor persists and applies a changed movement binding
   await page.goto("/?seed=42");
   const canvas = page.getByLabel("ARPG game world");
 
-  await page.getByRole("button", { name: "Settings" }).click();
-  const settings = page.locator('[aria-label="Settings menu"]');
+  const settings = await openSettings(page);
   const moveForwardRow = settings.getByRole("row").filter({ hasText: "Move forward" });
   await moveForwardRow.getByRole("button", { name: "Edit" }).click();
 
@@ -208,13 +212,14 @@ test("real browser WebTransport resumes the dedicated ARPG authority after an ou
     const status = hud.locator("p").first();
     await expect(status).toHaveText("Local Rust/Wasm authority");
 
-    await page.getByRole("button", { name: "Settings" }).click();
-    const settings = page.locator('[aria-label="Settings menu"]');
+    let settings = await openSettings(page);
     await settings.getByLabel("WebTransport endpoint").fill(DEDICATED_ENDPOINT);
     await settings.getByRole("button", { name: "Connect dedicated server" }).click();
     await expect(status).toContainText("Dedicated authority · player 1 · 60 Hz", {
       timeout: 30_000,
     });
+    await settings.getByRole("button", { name: "Close" }).click();
+    await expect(settings).toBeHidden();
 
     await page.keyboard.down("w");
     await page.waitForTimeout(250);
@@ -230,10 +235,14 @@ test("real browser WebTransport resumes the dedicated ARPG authority after an ou
       timeout: 30_000,
     });
 
-    await page.getByRole("button", { name: "Settings" }).click();
+    settings = await openSettings(page);
     await expect(settings).toContainText("Current mode: dedicated · player 1 · run seed 42");
   } finally {
-    await context.setOffline(false);
+    try {
+      if (!page.isClosed()) await context.setOffline(false);
+    } catch {
+      // Preserve the real assertion failure if the browser has already torn down.
+    }
     await stopDedicatedServer(server);
   }
 });
