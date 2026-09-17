@@ -39,6 +39,9 @@ jobs:
       - name: Install web dependencies
         working-directory: web
         run: bun install --frozen-lockfile
+      - name: Test browser input helpers
+        working-directory: web
+        run: bun run test
       - name: Build browser MVP
         working-directory: web
         run: bun run build
