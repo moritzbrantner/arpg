@@ -7,15 +7,19 @@ import { attachKeyboardRuntime } from "@moritzbrantner/input-bindings-web";
 import { KeybindingEditor } from "@moritzbrantner/input-bindings-react";
 import "@moritzbrantner/input-bindings-react/styles.css";
 import initWasm, { WasmGame } from "./wasm/arpg_web_wasm.js";
+import { DedicatedGameSession } from "./dedicated-session.js";
 import { ResilientLobbySession } from "./vendor/multiplayer-setup-service/resilient-lobby-session.js";
 import { sampleVirtualStick } from "./virtual-stick.js";
 import "./styles.css";
 
 const PROFILE_KEY = "arpg-input-profile-v1";
 const SETUP_URL_KEY = "arpg-setup-service-url-v1";
+const DEDICATED_URL_KEY = "arpg-dedicated-url-v1";
 const GRAPHICS_KEY = "arpg-graphics-v1";
 const PROTOCOL_VERSION = 2;
 const gameplayContext = { op: "context", id: "gameplay" };
+const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
 
 const physical = (id, action, code, when = gameplayContext) => ({
   id,
@@ -183,6 +187,7 @@ function App() {
   const gameRef = useRef(null);
   const modeRef = useRef("local");
   const sessionRef = useRef(null);
+  const dedicatedSessionRef = useRef(null);
   const peerPlayersRef = useRef(new Map());
   const sequenceRef = useRef(0);
   const touchStickRef = useRef(null);
@@ -209,6 +214,9 @@ function App() {
   const [graphics, setGraphics] = useState(loadGraphics);
   const [setupUrl, setSetupUrl] = useState(
     () => localStorage.getItem(SETUP_URL_KEY) ?? "http://127.0.0.1:8787",
+  );
+  const [dedicatedUrl, setDedicatedUrl] = useState(
+    () => localStorage.getItem(DEDICATED_URL_KEY) ?? "https://127.0.0.1:4433/arpg",
   );
   const [lobbyCode, setLobbyCode] = useState("");
   const [joinCode, setJoinCode] = useState(
@@ -269,6 +277,8 @@ function App() {
   const closeSession = () => {
     sessionRef.current?.close();
     sessionRef.current = null;
+    dedicatedSessionRef.current?.close();
+    dedicatedSessionRef.current = null;
     peerPlayersRef.current.clear();
     setLobbyCode("");
   };
@@ -285,6 +295,12 @@ function App() {
           sequence,
           encoded,
         });
+      } else if (modeRef.current === "dedicated") {
+        const session = dedicatedSessionRef.current;
+        if (!session || !playerId) return;
+        void session
+          .sendCommand(sequence, textEncoder.encode(encoded))
+          .catch((error) => setStatus(`Dedicated command failed: ${error}`));
       } else {
         gameRef.current?.applyCommand(playerId, sequence, encoded);
       }
@@ -423,6 +439,53 @@ function App() {
     setStatus("Local Rust/Wasm authority");
   };
 
+  const startDedicated = async () => {
+    if (!("WebTransport" in globalThis)) {
+      setStatus("Dedicated online requires browser WebTransport support");
+      return;
+    }
+    closeSession();
+    gameRef.current?.free?.();
+    gameRef.current = null;
+    sequenceRef.current = 0;
+    resetMovement();
+    setSnapshot(null);
+    setPlayerId(null);
+    setModeValue("dedicated");
+
+    const session = new DedicatedGameSession({ endpoint: dedicatedUrl.trim() });
+    dedicatedSessionRef.current = session;
+    try {
+      await session.connect({
+        onWelcome: (welcome) => {
+          setPlayerId(welcome.playerId);
+          setStatus(
+            `Dedicated authority · player ${welcome.playerId} · ${welcome.tickHz} Hz`,
+          );
+        },
+        onSnapshot: (frame) => {
+          try {
+            setSnapshot(decodeSnapshot(textDecoder.decode(frame.payload)));
+          } catch (error) {
+            setStatus(`Rejected dedicated snapshot: ${error}`);
+            session.close();
+          }
+        },
+        onStateChange: (state) => {
+          if (state === "connecting") setStatus("Connecting to dedicated authority…");
+          if (state === "disconnected") {
+            setPlayerId(null);
+            setStatus("Dedicated authority disconnected");
+          }
+        },
+        onError: (error) => setStatus(`Dedicated transport error: ${error}`),
+      });
+    } catch (error) {
+      if (dedicatedSessionRef.current === session) dedicatedSessionRef.current = null;
+      setStatus(`Could not connect dedicated server: ${error}`);
+    }
+  };
+
   const hostPeerGame = async () => {
     try {
       closeSession();
@@ -449,6 +512,7 @@ function App() {
       gameRef.current = null;
       sequenceRef.current = 0;
       resetMovement();
+      setSnapshot(null);
       setPlayerId(null);
       const session = new ResilientLobbySession({
         apiBase: setupUrl,
@@ -484,7 +548,13 @@ function App() {
   useEffect(() => {
     if (!ready) return undefined;
     const timer = setInterval(() => {
-      if (modeRef.current === "guest" || !gameRef.current) return;
+      if (
+        modeRef.current === "guest" ||
+        modeRef.current === "dedicated" ||
+        !gameRef.current
+      ) {
+        return;
+      }
       try {
         gameRef.current.advanceTick();
         updateSnapshotFromGame();
@@ -583,6 +653,11 @@ function App() {
     localStorage.setItem(SETUP_URL_KEY, value);
   };
 
+  const updateDedicatedUrl = (value) => {
+    setDedicatedUrl(value);
+    localStorage.setItem(DEDICATED_URL_KEY, value);
+  };
+
   const copyInvite = async () => {
     const url = new URL(location.pathname, location.origin);
     url.searchParams.set("join", lobbyCode);
@@ -590,15 +665,22 @@ function App() {
     setStatus("Invite URL copied with public lobby code only");
   };
 
+  const modeLabel =
+    mode === "local"
+      ? "Local"
+      : mode === "host"
+        ? "Peer host"
+        : mode === "guest"
+          ? "Peer guest"
+          : "Dedicated online";
+
   return (
     <main className="game-shell">
       <canvas ref={canvasRef} className="game-canvas" aria-label="ARPG game world" />
       <header className="game-header">
         <div>
           <strong>ARPG foundation MVP</strong>
-          <span>
-            {mode === "local" ? "Local" : mode === "host" ? "Peer host" : "Peer guest"}
-          </span>
+          <span>{modeLabel}</span>
         </div>
         <button type="button" onClick={() => setSettingsOpen(true)}>
           Settings
@@ -684,6 +766,30 @@ function App() {
               <button type="button" onClick={startLocal}>
                 Start local game
               </button>
+            </section>
+
+            <section>
+              <h2>Dedicated online</h2>
+              <label>
+                WebTransport endpoint
+                <input
+                  value={dedicatedUrl}
+                  onChange={(event) => updateDedicatedUrl(event.target.value)}
+                  placeholder="https://127.0.0.1:4433/arpg"
+                />
+              </label>
+              <button
+                type="button"
+                onClick={startDedicated}
+                disabled={!ready || !dedicatedUrl.trim()}
+              >
+                Connect dedicated server
+              </button>
+              <p className="settings-note">
+                The shared game-server owns admission, ticks, reconnect identity, recovery, and
+                snapshot framing. The browser only submits versioned ARPG commands and renders
+                verified authoritative snapshots.
+              </p>
             </section>
 
             <section>
