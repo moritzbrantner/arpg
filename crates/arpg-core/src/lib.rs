@@ -22,7 +22,12 @@ const DOOR_BODY_BASE: u64 = 20_000;
 const PLAYER_HALF_EXTENTS: Vec3i = Vec3i::new(30, 50, 30);
 const PLAYER_Y: i32 = 50;
 const ATTACK_RANGE: i64 = 220;
-const ATTACK_DAMAGE: u16 = 25;
+const BASE_ATTACK_DAMAGE: u16 = 25;
+const ATTACK_DAMAGE_PER_LEVEL: u16 = 5;
+const BASE_MAX_HEALTH: u16 = 100;
+const MAX_HEALTH_PER_LEVEL: u16 = 10;
+const EXPERIENCE_PER_LEVEL: u32 = 100;
+const MONSTER_EXPERIENCE_REWARD: u32 = 50;
 const DEFAULT_DUNGEON_SEED: RunSeed = 0xA420_0916;
 const ARENA_HALF_WIDTH: i32 = 900;
 const ARENA_HALF_DEPTH: i32 = 650;
@@ -177,6 +182,12 @@ pub struct PlayerSnapshot {
     pub id: PlayerId,
     pub position: [i32; 3],
     pub health: u16,
+    pub max_health: u16,
+    pub level: u16,
+    pub experience: u32,
+    pub experience_into_level: u32,
+    pub experience_for_next_level: u32,
+    pub attack_damage: u16,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -211,6 +222,7 @@ struct PlayerState {
     movement_x: i8,
     movement_z: i8,
     health: u16,
+    experience: u32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -329,6 +341,23 @@ impl ArpgGame {
         BodyId(PLAYER_BODY_BASE + u64::from(player_id))
     }
 
+    fn level_for_experience(experience: u32) -> u16 {
+        let level = 1u32.saturating_add(experience / EXPERIENCE_PER_LEVEL);
+        u16::try_from(level.min(u32::from(u16::MAX))).expect("clamped level must fit u16")
+    }
+
+    fn max_health_for_level(level: u16) -> u16 {
+        BASE_MAX_HEALTH.saturating_add(level.saturating_sub(1).saturating_mul(MAX_HEALTH_PER_LEVEL))
+    }
+
+    fn attack_damage_for_level(level: u16) -> u16 {
+        BASE_ATTACK_DAMAGE.saturating_add(
+            level
+                .saturating_sub(1)
+                .saturating_mul(ATTACK_DAMAGE_PER_LEVEL),
+        )
+    }
+
     fn movement_velocity(state: PlayerState) -> Vec3i {
         let x = i32::from(state.movement_x.clamp(-1, 1));
         let z = i32::from(state.movement_z.clamp(-1, 1));
@@ -346,12 +375,38 @@ impl ArpgGame {
             .map(|room| room.id)
     }
 
+    fn award_experience(&mut self, player_id: PlayerId, amount: u32) -> Result<(), GameError> {
+        let state = self
+            .players
+            .get_mut(&player_id)
+            .ok_or_else(|| GameError::new("experience references an unknown player"))?;
+        let previous_level = Self::level_for_experience(state.experience);
+        let previous_max_health = Self::max_health_for_level(previous_level);
+        state.experience = state.experience.saturating_add(amount);
+        let level = Self::level_for_experience(state.experience);
+        let max_health = Self::max_health_for_level(level);
+        if max_health > previous_max_health {
+            state.health = state
+                .health
+                .saturating_add(max_health - previous_max_health)
+                .min(max_health);
+        }
+        Ok(())
+    }
+
     fn attack(&mut self, player_id: PlayerId) -> Result<(), GameError> {
         let player_position = self
             .world
             .body(Self::player_body_id(player_id))
             .ok_or_else(|| GameError::new("player physics body is missing"))?
             .position();
+        let player_level = Self::level_for_experience(
+            self.players
+                .get(&player_id)
+                .ok_or_else(|| GameError::new("attack references an unknown player"))?
+                .experience,
+        );
+        let attack_damage = Self::attack_damage_for_level(player_level);
         let active_rooms = self
             .rooms
             .iter()
@@ -371,8 +426,15 @@ impl ArpgGame {
             })
             .min_by_key(|(distance_sq, id, _)| (*distance_sq, *id));
 
-        if let Some((_, _, monster)) = target {
-            monster.health = monster.health.saturating_sub(ATTACK_DAMAGE);
+        let killed = if let Some((_, _, monster)) = target {
+            let previous_health = monster.health;
+            monster.health = monster.health.saturating_sub(attack_damage);
+            previous_health > 0 && monster.health == 0
+        } else {
+            false
+        };
+        if killed {
+            self.award_experience(player_id, MONSTER_EXPERIENCE_REWARD)?;
         }
         self.reconcile_encounters()
     }
@@ -491,7 +553,8 @@ impl AuthoritativeGame for ArpgGame {
             PlayerState {
                 movement_x: 0,
                 movement_z: 0,
-                health: 100,
+                health: BASE_MAX_HEALTH,
+                experience: 0,
             },
         );
         self.last_sequences.insert(player_id, 0);
@@ -563,10 +626,17 @@ impl AuthoritativeGame for ArpgGame {
                     .world
                     .body(Self::player_body_id(id))
                     .ok_or_else(|| GameError::new("player physics body is missing"))?;
+                let level = Self::level_for_experience(state.experience);
                 Ok(PlayerSnapshot {
                     id,
                     position: vec_to_array(body.position()),
                     health: state.health,
+                    max_health: Self::max_health_for_level(level),
+                    level,
+                    experience: state.experience,
+                    experience_into_level: state.experience % EXPERIENCE_PER_LEVEL,
+                    experience_for_next_level: EXPERIENCE_PER_LEVEL,
+                    attack_damage: Self::attack_damage_for_level(level),
                 })
             })
             .collect::<Result<Vec<_>, GameError>>()?;
@@ -581,7 +651,7 @@ impl AuthoritativeGame for ArpgGame {
         }));
 
         Ok(ArpgSnapshot {
-            schema_version: 4,
+            schema_version: 5,
             run_seed: self.run_seed,
             tick: self.tick,
             world_units_per_meter: WORLD_UNITS_PER_METER,
@@ -942,15 +1012,130 @@ mod tests {
         let cardinal = ArpgGame::movement_velocity(PlayerState {
             movement_x: 1,
             movement_z: 0,
-            health: 100,
+            health: BASE_MAX_HEALTH,
+            experience: 0,
         });
         let diagonal = ArpgGame::movement_velocity(PlayerState {
             movement_x: 1,
             movement_z: 1,
-            health: 100,
+            health: BASE_MAX_HEALTH,
+            experience: 0,
         });
         assert_eq!(cardinal, Vec3i::new(260, 0, 0));
         assert_eq!(diagonal, Vec3i::new(184, 0, 184));
+    }
+
+    #[test]
+    fn progression_is_derived_from_experience_and_changes_combat_stats() {
+        let mut game = ArpgGame::new().unwrap();
+        game.add_player(1).unwrap();
+        game.award_experience(1, EXPERIENCE_PER_LEVEL).unwrap();
+
+        let player = &game.snapshot().unwrap().players[0];
+        assert_eq!(player.experience, EXPERIENCE_PER_LEVEL);
+        assert_eq!(player.level, 2);
+        assert_eq!(player.max_health, 110);
+        assert_eq!(player.health, 110);
+        assert_eq!(player.attack_damage, 30);
+        assert_eq!(player.experience_into_level, 0);
+        assert_eq!(player.experience_for_next_level, EXPERIENCE_PER_LEVEL);
+    }
+
+    #[test]
+    fn killing_blow_gets_experience_once_in_coop() {
+        let mut game = ArpgGame::new_with_seed(42).unwrap();
+        let room_id = 2;
+        let (center_x, center_z) = game
+            .rooms
+            .iter()
+            .find(|room| room.id == room_id)
+            .unwrap()
+            .center();
+        game.player_spawns[0] = Vec3i::new(center_x, PLAYER_Y, center_z);
+        game.player_spawns[1] = Vec3i::new(center_x + 20, PLAYER_Y, center_z);
+        game.add_player(1).unwrap();
+        game.add_player(2).unwrap();
+        game.reconcile_encounters().unwrap();
+        let monster = game
+            .monsters
+            .iter_mut()
+            .find(|monster| monster.room_id == room_id)
+            .unwrap();
+        monster.position = Vec3i::new(center_x + 100, PLAYER_Y, center_z);
+
+        for sequence in 1..=3 {
+            game.apply_command(
+                PlayerCommand::new(1, sequence, ArpgCommand::PrimaryAttack).unwrap(),
+            )
+            .unwrap();
+        }
+        game.apply_command(PlayerCommand::new(2, 1, ArpgCommand::PrimaryAttack).unwrap())
+            .unwrap();
+
+        let snapshot = game.snapshot().unwrap();
+        let first = snapshot
+            .players
+            .iter()
+            .find(|player| player.id == 1)
+            .unwrap();
+        let second = snapshot
+            .players
+            .iter()
+            .find(|player| player.id == 2)
+            .unwrap();
+        assert_eq!(first.experience, 0);
+        assert_eq!(second.experience, MONSTER_EXPERIENCE_REWARD);
+
+        game.apply_command(PlayerCommand::new(2, 2, ArpgCommand::PrimaryAttack).unwrap())
+            .unwrap();
+        assert_eq!(
+            game.snapshot()
+                .unwrap()
+                .players
+                .iter()
+                .find(|player| player.id == 2)
+                .unwrap()
+                .experience,
+            MONSTER_EXPERIENCE_REWARD
+        );
+    }
+
+    #[test]
+    fn level_damage_is_used_by_authoritative_attack() {
+        let mut game = ArpgGame::new_with_seed(42).unwrap();
+        let room_id = 2;
+        let (center_x, center_z) = game
+            .rooms
+            .iter()
+            .find(|room| room.id == room_id)
+            .unwrap()
+            .center();
+        game.player_spawns[0] = Vec3i::new(center_x, PLAYER_Y, center_z);
+        game.add_player(1).unwrap();
+        game.award_experience(1, EXPERIENCE_PER_LEVEL).unwrap();
+        game.reconcile_encounters().unwrap();
+        let monster = game
+            .monsters
+            .iter_mut()
+            .find(|monster| monster.room_id == room_id)
+            .unwrap();
+        monster.position = Vec3i::new(center_x + 100, PLAYER_Y, center_z);
+        monster.health = 30;
+
+        game.apply_command(PlayerCommand::new(1, 1, ArpgCommand::PrimaryAttack).unwrap())
+            .unwrap();
+        assert_eq!(
+            game.monsters
+                .iter()
+                .find(|monster| monster.room_id == room_id)
+                .unwrap()
+                .health,
+            0
+        );
+        assert_eq!(
+            game.players.get(&1).unwrap().experience,
+            EXPERIENCE_PER_LEVEL + MONSTER_EXPERIENCE_REWARD
+        );
     }
 
     #[test]
@@ -1037,11 +1222,12 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_carries_run_seed_room_and_door_semantics_for_replay() {
-        let game = ArpgGame::new_with_seed(0xDEAD_BEEF).unwrap();
+    fn snapshot_carries_run_seed_room_door_and_progression_semantics_for_replay() {
+        let mut game = ArpgGame::new_with_seed(0xDEAD_BEEF).unwrap();
+        game.add_player(1).unwrap();
         let snapshot = game.snapshot().unwrap();
         let generated = generate_dungeon(snapshot.run_seed);
-        assert_eq!(snapshot.schema_version, 4);
+        assert_eq!(snapshot.schema_version, 5);
         assert_eq!(snapshot.run_seed, 0xDEAD_BEEF);
         assert_eq!(game.run_seed(), snapshot.run_seed);
         assert_eq!(snapshot.rooms, generated.rooms);
@@ -1049,6 +1235,9 @@ mod tests {
         assert_eq!(snapshot.static_colliders, generated.static_colliders);
         assert_eq!(snapshot.monsters.len(), generated.monsters.len());
         assert!(snapshot.monsters.iter().all(|monster| monster.room_id > 1));
+        assert_eq!(snapshot.players[0].level, 1);
+        assert_eq!(snapshot.players[0].experience, 0);
+        assert_eq!(snapshot.players[0].attack_damage, BASE_ATTACK_DAMAGE);
     }
 
     #[test]
@@ -1098,6 +1287,10 @@ mod tests {
             assert!(!door.locked);
             assert!(game.world.body(BodyId(door_id)).is_none());
         }
+        assert_eq!(
+            game.players.get(&1).unwrap().experience,
+            MONSTER_EXPERIENCE_REWARD
+        );
         assert!(
             game.snapshot()
                 .unwrap()
@@ -1137,6 +1330,7 @@ mod tests {
                 .health,
             100
         );
+        assert_eq!(game.players.get(&1).unwrap().experience, 0);
         assert_eq!(room_state(&game, 2), RoomEncounterState::Dormant);
     }
 
