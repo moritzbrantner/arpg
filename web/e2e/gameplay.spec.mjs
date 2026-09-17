@@ -75,6 +75,14 @@ async function stopDedicatedServer(child) {
   }
 }
 
+async function expectCanvasChanged(canvas, action, message) {
+  const before = await canvas.screenshot();
+  await action();
+  await canvas.page().waitForTimeout(100);
+  const after = await canvas.screenshot();
+  expect(before.equals(after), message).toBe(false);
+}
+
 test("built browser game composes Wasm authority, input, renderer, HUD, and settings", async ({
   page,
 }) => {
@@ -88,16 +96,15 @@ test("built browser game composes Wasm authority, input, renderer, HUD, and sett
   await expect(page.getByLabel("Character progression")).toContainText("Level 1");
   await expect(page.getByLabel("Character progression")).toContainText("Damage 25");
 
-  const beforeMovement = await canvas.screenshot();
-  await page.keyboard.down("w");
-  await page.waitForTimeout(500);
-  await page.keyboard.up("w");
-  await page.waitForTimeout(100);
-  const afterMovement = await canvas.screenshot();
-  expect(
-    beforeMovement.equals(afterMovement),
+  await expectCanvasChanged(
+    canvas,
+    async () => {
+      await page.keyboard.down("w");
+      await page.waitForTimeout(500);
+      await page.keyboard.up("w");
+    },
     "moving the authoritative player should change the rendered world",
-  ).toBe(false);
+  );
 
   await page.keyboard.press("Space");
   await expect(status).not.toContainText(/failed|rejected|stopped|error/i);
@@ -110,6 +117,81 @@ test("built browser game composes Wasm authority, input, renderer, HUD, and sett
   await settings.getByRole("button", { name: "Close" }).click();
   await expect(settings).toBeHidden();
   await expect(status).toHaveText("Local Rust/Wasm authority");
+});
+
+test("mobile pointer controls move and attack through the same local authority", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/?seed=42");
+
+  const status = page.locator('[aria-label="Player status"] p').first();
+  const canvas = page.getByLabel("ARPG game world");
+  const joystick = page.getByLabel("Movement joystick");
+  const attack = page.getByRole("button", { name: "Primary attack" });
+
+  await expect(status).toHaveText("Local Rust/Wasm authority");
+  await expect(joystick).toBeVisible();
+  await expect(attack).toBeVisible();
+
+  const box = await joystick.boundingBox();
+  expect(box).not.toBeNull();
+  const pointer = {
+    pointerId: 17,
+    pointerType: "touch",
+    isPrimary: true,
+    clientX: box.x + box.width / 2,
+    clientY: box.y + box.height * 0.2,
+  };
+
+  await expectCanvasChanged(
+    canvas,
+    async () => {
+      await joystick.dispatchEvent("pointerdown", { ...pointer, buttons: 1 });
+      await page.waitForTimeout(500);
+      await joystick.dispatchEvent("pointerup", { ...pointer, buttons: 0 });
+    },
+    "touch joystick movement should change the authoritative rendered world",
+  );
+
+  await attack.dispatchEvent("pointerdown", {
+    pointerId: 18,
+    pointerType: "touch",
+    isPrimary: true,
+    buttons: 1,
+  });
+  await expect(status).not.toContainText(/failed|rejected|stopped|error/i);
+});
+
+test("reusable keybinding editor persists and applies a changed movement binding", async ({ page }) => {
+  await page.goto("/?seed=42");
+  const canvas = page.getByLabel("ARPG game world");
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  const settings = page.locator('[aria-label="Settings menu"]');
+  const moveForwardRow = settings.getByRole("row").filter({ hasText: "Move forward" });
+  await moveForwardRow.getByRole("button", { name: "Edit" }).click();
+
+  const recorder = settings.locator(".ib-recorder");
+  await expect(recorder.getByRole("heading", { name: "Edit binding for Move forward" })).toBeVisible();
+  await recorder.getByRole("button", { name: "Clear" }).click();
+  await recorder.getByRole("button", { name: "Focus recorder" }).click();
+  await page.keyboard.press("ArrowUp");
+  await expect(recorder).toContainText("Arrow Up");
+  await recorder.getByRole("button", { name: "Save" }).click();
+
+  const profile = await page.evaluate(() => JSON.parse(localStorage.getItem("arpg-input-profile-v1")));
+  expect(profile.patches.length).toBeGreaterThan(0);
+  expect(JSON.stringify(profile)).toContain("ArrowUp");
+
+  await settings.getByRole("button", { name: "Close" }).click();
+  await expectCanvasChanged(
+    canvas,
+    async () => {
+      await page.keyboard.down("ArrowUp");
+      await page.waitForTimeout(500);
+      await page.keyboard.up("ArrowUp");
+    },
+    "the newly rebound physical key should drive movement",
+  );
 });
 
 test("real browser WebTransport resumes the dedicated ARPG authority after an outage", async ({
