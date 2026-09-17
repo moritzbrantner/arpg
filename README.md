@@ -12,15 +12,17 @@ The browser slice currently proves:
 - a procedurally partitioned, seeded dungeon whose walls and doorways are resolved by `physics-engine`;
 - an isometric follow camera and simple 3D scene rendered through `3d-lab`;
 - nearby primary attacks against deterministic monster state;
+- deterministic character progression exposed through authoritative snapshots;
 - a settings menu with graphics controls and the reusable `input-bindings` keybinding editor;
 - local Rust/Wasm play;
 - one fresh 32-bit run seed per new authority, carried in authoritative snapshots so multiplayer and replay evidence identify the exact generated dungeon;
 - host-authoritative peer co-op using `multiplayer-setup-service` for rendezvous and direct WebRTC data channels for commands/snapshots;
+- dedicated online play over the shared `game-server` WebTransport protocol, with browser-side framing and snapshot-hash verification but no duplicated gameplay rules;
 - the same `ArpgGame` exercised through `game-server::MatchRuntime`, with an equivalence test requiring the dedicated-runtime and direct-local paths to produce the same typed snapshot for the same input stream;
 - a runnable TLS/WebTransport dedicated server using the shared `game-server` transport, reconnect, recovery, tick, and shutdown machinery;
 - GitHub Pages build/deployment for browser acceptance.
 
-This is deliberately not yet a content-complete ARPG. The slice exists to prove the foundations before inventory, loot, skills, progression, richer AI, assets, persistence, or larger levels are built on top.
+This is deliberately not yet a content-complete ARPG. The slice exists to prove the foundations before inventory, loot, skills, richer AI, assets, persistence, or larger levels are built on top.
 
 ## Foundation ownership
 
@@ -41,11 +43,11 @@ Neither renderer nor network transport is a source of gameplay truth.
 
 - **Local** — the browser runs `arpg-core` through `arpg-web-wasm`.
 - **Peer-hosted co-op** — one browser runs that same Rust/Wasm authority; guests submit sequenced commands and consume host snapshots. `multiplayer-setup-service` remains payload-opaque setup infrastructure.
-- **Dedicated online** — `arpg-game-server` adapts the same core/protocol into `game-server` and includes a runnable TLS/WebTransport host. The MVP proves the actual `MatchRuntime` boundary with deterministic equivalence tests. Wiring the browser menu to that dedicated endpoint is the next client-facing slice.
+- **Dedicated online** — the browser connects directly to the runnable `arpg-game-server` WebTransport endpoint. `game-server` owns admission, ticks, reconnect identity, recovery, and transport framing; the browser submits versioned `arpg-protocol` command payloads and renders verified authoritative snapshots.
 
 Peer-hosted co-op is a convenience/trust mode, not an anti-cheat boundary. The host can cheat. Dedicated play is the trusted authority model.
 
-Every new local or peer-hosted authority receives a fresh browser-generated run seed. Guests do not generate an alternate seed: they receive the host's seed as part of the authoritative snapshot. For deterministic local reproduction, open the browser with `?seed=<u32>`; starting another local game afterward intentionally creates a fresh seed.
+Every new local or peer-hosted authority receives a fresh browser-generated run seed. Guests do not generate an alternate seed: they receive the host's seed as part of the authoritative snapshot. For deterministic local reproduction, open the browser with `?seed=<u32>`; starting another local game afterward intentionally creates a fresh seed. Dedicated runs receive the server-selected seed through authoritative snapshots.
 
 ## Run locally
 
@@ -78,7 +80,7 @@ ARPG_SERVER_KEY_PEM=key.pem \
 cargo run -p arpg-game-server --bin server
 ```
 
-The dedicated host defaults to UDP port `4433` and session path `/arpg`. Optional configuration is available through `ARPG_SERVER_PORT`, `ARPG_SERVER_SESSION_PATH`, `ARPG_SERVER_RECOVERY_PATH`, and `ARPG_SERVER_DRAIN_GRACE_MS`. A fresh run seed is generated once when the process starts and logged for replay evidence; set `ARPG_RUN_SEED=<u32>` to reproduce a known run exactly.
+The dedicated host defaults to UDP port `4433` and session path `/arpg`. Optional configuration is available through `ARPG_SERVER_PORT`, `ARPG_SERVER_SESSION_PATH`, `ARPG_SERVER_RECOVERY_PATH`, and `ARPG_SERVER_DRAIN_GRACE_MS`. A fresh run seed is generated once when the process starts and logged for replay evidence; set `ARPG_RUN_SEED=<u32>` to reproduce a known run exactly. In a browser with WebTransport support, enter the resulting HTTPS endpoint (for example `https://127.0.0.1:4433/arpg`) under **Settings → Dedicated online**. The certificate must be trusted by the browser.
 
 ## Pinned foundations
 
