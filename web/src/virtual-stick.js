@@ -1,5 +1,6 @@
-export const VIRTUAL_STICK_DEAD_ZONE = 0.28;
-export const VIRTUAL_STICK_TRAVEL_RATIO = 0.55;
+export const VIRTUAL_STICK_DEAD_ZONE = 0.42;
+export const VIRTUAL_STICK_DIAGONAL_RATIO = 0.72;
+export const VIRTUAL_STICK_TRAVEL_RATIO = 0.62;
 
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 
@@ -16,13 +17,28 @@ export function sampleVirtualStick(clientX, clientY, rect) {
   const visualY = rawY * travelScale;
   const normalizedX = clamp(visualX / maxTravel, -1, 1);
   const normalizedY = clamp(visualY / maxTravel, -1, 1);
-  const digitalAxis = (value) =>
-    Math.abs(value) < VIRTUAL_STICK_DEAD_ZONE ? 0 : Math.sign(value);
+  const magnitude = Math.hypot(normalizedX, normalizedY);
 
-  return {
-    x: digitalAxis(normalizedX),
-    z: digitalAxis(normalizedY),
-    visualX,
-    visualY,
-  };
+  if (magnitude < VIRTUAL_STICK_DEAD_ZONE) {
+    return { x: 0, z: 0, visualX, visualY };
+  }
+
+  const absX = Math.abs(normalizedX);
+  const absY = Math.abs(normalizedY);
+  let x = 0;
+  let z = 0;
+
+  if (absX >= absY) {
+    x = Math.sign(normalizedX);
+    if (absX > 0 && absY / absX >= VIRTUAL_STICK_DIAGONAL_RATIO) {
+      z = Math.sign(normalizedY);
+    }
+  } else {
+    z = Math.sign(normalizedY);
+    if (absY > 0 && absX / absY >= VIRTUAL_STICK_DIAGONAL_RATIO) {
+      x = Math.sign(normalizedX);
+    }
+  }
+
+  return { x, z, visualX, visualY };
 }
