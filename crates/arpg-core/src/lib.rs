@@ -406,9 +406,7 @@ impl ArpgGame {
                         RoomEncounterState::Cleared
                     };
                 }
-                RoomEncounterState::Active
-                    if !rooms_with_living_monsters.contains(&room.id) =>
-                {
+                RoomEncounterState::Active if !rooms_with_living_monsters.contains(&room.id) => {
                     room.encounter_state = RoomEncounterState::Cleared;
                 }
                 _ => {}
@@ -573,17 +571,14 @@ impl AuthoritativeGame for ArpgGame {
             })
             .collect::<Result<Vec<_>, GameError>>()?;
         let mut static_colliders = self.static_colliders.clone();
-        static_colliders.extend(
-            self.doors
-                .iter()
-                .filter(|door| door.locked)
-                .map(|door| StaticColliderSnapshot {
-                    id: door.id,
-                    position: door.position,
-                    half_extents: door.half_extents,
-                    kind: StaticColliderKind::Door,
-                }),
-        );
+        static_colliders.extend(self.doors.iter().filter(|door| door.locked).map(|door| {
+            StaticColliderSnapshot {
+                id: door.id,
+                position: door.position,
+                half_extents: door.half_extents,
+                kind: StaticColliderKind::Door,
+            }
+        }));
 
         Ok(ArpgSnapshot {
             schema_version: 4,
@@ -1148,7 +1143,12 @@ mod tests {
     #[test]
     fn active_room_doors_are_projected_as_static_door_colliders() {
         let mut game = ArpgGame::new_with_seed(42).unwrap();
-        let (center_x, center_z) = game.rooms.iter().find(|room| room.id == 2).unwrap().center();
+        let (center_x, center_z) = game
+            .rooms
+            .iter()
+            .find(|room| room.id == 2)
+            .unwrap()
+            .center();
         game.player_spawns[0] = Vec3i::new(center_x, PLAYER_Y, center_z);
         game.add_player(1).unwrap();
         game.reconcile_encounters().unwrap();
