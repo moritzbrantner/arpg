@@ -8,6 +8,7 @@ import { KeybindingEditor } from "@moritzbrantner/input-bindings-react";
 import "@moritzbrantner/input-bindings-react/styles.css";
 import initWasm, { WasmGame } from "./wasm/arpg_web_wasm.js";
 import { ResilientLobbySession } from "./vendor/multiplayer-setup-service/resilient-lobby-session.js";
+import { sampleVirtualStick } from "./virtual-stick.js";
 import "./styles.css";
 
 const PROFILE_KEY = "arpg-input-profile-v1";
@@ -184,12 +185,17 @@ function App() {
   const sessionRef = useRef(null);
   const peerPlayersRef = useRef(new Map());
   const sequenceRef = useRef(0);
+  const touchStickRef = useRef(null);
+  const touchKnobRef = useRef(null);
+  const touchPointerIdRef = useRef(null);
   const initialRunSeedRef = useRef(requestedRunSeed() ?? freshRunSeed());
   const movementRef = useRef({
     forward: false,
     backward: false,
     left: false,
     right: false,
+    touchX: 0,
+    touchZ: 0,
     lastX: 0,
     lastZ: 0,
   });
@@ -220,11 +226,17 @@ function App() {
   };
 
   const resetMovement = () => {
+    touchPointerIdRef.current = null;
+    if (touchKnobRef.current) {
+      touchKnobRef.current.style.transform = "translate3d(0px, 0px, 0)";
+    }
     movementRef.current = {
       forward: false,
       backward: false,
       left: false,
       right: false,
+      touchX: 0,
+      touchZ: 0,
       lastX: 0,
       lastZ: 0,
     };
@@ -280,12 +292,63 @@ function App() {
 
   const flushMovement = () => {
     const movement = movementRef.current;
-    const x = Number(movement.right) - Number(movement.left);
-    const z = Number(movement.backward) - Number(movement.forward);
+    const keyboardX = Number(movement.right) - Number(movement.left);
+    const keyboardZ = Number(movement.backward) - Number(movement.forward);
+    const x = Math.max(-1, Math.min(1, keyboardX + movement.touchX));
+    const z = Math.max(-1, Math.min(1, keyboardZ + movement.touchZ));
     if (x === movement.lastX && z === movement.lastZ) return;
     movement.lastX = x;
     movement.lastZ = z;
     dispatchCommand({ type: "setMovement", x, z });
+  };
+
+  const resetTouchStick = () => {
+    touchPointerIdRef.current = null;
+    if (touchKnobRef.current) {
+      touchKnobRef.current.style.transform = "translate3d(0px, 0px, 0)";
+    }
+    const movement = movementRef.current;
+    if (movement.touchX === 0 && movement.touchZ === 0) return;
+    movement.touchX = 0;
+    movement.touchZ = 0;
+    flushMovement();
+  };
+
+  const updateTouchStick = (event) => {
+    if (touchPointerIdRef.current !== event.pointerId) return;
+    const stick = touchStickRef.current;
+    if (!stick) return;
+    const sample = sampleVirtualStick(event.clientX, event.clientY, stick.getBoundingClientRect());
+    if (touchKnobRef.current) {
+      touchKnobRef.current.style.transform = `translate3d(${sample.visualX}px, ${sample.visualY}px, 0)`;
+    }
+    const movement = movementRef.current;
+    movement.touchX = sample.x;
+    movement.touchZ = sample.z;
+    flushMovement();
+  };
+
+  const beginTouchStick = (event) => {
+    if (!playerId || touchPointerIdRef.current !== null) return;
+    event.preventDefault();
+    touchPointerIdRef.current = event.pointerId;
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    updateTouchStick(event);
+  };
+
+  const endTouchStick = (event) => {
+    if (touchPointerIdRef.current !== event.pointerId) return;
+    event.preventDefault();
+    if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    resetTouchStick();
+  };
+
+  const triggerTouchAttack = (event) => {
+    event.preventDefault();
+    if (!playerId) return;
+    dispatchCommand({ type: "primaryAttack" });
   };
 
   const configureSession = (session, role) => {
@@ -463,6 +526,10 @@ function App() {
   }, [snapshot, playerId]);
 
   useEffect(() => {
+    if (settingsOpen) resetTouchStick();
+  }, [settingsOpen]);
+
+  useEffect(() => {
     if (!ready) return undefined;
     const controller = new InputRuntimeController({
       registry: inputRegistry,
@@ -540,8 +607,39 @@ function App() {
           <span style={{ width: `${health}%` }} />
         </div>
         <p>{status}</p>
-        <p>WASD to move · Space to attack · Esc for settings</p>
+        <p className="desktop-controls-hint">WASD to move · Space to attack · Esc for settings</p>
+        <p className="mobile-controls-hint">Left stick to move · Attack to strike</p>
       </section>
+
+      {ready && !settingsOpen && (
+        <section className="mobile-controls" aria-label="Touch controls">
+          <div
+            ref={touchStickRef}
+            className="virtual-stick"
+            role="group"
+            aria-label="Movement joystick"
+            aria-disabled={!playerId}
+            onPointerDown={beginTouchStick}
+            onPointerMove={updateTouchStick}
+            onPointerUp={endTouchStick}
+            onPointerCancel={endTouchStick}
+            onLostPointerCapture={endTouchStick}
+            onContextMenu={(event) => event.preventDefault()}
+          >
+            <span ref={touchKnobRef} className="virtual-stick-knob" />
+          </div>
+          <button
+            type="button"
+            className="touch-attack"
+            aria-label="Primary attack"
+            disabled={!playerId}
+            onPointerDown={triggerTouchAttack}
+            onContextMenu={(event) => event.preventDefault()}
+          >
+            Attack
+          </button>
+        </section>
+      )}
 
       {settingsOpen && (
         <div
