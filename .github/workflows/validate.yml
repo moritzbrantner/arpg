@@ -16,6 +16,7 @@ jobs:
       install_command: ""
       cache_bun: false
       cache_cargo: true
+      pre_validate_command: git fetch origin ${{ github.event.pull_request.head.sha || github.sha }} --depth=1 && git checkout --detach ${{ github.event.pull_request.head.sha || github.sha }} && test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha || github.sha }}"
       format_command: cargo fmt --all -- --check
       lint_command: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       test_command: cargo test --locked --workspace --all-features
