@@ -347,11 +347,7 @@ impl ArpgGame {
     }
 
     fn max_health_for_level(level: u16) -> u16 {
-        BASE_MAX_HEALTH.saturating_add(
-            level
-                .saturating_sub(1)
-                .saturating_mul(MAX_HEALTH_PER_LEVEL),
-        )
+        BASE_MAX_HEALTH.saturating_add(level.saturating_sub(1).saturating_mul(MAX_HEALTH_PER_LEVEL))
     }
 
     fn attack_damage_for_level(level: u16) -> u16 {
@@ -1077,8 +1073,16 @@ mod tests {
             .unwrap();
 
         let snapshot = game.snapshot().unwrap();
-        let first = snapshot.players.iter().find(|player| player.id == 1).unwrap();
-        let second = snapshot.players.iter().find(|player| player.id == 2).unwrap();
+        let first = snapshot
+            .players
+            .iter()
+            .find(|player| player.id == 1)
+            .unwrap();
+        let second = snapshot
+            .players
+            .iter()
+            .find(|player| player.id == 2)
+            .unwrap();
         assert_eq!(first.experience, 0);
         assert_eq!(second.experience, MONSTER_EXPERIENCE_REWARD);
 
