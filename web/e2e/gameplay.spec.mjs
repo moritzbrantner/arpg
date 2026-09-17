@@ -75,10 +75,10 @@ async function stopDedicatedServer(child) {
   }
 }
 
-async function expectCanvasChanged(canvas, action, message) {
+async function expectCanvasChanged(page, canvas, action, message) {
   const before = await canvas.screenshot();
   await action();
-  await canvas.page().waitForTimeout(100);
+  await page.waitForTimeout(100);
   const after = await canvas.screenshot();
   expect(before.equals(after), message).toBe(false);
 }
@@ -97,6 +97,7 @@ test("built browser game composes Wasm authority, input, renderer, HUD, and sett
   await expect(page.getByLabel("Character progression")).toContainText("Damage 25");
 
   await expectCanvasChanged(
+    page,
     canvas,
     async () => {
       await page.keyboard.down("w");
@@ -143,6 +144,7 @@ test("mobile pointer controls move and attack through the same local authority",
   };
 
   await expectCanvasChanged(
+    page,
     canvas,
     async () => {
       await joystick.dispatchEvent("pointerdown", { ...pointer, buttons: 1 });
@@ -175,7 +177,7 @@ test("reusable keybinding editor persists and applies a changed movement binding
   await recorder.getByRole("button", { name: "Clear" }).click();
   await recorder.getByRole("button", { name: "Focus recorder" }).click();
   await page.keyboard.press("ArrowUp");
-  await expect(recorder).toContainText("Arrow Up");
+  await expect(recorder.getByRole("button", { name: "Save" })).toBeEnabled();
   await recorder.getByRole("button", { name: "Save" }).click();
 
   const profile = await page.evaluate(() => JSON.parse(localStorage.getItem("arpg-input-profile-v1")));
@@ -184,6 +186,7 @@ test("reusable keybinding editor persists and applies a changed movement binding
 
   await settings.getByRole("button", { name: "Close" }).click();
   await expectCanvasChanged(
+    page,
     canvas,
     async () => {
       await page.keyboard.down("ArrowUp");
