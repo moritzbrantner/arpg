@@ -1,12 +1,13 @@
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 
 use physics_engine::{BodyId, RigidBody, Vec3i, World, WorldConfig};
 use serde::{Deserialize, Serialize};
 
+pub type DoorId = u64;
 pub type PlayerId = u32;
 pub type RoomId = u32;
 pub type RunSeed = u32;
@@ -17,6 +18,7 @@ const PLAYER_SPEED: i32 = 260;
 const PLAYER_DIAGONAL_SPEED: i32 = 184;
 const PLAYER_BODY_BASE: u64 = 1_000;
 const STATIC_BODY_BASE: u64 = 10_000;
+const DOOR_BODY_BASE: u64 = 20_000;
 const PLAYER_HALF_EXTENTS: Vec3i = Vec3i::new(30, 50, 30);
 const PLAYER_Y: i32 = 50;
 const ATTACK_RANGE: i64 = 220;
@@ -31,6 +33,7 @@ const PARTITION_MARGIN: i32 = 25;
 const DOOR_EDGE_MARGIN: i32 = 140;
 const ROOM_SPAWN_MARGIN: i32 = 100;
 const PLAYER_SPAWN_OFFSET: i32 = 60;
+const ROOM_ACTIVATION_MARGIN: i32 = 30;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GameError {
@@ -110,6 +113,7 @@ pub struct ArpgSnapshot {
     pub tick: u64,
     pub world_units_per_meter: i32,
     pub rooms: Vec<RoomSnapshot>,
+    pub doors: Vec<DoorSnapshot>,
     pub players: Vec<PlayerSnapshot>,
     pub monsters: Vec<MonsterSnapshot>,
     pub static_colliders: Vec<StaticColliderSnapshot>,
@@ -124,16 +128,16 @@ pub struct RoomSnapshot {
     pub min_z: i32,
     pub max_z: i32,
     pub kind: RoomKind,
+    pub encounter_state: RoomEncounterState,
     pub neighbors: Vec<RoomId>,
 }
 
 impl RoomSnapshot {
-    #[cfg(test)]
-    fn contains_xz(&self, position: Vec3i) -> bool {
-        position.x >= self.min_x
-            && position.x <= self.max_x
-            && position.z >= self.min_z
-            && position.z <= self.max_z
+    fn contains_xz_with_margin(&self, position: Vec3i, margin: i32) -> bool {
+        position.x >= self.min_x + margin
+            && position.x <= self.max_x - margin
+            && position.z >= self.min_z + margin
+            && position.z <= self.max_z - margin
     }
 
     fn center(&self) -> (i32, i32) {
@@ -146,6 +150,25 @@ impl RoomSnapshot {
 pub enum RoomKind {
     Start,
     Combat,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RoomEncounterState {
+    Dormant,
+    Active,
+    Cleared,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DoorSnapshot {
+    pub id: DoorId,
+    pub room_a: RoomId,
+    pub room_b: RoomId,
+    pub position: [i32; 3],
+    pub half_extents: [i32; 3],
+    pub locked: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -180,6 +203,7 @@ pub struct StaticColliderSnapshot {
 pub enum StaticColliderKind {
     Wall,
     Pillar,
+    Door,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -230,6 +254,7 @@ impl DungeonRng {
 #[derive(Debug)]
 struct GeneratedDungeon {
     rooms: Vec<RoomSnapshot>,
+    doors: Vec<DoorSnapshot>,
     static_colliders: Vec<StaticColliderSnapshot>,
     player_spawns: [Vec3i; MAX_PLAYERS],
     monsters: Vec<MonsterState>,
@@ -243,6 +268,7 @@ pub struct ArpgGame {
     players: BTreeMap<PlayerId, PlayerState>,
     last_sequences: BTreeMap<PlayerId, u32>,
     rooms: Vec<RoomSnapshot>,
+    doors: Vec<DoorSnapshot>,
     player_spawns: [Vec3i; MAX_PLAYERS],
     monsters: Vec<MonsterState>,
     static_colliders: Vec<StaticColliderSnapshot>,
@@ -266,6 +292,7 @@ impl ArpgGame {
         });
         let GeneratedDungeon {
             rooms,
+            doors,
             static_colliders,
             player_spawns,
             monsters,
@@ -287,6 +314,7 @@ impl ArpgGame {
             players: BTreeMap::new(),
             last_sequences: BTreeMap::new(),
             rooms,
+            doors,
             player_spawns,
             monsters,
             static_colliders,
@@ -311,17 +339,30 @@ impl ArpgGame {
         }
     }
 
+    fn room_at_position(&self, position: Vec3i) -> Option<RoomId> {
+        self.rooms
+            .iter()
+            .find(|room| room.contains_xz_with_margin(position, ROOM_ACTIVATION_MARGIN))
+            .map(|room| room.id)
+    }
+
     fn attack(&mut self, player_id: PlayerId) -> Result<(), GameError> {
         let player_position = self
             .world
             .body(Self::player_body_id(player_id))
             .ok_or_else(|| GameError::new("player physics body is missing"))?
             .position();
+        let active_rooms = self
+            .rooms
+            .iter()
+            .filter(|room| room.encounter_state == RoomEncounterState::Active)
+            .map(|room| room.id)
+            .collect::<BTreeSet<_>>();
         let range_sq = ATTACK_RANGE * ATTACK_RANGE;
         let target = self
             .monsters
             .iter_mut()
-            .filter(|monster| monster.health > 0)
+            .filter(|monster| monster.health > 0 && active_rooms.contains(&monster.room_id))
             .filter_map(|monster| {
                 let dx = i64::from(monster.position.x - player_position.x);
                 let dz = i64::from(monster.position.z - player_position.z);
@@ -332,6 +373,80 @@ impl ArpgGame {
 
         if let Some((_, _, monster)) = target {
             monster.health = monster.health.saturating_sub(ATTACK_DAMAGE);
+        }
+        self.reconcile_encounters()
+    }
+
+    fn reconcile_encounters(&mut self) -> Result<(), GameError> {
+        let occupied_rooms = self
+            .players
+            .keys()
+            .filter_map(|&player_id| {
+                self.world
+                    .body(Self::player_body_id(player_id))
+                    .and_then(|body| self.room_at_position(body.position()))
+            })
+            .collect::<BTreeSet<_>>();
+        let rooms_with_living_monsters = self
+            .monsters
+            .iter()
+            .filter(|monster| monster.health > 0)
+            .map(|monster| monster.room_id)
+            .collect::<BTreeSet<_>>();
+
+        for room in &mut self.rooms {
+            if room.kind != RoomKind::Combat {
+                continue;
+            }
+            match room.encounter_state {
+                RoomEncounterState::Dormant if occupied_rooms.contains(&room.id) => {
+                    room.encounter_state = if rooms_with_living_monsters.contains(&room.id) {
+                        RoomEncounterState::Active
+                    } else {
+                        RoomEncounterState::Cleared
+                    };
+                }
+                RoomEncounterState::Active
+                    if !rooms_with_living_monsters.contains(&room.id) =>
+                {
+                    room.encounter_state = RoomEncounterState::Cleared;
+                }
+                _ => {}
+            }
+        }
+        self.sync_door_locks()
+    }
+
+    fn sync_door_locks(&mut self) -> Result<(), GameError> {
+        let active_rooms = self
+            .rooms
+            .iter()
+            .filter(|room| room.encounter_state == RoomEncounterState::Active)
+            .map(|room| room.id)
+            .collect::<BTreeSet<_>>();
+        let desired_locks = self
+            .doors
+            .iter()
+            .map(|door| active_rooms.contains(&door.room_a) || active_rooms.contains(&door.room_b))
+            .collect::<Vec<_>>();
+
+        for (index, desired_locked) in desired_locks.into_iter().enumerate() {
+            if self.doors[index].locked == desired_locked {
+                continue;
+            }
+            let door = self.doors[index].clone();
+            if desired_locked {
+                self.world
+                    .add_body(RigidBody::fixed(
+                        BodyId(door.id),
+                        array_to_vec(door.position),
+                        array_to_vec(door.half_extents),
+                    ))
+                    .map_err(physics_error)?;
+            } else {
+                self.world.remove_body(BodyId(door.id));
+            }
+            self.doors[index].locked = desired_locked;
         }
         Ok(())
     }
@@ -433,6 +548,7 @@ impl AuthoritativeGame for ArpgGame {
                 .map_err(physics_error)?;
         }
         self.world.step(1).map_err(physics_error)?;
+        self.reconcile_encounters()?;
         self.tick = self
             .tick
             .checked_add(1)
@@ -456,13 +572,26 @@ impl AuthoritativeGame for ArpgGame {
                 })
             })
             .collect::<Result<Vec<_>, GameError>>()?;
+        let mut static_colliders = self.static_colliders.clone();
+        static_colliders.extend(
+            self.doors
+                .iter()
+                .filter(|door| door.locked)
+                .map(|door| StaticColliderSnapshot {
+                    id: door.id,
+                    position: door.position,
+                    half_extents: door.half_extents,
+                    kind: StaticColliderKind::Door,
+                }),
+        );
 
         Ok(ArpgSnapshot {
-            schema_version: 3,
+            schema_version: 4,
             run_seed: self.run_seed,
             tick: self.tick,
             world_units_per_meter: WORLD_UNITS_PER_METER,
             rooms: self.rooms.clone(),
+            doors: self.doors.clone(),
             players,
             monsters: self
                 .monsters
@@ -475,13 +604,14 @@ impl AuthoritativeGame for ArpgGame {
                     alive: monster.health > 0,
                 })
                 .collect(),
-            static_colliders: self.static_colliders.clone(),
+            static_colliders,
         })
     }
 }
 
 fn generate_dungeon(seed: RunSeed) -> GeneratedDungeon {
     let mut colliders = Vec::new();
+    let mut doors = Vec::new();
     let mut rng = DungeonRng::new(u64::from(seed));
     let left_partition_x = rng.range_i32(-160, -40);
     let right_partition_x = rng.range_i32(300, 460);
@@ -512,7 +642,11 @@ fn generate_dungeon(seed: RunSeed) -> GeneratedDungeon {
     let interior_z_max = ARENA_HALF_DEPTH - WALL_HALF_THICKNESS;
     let lower_z_max = horizontal_partition_z - PARTITION_MARGIN;
     let upper_z_min = horizontal_partition_z + PARTITION_MARGIN;
-    for partition_x in [left_partition_x, right_partition_x] {
+    let vertical_connections = [((1, 2), (4, 5)), ((2, 3), (5, 6))];
+    for (partition_index, partition_x) in [left_partition_x, right_partition_x]
+        .into_iter()
+        .enumerate()
+    {
         let lower_door = rng.range_i32(
             interior_z_min + DOOR_EDGE_MARGIN,
             lower_z_max - DOOR_EDGE_MARGIN,
@@ -524,6 +658,15 @@ fn generate_dungeon(seed: RunSeed) -> GeneratedDungeon {
             lower_z_max,
             lower_door,
         );
+        let (lower_a, lower_b) = vertical_connections[partition_index].0;
+        push_door(
+            &mut doors,
+            lower_a,
+            lower_b,
+            [partition_x, PLAYER_Y, lower_door],
+            [WALL_HALF_THICKNESS, WALL_HALF_HEIGHT, DOOR_HALF_WIDTH],
+        );
+
         let upper_door = rng.range_i32(
             upper_z_min + DOOR_EDGE_MARGIN,
             interior_z_max - DOOR_EDGE_MARGIN,
@@ -534,6 +677,14 @@ fn generate_dungeon(seed: RunSeed) -> GeneratedDungeon {
             upper_z_min,
             interior_z_max,
             upper_door,
+        );
+        let (upper_a, upper_b) = vertical_connections[partition_index].1;
+        push_door(
+            &mut doors,
+            upper_a,
+            upper_b,
+            [partition_x, PLAYER_Y, upper_door],
+            [WALL_HALF_THICKNESS, WALL_HALF_HEIGHT, DOOR_HALF_WIDTH],
         );
     }
 
@@ -547,7 +698,8 @@ fn generate_dungeon(seed: RunSeed) -> GeneratedDungeon {
         ),
         (right_partition_x + PARTITION_MARGIN, interior_x_max),
     ];
-    for (x_min, x_max) in columns {
+    let horizontal_connections = [(1, 4), (2, 5), (3, 6)];
+    for (column_index, (x_min, x_max)) in columns.into_iter().enumerate() {
         let doorway = rng.range_i32(x_min + DOOR_EDGE_MARGIN, x_max - DOOR_EDGE_MARGIN);
         push_horizontal_wall_with_door(
             &mut colliders,
@@ -555,6 +707,14 @@ fn generate_dungeon(seed: RunSeed) -> GeneratedDungeon {
             x_min,
             x_max,
             doorway,
+        );
+        let (room_a, room_b) = horizontal_connections[column_index];
+        push_door(
+            &mut doors,
+            room_a,
+            room_b,
+            [doorway, PLAYER_Y, horizontal_partition_z],
+            [DOOR_HALF_WIDTH, WALL_HALF_HEIGHT, WALL_HALF_THICKNESS],
         );
     }
 
@@ -569,6 +729,7 @@ fn generate_dungeon(seed: RunSeed) -> GeneratedDungeon {
 
     GeneratedDungeon {
         rooms,
+        doors,
         static_colliders: colliders,
         player_spawns,
         monsters,
@@ -589,16 +750,22 @@ fn generated_rooms(columns: [(i32, i32); 3], rows: [(i32, i32); 2]) -> Vec<RoomS
         for (column_index, &(min_x, max_x)) in columns.iter().enumerate() {
             let index = row_index * columns.len() + column_index;
             let id = u32::try_from(index + 1).expect("room id must fit u32");
+            let kind = if id == 1 {
+                RoomKind::Start
+            } else {
+                RoomKind::Combat
+            };
             rooms.push(RoomSnapshot {
                 id,
                 min_x,
                 max_x,
                 min_z,
                 max_z,
-                kind: if id == 1 {
-                    RoomKind::Start
+                kind,
+                encounter_state: if kind == RoomKind::Start {
+                    RoomEncounterState::Cleared
                 } else {
-                    RoomKind::Combat
+                    RoomEncounterState::Dormant
                 },
                 neighbors: neighbors[index].clone(),
             });
@@ -655,6 +822,24 @@ fn generated_monsters(rooms: &[RoomSnapshot], rng: &mut DungeonRng) -> Vec<Monst
             health: 100,
         })
         .collect()
+}
+
+fn push_door(
+    doors: &mut Vec<DoorSnapshot>,
+    room_a: RoomId,
+    room_b: RoomId,
+    position: [i32; 3],
+    half_extents: [i32; 3],
+) {
+    let index = u64::try_from(doors.len()).expect("dungeon door count must fit u64");
+    doors.push(DoorSnapshot {
+        id: DOOR_BODY_BASE + index,
+        room_a,
+        room_b,
+        position,
+        half_extents,
+        locked: false,
+    });
 }
 
 fn push_vertical_wall_with_door(
@@ -747,8 +932,6 @@ const fn array_to_vec(value: [i32; 3]) -> Vec3i {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
-
     use super::*;
 
     #[test]
@@ -782,6 +965,7 @@ mod tests {
         let different_seed = generate_dungeon(43);
 
         assert_eq!(first.rooms, replay.rooms);
+        assert_eq!(first.doors, replay.doors);
         assert_eq!(first.static_colliders, replay.static_colliders);
         assert_eq!(first.player_spawns, replay.player_spawns);
         assert_eq!(
@@ -796,9 +980,10 @@ mod tests {
     }
 
     #[test]
-    fn generated_room_graph_is_connected_and_symmetric() {
+    fn generated_room_graph_is_connected_symmetric_and_backed_by_doors() {
         let dungeon = generate_dungeon(42);
         assert_eq!(dungeon.rooms.len(), 6);
+        assert_eq!(dungeon.doors.len(), 7);
 
         let mut seen = BTreeSet::new();
         let mut pending = vec![dungeon.rooms[0].id];
@@ -823,10 +1008,15 @@ mod tests {
                     room.id,
                     neighbor_id
                 );
+                assert!(dungeon.doors.iter().any(|door| {
+                    (door.room_a == room.id && door.room_b == neighbor_id)
+                        || (door.room_b == room.id && door.room_a == neighbor_id)
+                }));
                 pending.push(neighbor_id);
             }
         }
         assert_eq!(seen.len(), dungeon.rooms.len());
+        assert!(dungeon.doors.iter().all(|door| !door.locked));
     }
 
     #[test]
@@ -838,7 +1028,7 @@ mod tests {
             .find(|room| room.kind == RoomKind::Start)
             .unwrap();
         for spawn in dungeon.player_spawns {
-            assert!(start_room.contains_xz(spawn));
+            assert!(start_room.contains_xz_with_margin(spawn, 0));
         }
         for monster in &dungeon.monsters {
             let room = dungeon
@@ -847,22 +1037,130 @@ mod tests {
                 .find(|room| room.id == monster.room_id)
                 .unwrap();
             assert_eq!(room.kind, RoomKind::Combat);
-            assert!(room.contains_xz(monster.position));
+            assert!(room.contains_xz_with_margin(monster.position, 0));
         }
     }
 
     #[test]
-    fn snapshot_carries_run_seed_and_room_semantics_for_replay() {
+    fn snapshot_carries_run_seed_room_and_door_semantics_for_replay() {
         let game = ArpgGame::new_with_seed(0xDEAD_BEEF).unwrap();
         let snapshot = game.snapshot().unwrap();
         let generated = generate_dungeon(snapshot.run_seed);
-        assert_eq!(snapshot.schema_version, 3);
+        assert_eq!(snapshot.schema_version, 4);
         assert_eq!(snapshot.run_seed, 0xDEAD_BEEF);
         assert_eq!(game.run_seed(), snapshot.run_seed);
         assert_eq!(snapshot.rooms, generated.rooms);
+        assert_eq!(snapshot.doors, generated.doors);
         assert_eq!(snapshot.static_colliders, generated.static_colliders);
         assert_eq!(snapshot.monsters.len(), generated.monsters.len());
         assert!(snapshot.monsters.iter().all(|monster| monster.room_id > 1));
+    }
+
+    #[test]
+    fn entering_combat_room_locks_connected_doors_until_encounter_is_cleared() {
+        let mut game = ArpgGame::new_with_seed(42).unwrap();
+        let room_id = 2;
+        let (center_x, center_z) = game
+            .rooms
+            .iter()
+            .find(|room| room.id == room_id)
+            .unwrap()
+            .center();
+        game.player_spawns[0] = Vec3i::new(center_x, PLAYER_Y, center_z);
+        game.add_player(1).unwrap();
+        game.reconcile_encounters().unwrap();
+
+        assert_eq!(room_state(&game, room_id), RoomEncounterState::Active);
+        let connected_door_ids = game
+            .doors
+            .iter()
+            .filter(|door| door.room_a == room_id || door.room_b == room_id)
+            .map(|door| door.id)
+            .collect::<Vec<_>>();
+        assert!(!connected_door_ids.is_empty());
+        for door_id in &connected_door_ids {
+            let door = game.doors.iter().find(|door| door.id == *door_id).unwrap();
+            assert!(door.locked);
+            assert!(game.world.body(BodyId(*door_id)).is_some());
+        }
+
+        let monster = game
+            .monsters
+            .iter_mut()
+            .find(|monster| monster.room_id == room_id)
+            .unwrap();
+        monster.position = Vec3i::new(center_x + 100, PLAYER_Y, center_z);
+        for sequence in 1..=4 {
+            game.apply_command(
+                PlayerCommand::new(1, sequence, ArpgCommand::PrimaryAttack).unwrap(),
+            )
+            .unwrap();
+        }
+
+        assert_eq!(room_state(&game, room_id), RoomEncounterState::Cleared);
+        for door_id in connected_door_ids {
+            let door = game.doors.iter().find(|door| door.id == door_id).unwrap();
+            assert!(!door.locked);
+            assert!(game.world.body(BodyId(door_id)).is_none());
+        }
+        assert!(
+            game.snapshot()
+                .unwrap()
+                .static_colliders
+                .iter()
+                .all(|collider| collider.kind != StaticColliderKind::Door)
+        );
+    }
+
+    #[test]
+    fn dormant_room_monsters_cannot_be_attacked_before_entry() {
+        let mut game = ArpgGame::new_with_seed(42).unwrap();
+        game.add_player(1).unwrap();
+        let player_position = game
+            .world
+            .body(ArpgGame::player_body_id(1))
+            .unwrap()
+            .position();
+        let monster = game
+            .monsters
+            .iter_mut()
+            .find(|monster| monster.room_id == 2)
+            .unwrap();
+        monster.position = Vec3i::new(player_position.x + 100, PLAYER_Y, player_position.z);
+
+        for sequence in 1..=4 {
+            game.apply_command(
+                PlayerCommand::new(1, sequence, ArpgCommand::PrimaryAttack).unwrap(),
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            game.monsters
+                .iter()
+                .find(|monster| monster.room_id == 2)
+                .unwrap()
+                .health,
+            100
+        );
+        assert_eq!(room_state(&game, 2), RoomEncounterState::Dormant);
+    }
+
+    #[test]
+    fn active_room_doors_are_projected_as_static_door_colliders() {
+        let mut game = ArpgGame::new_with_seed(42).unwrap();
+        let (center_x, center_z) = game.rooms.iter().find(|room| room.id == 2).unwrap().center();
+        game.player_spawns[0] = Vec3i::new(center_x, PLAYER_Y, center_z);
+        game.add_player(1).unwrap();
+        game.reconcile_encounters().unwrap();
+        let snapshot = game.snapshot().unwrap();
+        let locked_count = snapshot.doors.iter().filter(|door| door.locked).count();
+        let projected_count = snapshot
+            .static_colliders
+            .iter()
+            .filter(|collider| collider.kind == StaticColliderKind::Door)
+            .count();
+        assert_eq!(locked_count, projected_count);
+        assert!(locked_count > 0);
     }
 
     #[test]
@@ -909,29 +1207,6 @@ mod tests {
     }
 
     #[test]
-    fn primary_attack_is_core_owned_and_deterministic() {
-        let mut game = ArpgGame::new().unwrap();
-        game.add_player(1).unwrap();
-        let player_position = game
-            .world
-            .body(ArpgGame::player_body_id(1))
-            .unwrap()
-            .position();
-        game.monsters[0].position =
-            Vec3i::new(player_position.x + 100, PLAYER_Y, player_position.z);
-        for sequence in 1..=4 {
-            game.apply_command(
-                PlayerCommand::new(1, sequence, ArpgCommand::PrimaryAttack).unwrap(),
-            )
-            .unwrap();
-        }
-        let snapshot = game.snapshot().unwrap();
-        let monster = &snapshot.monsters[0];
-        assert_eq!(monster.health, 0);
-        assert!(!monster.alive);
-    }
-
-    #[test]
     fn stale_commands_fail_closed() {
         let mut game = ArpgGame::new().unwrap();
         game.add_player(1).unwrap();
@@ -945,6 +1220,14 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(error.message(), "command sequence is stale");
+    }
+
+    fn room_state(game: &ArpgGame, room_id: RoomId) -> RoomEncounterState {
+        game.rooms
+            .iter()
+            .find(|room| room.id == room_id)
+            .unwrap()
+            .encounter_state
     }
 
     fn monster_layout(monsters: &[MonsterState]) -> Vec<(u32, RoomId, [i32; 3])> {
