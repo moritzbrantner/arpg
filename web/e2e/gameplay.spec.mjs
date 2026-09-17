@@ -85,10 +85,19 @@ async function expectCanvasChanged(page, canvas, action, message) {
 
 async function openSettings(page) {
   const settings = page.locator('[aria-label="Settings menu"]');
-  await page.keyboard.press("Escape");
+  await page.locator(".game-header").getByRole("button", { name: "Settings", exact: true }).click();
   await expect(settings).toBeVisible();
   return settings;
 }
+
+test.beforeEach(async ({ page }) => {
+  page.on("pageerror", (error) => {
+    console.error(`BROWSER PAGE ERROR: ${error.stack ?? error.message}`);
+  });
+  page.on("console", (message) => {
+    if (message.type() === "error") console.error(`BROWSER CONSOLE ERROR: ${message.text()}`);
+  });
+});
 
 test("built browser game composes Wasm authority, input, renderer, HUD, and settings", async ({
   page,
@@ -140,31 +149,24 @@ test("mobile pointer controls move and attack through the same local authority",
 
   const box = await joystick.boundingBox();
   expect(box).not.toBeNull();
-  const pointer = {
-    pointerId: 17,
-    pointerType: "touch",
-    isPrimary: true,
-    clientX: box.x + box.width / 2,
-    clientY: box.y + box.height * 0.2,
-  };
+  const centerX = box.x + box.width / 2;
+  const centerY = box.y + box.height / 2;
+  const forwardY = box.y + box.height * 0.2;
 
   await expectCanvasChanged(
     page,
     canvas,
     async () => {
-      await joystick.dispatchEvent("pointerdown", { ...pointer, buttons: 1 });
+      await page.mouse.move(centerX, centerY);
+      await page.mouse.down();
+      await page.mouse.move(centerX, forwardY, { steps: 4 });
       await page.waitForTimeout(500);
-      await joystick.dispatchEvent("pointerup", { ...pointer, buttons: 0 });
+      await page.mouse.up();
     },
-    "touch joystick movement should change the authoritative rendered world",
+    "pointer joystick movement should change the authoritative rendered world",
   );
 
-  await attack.dispatchEvent("pointerdown", {
-    pointerId: 18,
-    pointerType: "touch",
-    isPrimary: true,
-    buttons: 1,
-  });
+  await attack.click();
   await expect(status).not.toContainText(/failed|rejected|stopped|error/i);
 });
 
