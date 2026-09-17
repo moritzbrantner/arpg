@@ -69,7 +69,8 @@ fn run_journey() -> DeterministicWork {
             }
         }
 
-        game.advance_tick().expect("performance tick must stay valid");
+        game.advance_tick()
+            .expect("performance tick must stay valid");
         if (tick + 1) % SNAPSHOT_INTERVAL_TICKS == 0 {
             let snapshot = game.snapshot().expect("sampled snapshot must stay valid");
             assert_eq!(snapshot.tick, tick + 1);
