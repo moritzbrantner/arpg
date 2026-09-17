@@ -215,10 +215,13 @@ function App() {
     () => new URLSearchParams(location.search).get("join") ?? "",
   );
 
-  const health = useMemo(
-    () => snapshot?.players.find((player) => player.id === playerId)?.health ?? 0,
+  const player = useMemo(
+    () => snapshot?.players.find((candidate) => candidate.id === playerId) ?? null,
     [snapshot, playerId],
   );
+  const healthPercent = player?.maxHealth
+    ? Math.max(0, Math.min(100, (player.health / player.maxHealth) * 100))
+    : 0;
 
   const setModeValue = (next) => {
     modeRef.current = next;
@@ -604,8 +607,17 @@ function App() {
 
       <section className="hud" aria-label="Player status">
         <div className="health">
-          <span style={{ width: `${health}%` }} />
+          <span style={{ width: `${healthPercent}%` }} />
         </div>
+        {player && (
+          <div className="progression" aria-label="Character progression">
+            <strong>Level {player.level}</strong>
+            <span>
+              XP {player.experienceIntoLevel}/{player.experienceForNextLevel}
+            </span>
+            <span>Damage {player.attackDamage}</span>
+          </div>
+        )}
         <p>{status}</p>
         <p className="desktop-controls-hint">WASD to move · Space to attack · Esc for settings</p>
         <p className="mobile-controls-hint">Left stick to move · Attack to strike</p>
