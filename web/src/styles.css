@@ -7,59 +7,111 @@
 
 * { box-sizing: border-box; }
 html, body, #root { width: 100%; height: 100%; margin: 0; }
-body { overscroll-behavior: none; }
+body { min-height: 100dvh; overscroll-behavior: none; }
 button, input, select { font: inherit; }
 button, input, select { color: inherit; background: #24211e; border: 1px solid #514a42; border-radius: 5px; }
 button { padding: 0.5rem 0.8rem; cursor: pointer; }
 button:hover { border-color: #8e7a56; }
 button:disabled { opacity: 0.5; cursor: default; }
-input, select { padding: 0.55rem 0.65rem; width: 100%; }
+input, select { min-width: 0; max-width: 100%; padding: 0.55rem 0.65rem; width: 100%; }
 
-.game-shell { position: relative; width: 100%; height: 100%; overflow: hidden; background: #11100f; }
+.game-shell { position: relative; width: 100%; height: 100dvh; overflow: hidden; background: #11100f; }
 .game-canvas { display: block; width: 100%; height: 100%; touch-action: none; }
-.game-header { position: absolute; inset: 0 0 auto 0; display: flex; justify-content: space-between; align-items: center; padding: max(0.8rem, env(safe-area-inset-top)) max(1rem, env(safe-area-inset-right)) 0.8rem max(1rem, env(safe-area-inset-left)); background: linear-gradient(#11100fdd, transparent); pointer-events: none; }
+.game-header { position: absolute; z-index: 10; inset: 0 0 auto 0; display: flex; justify-content: space-between; align-items: center; padding: max(0.8rem, env(safe-area-inset-top)) max(1rem, env(safe-area-inset-right)) 0.8rem max(1rem, env(safe-area-inset-left)); background: linear-gradient(#11100fdd, transparent); pointer-events: none; }
 .game-header > div { display: flex; gap: 0.8rem; align-items: baseline; }
 .game-header span { color: #b6aa96; font-size: 0.88rem; }
-.game-header button { pointer-events: auto; }
-.hud { position: absolute; left: 1rem; bottom: 1rem; width: min(32rem, calc(100% - 2rem)); padding: 0.75rem 0.9rem; background: #171513dc; border: 1px solid #3e3933; border-radius: 6px; pointer-events: none; }
+.game-header button { min-height: 2.75rem; pointer-events: auto; }
+.hud { position: absolute; z-index: 10; left: 1rem; bottom: 1rem; width: min(32rem, calc(100% - 2rem)); padding: 0.75rem 0.9rem; background: #171513dc; border: 1px solid #3e3933; border-radius: 6px; pointer-events: none; }
 .hud p { margin: 0.35rem 0 0; color: #bdb3a3; font-size: 0.85rem; }
 .health { height: 0.55rem; background: #351a19; border: 1px solid #6a322f; overflow: hidden; }
 .health span { display: block; height: 100%; background: #a7463f; }
 .mobile-controls-hint { display: none; }
 
-.mobile-controls { display: none; position: absolute; inset: auto 0 0; align-items: flex-end; justify-content: space-between; gap: 2rem; padding: 1rem max(1rem, env(safe-area-inset-right)) max(1rem, env(safe-area-inset-bottom)) max(1rem, env(safe-area-inset-left)); pointer-events: none; }
+.mobile-controls { display: none; position: absolute; z-index: 10; inset: auto 0 0; align-items: flex-end; justify-content: space-between; gap: 2rem; padding: 1rem max(1rem, env(safe-area-inset-right)) max(1rem, env(safe-area-inset-bottom)) max(1rem, env(safe-area-inset-left)); pointer-events: none; }
 .virtual-stick,
 .touch-attack { pointer-events: auto; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
-.virtual-stick { position: relative; width: clamp(6.75rem, 24vw, 8.25rem); aspect-ratio: 1; border: 1px solid #8e7a5688; border-radius: 50%; background: #171513a6; box-shadow: inset 0 0 0 1px #0008, 0 0.4rem 1.5rem #0008; touch-action: none; }
+.virtual-stick { position: relative; width: clamp(7.25rem, 26vw, 8.75rem); aspect-ratio: 1; border: 1px solid #8e7a5688; border-radius: 50%; background: #171513a6; box-shadow: inset 0 0 0 1px #0008, 0 0.4rem 1.5rem #0008; touch-action: none; }
 .virtual-stick::before { content: ""; position: absolute; inset: 24%; border: 1px solid #8e7a564f; border-radius: 50%; }
 .virtual-stick[aria-disabled="true"] { opacity: 0.4; }
-.virtual-stick-knob { position: absolute; left: 29%; top: 29%; width: 42%; height: 42%; border: 1px solid #d6b45faa; border-radius: 50%; background: #6b5b3fe6; box-shadow: 0 0.25rem 0.8rem #0009; pointer-events: none; will-change: transform; }
+.virtual-stick-knob { position: absolute; left: 31%; top: 31%; width: 38%; height: 38%; border: 1px solid #d6b45faa; border-radius: 50%; background: #6b5b3fe6; box-shadow: 0 0.25rem 0.8rem #0009; pointer-events: none; will-change: transform; }
 .touch-attack { width: clamp(5.25rem, 20vw, 6.5rem); aspect-ratio: 1; border-radius: 50%; border-color: #9f564f; background: #682f2be6; font-weight: 700; letter-spacing: 0.02em; touch-action: manipulation; box-shadow: 0 0.4rem 1.5rem #0008; }
 .touch-attack:active { transform: scale(0.96); background: #7b3832; }
 
-.settings-backdrop { position: absolute; inset: 0; display: flex; justify-content: flex-end; background: #0008; }
-.settings-panel { width: min(48rem, 94vw); height: 100%; overflow: auto; padding: 1.4rem; background: #171513; border-left: 1px solid #3e3933; box-shadow: -14px 0 40px #0008; }
-.settings-panel > header { display: flex; justify-content: space-between; gap: 1rem; align-items: start; border-bottom: 1px solid #38332e; padding-bottom: 1rem; }
+.settings-backdrop { position: absolute; z-index: 100; inset: 0; display: flex; justify-content: flex-end; overflow: hidden; background: #000b; overscroll-behavior: contain; }
+.settings-panel { width: min(56rem, 96vw); height: 100dvh; max-height: 100dvh; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; scrollbar-gutter: stable; background: #171513; border-left: 1px solid #3e3933; box-shadow: -14px 0 40px #0008; }
+.settings-panel > header { position: sticky; z-index: 2; top: 0; display: flex; justify-content: space-between; gap: 1rem; align-items: start; padding: max(1.2rem, env(safe-area-inset-top)) max(1.4rem, env(safe-area-inset-right)) 1rem max(1.4rem, env(safe-area-inset-left)); background: #171513f2; border-bottom: 1px solid #38332e; backdrop-filter: blur(12px); }
+.settings-panel > header > div { min-width: 0; }
+.settings-panel > header button { flex: 0 0 auto; min-width: 4.5rem; min-height: 2.75rem; }
 .settings-panel h1 { margin: 0; font-size: 1.6rem; }
 .settings-panel h2 { margin: 0 0 0.75rem; font-size: 1.05rem; }
-.settings-panel p { color: #bdb3a3; }
-.settings-panel section { padding: 1.1rem 0; border-bottom: 1px solid #302c28; }
-.settings-panel label { display: grid; gap: 0.4rem; margin: 0.7rem 0; color: #d7cfc2; }
+.settings-panel p { color: #bdb3a3; overflow-wrap: anywhere; }
+.settings-panel > section { min-width: 0; margin: 0 1.4rem; padding: 1.1rem 0; border-bottom: 1px solid #302c28; }
+.settings-panel > section:last-child { padding-bottom: max(2rem, env(safe-area-inset-bottom)); border-bottom: 0; }
+.settings-panel label { display: grid; min-width: 0; gap: 0.4rem; margin: 0.7rem 0; color: #d7cfc2; }
 .settings-actions { display: flex; gap: 0.6rem; flex-wrap: wrap; margin: 0.7rem 0; }
+.settings-actions button { min-height: 2.75rem; }
 .settings-note { font-size: 0.85rem; }
 .checkbox-row { display: flex !important; grid-template-columns: none; align-items: center; gap: 0.6rem !important; }
 .checkbox-row input { width: auto; }
-.keybindings-section { border-bottom: 0 !important; }
+.keybindings-section { min-width: 0; border-bottom: 0 !important; }
+
+/* The reusable editor is viewport-responsive, but this editor lives in a
+   narrower drawer. Force its container-sized compact layout here. */
+.settings-panel .ib-editor {
+  --ib-border: #4b443d;
+  --ib-muted: #a99f91;
+  --ib-surface: #141210;
+  --ib-subtle: #201d1a;
+  --ib-accent: #d6b45f;
+  --ib-accent-soft: #3b3222;
+  --ib-danger: #ff8a80;
+  --ib-danger-soft: #3a211e;
+  --ib-warning: #e0b766;
+  min-width: 0;
+  max-width: 100%;
+  color: #eee8dc;
+}
+.settings-panel .ib-workspace,
+.settings-panel .ib-recorder-grid { grid-template-columns: minmax(0, 1fr); }
+.settings-panel .ib-keyboard-panel { position: static; min-width: 0; }
+.settings-panel .ib-toolbar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.settings-panel .ib-search,
+.settings-panel .ib-shortcut-filter { grid-column: 1 / -1; }
+.settings-panel .ib-table-head { display: none; }
+.settings-panel .ib-row { grid-template-columns: minmax(0, 1fr); }
+.settings-panel .ib-recorder-heading,
+.settings-panel .ib-keyboard-panel-heading { align-items: stretch; flex-direction: column; }
+.settings-panel .ib-table,
+.settings-panel .ib-recorder,
+.settings-panel .ib-transfer,
+.settings-panel .ib-diagnostics { min-width: 0; max-width: 100%; }
+.settings-panel .ib-keyboard { max-width: 100%; }
 
 @media (hover: none) and (pointer: coarse), (max-width: 760px) {
   .mobile-controls { display: flex; }
   .desktop-controls-hint { display: none; }
   .mobile-controls-hint { display: block; }
-  .hud { left: max(0.75rem, env(safe-area-inset-left)); bottom: calc(9.5rem + env(safe-area-inset-bottom)); width: min(26rem, calc(100% - 1.5rem - env(safe-area-inset-left) - env(safe-area-inset-right))); padding: 0.6rem 0.7rem; }
+  .hud { left: max(0.75rem, env(safe-area-inset-left)); bottom: calc(10rem + env(safe-area-inset-bottom)); width: min(26rem, calc(100% - 1.5rem - env(safe-area-inset-left) - env(safe-area-inset-right))); padding: 0.6rem 0.7rem; }
   .hud p { font-size: 0.78rem; }
 }
 
 @media (max-width: 700px) {
   .game-header > div { flex-direction: column; gap: 0.15rem; }
-  .settings-panel { width: 100%; padding-top: max(1.4rem, env(safe-area-inset-top)); padding-right: max(1.4rem, env(safe-area-inset-right)); padding-bottom: max(1.4rem, env(safe-area-inset-bottom)); padding-left: max(1.4rem, env(safe-area-inset-left)); }
+  .settings-panel { width: 100vw; max-width: 100vw; border-left: 0; }
+  .settings-panel > header { padding-right: max(1rem, env(safe-area-inset-right)); padding-left: max(1rem, env(safe-area-inset-left)); }
+  .settings-panel > header p { margin-bottom: 0; font-size: 0.85rem; }
+  .settings-panel > section { margin-right: max(1rem, env(safe-area-inset-right)); margin-left: max(1rem, env(safe-area-inset-left)); }
+  .settings-panel .ib-toolbar { grid-template-columns: minmax(0, 1fr); }
+  .settings-panel .ib-toolbar > *,
+  .settings-panel .ib-search,
+  .settings-panel .ib-shortcut-filter { grid-column: auto; }
+}
+
+@media (max-width: 430px) {
+  .settings-panel > header { gap: 0.75rem; }
+  .settings-panel h1 { font-size: 1.35rem; }
+  .settings-panel > header p { display: none; }
+  .settings-actions { display: grid; grid-template-columns: 1fr; }
+  .settings-actions button,
+  .settings-panel > section > button { width: 100%; min-height: 2.8rem; }
 }

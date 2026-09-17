@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  VIRTUAL_STICK_DEAD_ZONE,
+  VIRTUAL_STICK_DIAGONAL_RATIO,
   VIRTUAL_STICK_TRAVEL_RATIO,
   sampleVirtualStick,
 } from "./virtual-stick.js";
@@ -18,15 +20,36 @@ describe("sampleVirtualStick", () => {
     });
   });
 
-  test("maps screen directions to authoritative movement axes", () => {
+  test("requires deliberate travel before movement activates", () => {
+    const maxTravel = (rect.width / 2) * VIRTUAL_STICK_TRAVEL_RATIO;
+    const insideDeadZone = maxTravel * (VIRTUAL_STICK_DEAD_ZONE - 0.05);
+    const outsideDeadZone = maxTravel * (VIRTUAL_STICK_DEAD_ZONE + 0.05);
+
+    expect(sampleVirtualStick(center.x + insideDeadZone, center.y, rect)).toMatchObject({
+      x: 0,
+      z: 0,
+    });
+    expect(sampleVirtualStick(center.x + outsideDeadZone, center.y, rect)).toMatchObject({
+      x: 1,
+      z: 0,
+    });
+  });
+
+  test("maps deliberate cardinal directions to authoritative movement axes", () => {
     expect(sampleVirtualStick(center.x + 80, center.y, rect)).toMatchObject({ x: 1, z: 0 });
     expect(sampleVirtualStick(center.x - 80, center.y, rect)).toMatchObject({ x: -1, z: 0 });
     expect(sampleVirtualStick(center.x, center.y - 80, rect)).toMatchObject({ x: 0, z: -1 });
     expect(sampleVirtualStick(center.x, center.y + 80, rect)).toMatchObject({ x: 0, z: 1 });
   });
 
-  test("supports diagonal movement while preserving a center dead zone", () => {
-    expect(sampleVirtualStick(center.x + 10, center.y - 10, rect)).toMatchObject({ x: 0, z: 0 });
+  test("does not turn small off-axis thumb drift into a diagonal", () => {
+    const maxTravel = (rect.width / 2) * VIRTUAL_STICK_TRAVEL_RATIO;
+    const x = maxTravel * 0.9;
+    const z = x * (VIRTUAL_STICK_DIAGONAL_RATIO - 0.08);
+    expect(sampleVirtualStick(center.x + x, center.y - z, rect)).toMatchObject({ x: 1, z: 0 });
+  });
+
+  test("still supports deliberate diagonal movement", () => {
     expect(sampleVirtualStick(center.x + 80, center.y - 80, rect)).toMatchObject({ x: 1, z: -1 });
   });
 
