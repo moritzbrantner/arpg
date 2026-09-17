@@ -12,6 +12,44 @@ function delay(milliseconds) {
   return new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds));
 }
 
+function dedicatedCertificateHashBytes() {
+  const hex = process.env.ARPG_E2E_CERT_SHA256;
+  if (!hex || !/^[0-9a-f]{64}$/i.test(hex)) {
+    throw new Error("ARPG_E2E_CERT_SHA256 must contain the generated certificate SHA-256");
+  }
+  return [...Buffer.from(hex, "hex")];
+}
+
+async function installDedicatedCertificatePin(page) {
+  await page.addInitScript(
+    ({ hashBytes }) => {
+      const NativeWebTransport = globalThis.WebTransport;
+      if (!NativeWebTransport) return;
+
+      function PinnedWebTransport(url, options = {}) {
+        return new NativeWebTransport(url, {
+          ...options,
+          serverCertificateHashes: [
+            {
+              algorithm: "sha-256",
+              value: new Uint8Array(hashBytes),
+            },
+          ],
+        });
+      }
+
+      PinnedWebTransport.prototype = NativeWebTransport.prototype;
+      Object.setPrototypeOf(PinnedWebTransport, NativeWebTransport);
+      Object.defineProperty(globalThis, "WebTransport", {
+        configurable: true,
+        writable: true,
+        value: PinnedWebTransport,
+      });
+    },
+    { hashBytes: dedicatedCertificateHashBytes() },
+  );
+}
+
 async function startDedicatedServer() {
   const binary =
     process.env.ARPG_E2E_SERVER_BIN ?? resolve(process.cwd(), "../target/debug/server");
@@ -207,6 +245,7 @@ test("real browser WebTransport resumes the dedicated ARPG authority after an ou
   context,
   page,
 }) => {
+  await installDedicatedCertificatePin(page);
   const server = await startDedicatedServer();
   try {
     await page.goto("/?seed=999");
