@@ -24,6 +24,8 @@ The browser slice currently proves:
 
 This is deliberately not yet a content-complete ARPG. The slice exists to prove the foundations before inventory, loot, skills, richer AI, assets, persistence, or larger levels are built on top.
 
+The next product foundation is the **mechanical game loop**: locomotion, action timing, targeting, hit/reaction semantics, pickup/reward interaction, and the one-way presentation cue boundary. These mechanics are treated as reusable ARPG domain contracts rather than late polish or per-skill/per-monster special cases. See [the roadmap](docs/ROADMAP.md).
+
 ## Foundation ownership
 
 | Concern | Authority |
