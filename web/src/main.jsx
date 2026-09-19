@@ -16,7 +16,7 @@ const PROFILE_KEY = "arpg-input-profile-v1";
 const SETUP_URL_KEY = "arpg-setup-service-url-v1";
 const DEDICATED_URL_KEY = "arpg-dedicated-url-v1";
 const GRAPHICS_KEY = "arpg-graphics-v1";
-const PROTOCOL_VERSION = 4;
+const PROTOCOL_VERSION = 5;
 const gameplayContext = { op: "context", id: "gameplay" };
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
@@ -37,6 +37,7 @@ const inputRegistry = {
     ["game.moveRight", "Move right", "KeyD", "allow", "Movement"],
     ["game.primaryAttack", "Primary attack", "Space", "never", "Combat"],
     ["game.secondaryAttack", "Heavy attack", "KeyQ", "never", "Combat"],
+    ["game.interact", "Interact / pick up", "KeyE", "never", "Interaction"],
   ]
     .map(([id, title, code, repeatPolicy, category]) => ({
       id,
@@ -271,6 +272,14 @@ function buildFrame(snapshot, focusPlayerId, width, height) {
           transform: { translation },
         };
       }),
+    ...(snapshot.groundLoot ?? []).map((loot) => ({
+      id: `loot-${loot.id}`,
+      geometry: { kind: "sphere", radius: 0.16 },
+      color: loot.kind === "gold" ? "#d9b44a" : "#c8c1b7",
+      transform: {
+        translation: [loot.position[0] / scale, 0.16, loot.position[2] / scale],
+      },
+    })),
   ];
 
   return {
@@ -718,6 +727,7 @@ function App() {
         const combatCommand = {
           "game.primaryAttack": "primaryAttack",
           "game.secondaryAttack": "secondaryAttack",
+          "game.interact": "interact",
         }[dispatch.action];
         if (combatCommand && dispatch.phase === "press") {
           dispatchCommand({ type: combatCommand });
@@ -802,19 +812,26 @@ function App() {
               XP {player.experienceIntoLevel}/{player.experienceForNextLevel}
             </span>
             <span>Damage {player.attackDamage}</span>
+            <span>Gold {player.gold}</span>
           </div>
         )}
         <p>{status}</p>
         {player?.action && (
           <p className="action-status">
-            {player.action.kind === "secondaryAttack" ? "Heavy" : "Primary"} ·{" "}
-            {player.action.phase} · {player.action.ticksRemaining}t
+            {player.action.kind === "secondaryAttack"
+              ? "Heavy"
+              : player.action.kind === "interact"
+                ? "Interact"
+                : "Primary"}{" "}
+            · {player.action.phase} · {player.action.ticksRemaining}t
           </p>
         )}
         <p className="desktop-controls-hint">
-          WASD move · Space primary · Q heavy · Esc settings
+          WASD move · Space primary · Q heavy · E interact · Esc settings
         </p>
-        <p className="mobile-controls-hint">Left stick to move · use the combat buttons to strike</p>
+        <p className="mobile-controls-hint">
+          Left stick to move · Attack / Heavy / Interact on the right
+        </p>
       </section>
 
       {ready && !settingsOpen && (
@@ -870,6 +887,22 @@ function App() {
           >
             <strong>Heavy</strong>
             <span>Q</span>
+          </button>
+          <button
+            type="button"
+            className={`combat-action combat-action-interact ${
+              player?.action?.kind === "interact" ? "is-committed" : ""
+            }`}
+            data-phase={player?.action?.kind === "interact" ? player.action.phase : undefined}
+            aria-label="Interact or pick up"
+            disabled={!playerId || Boolean(player?.action)}
+            onPointerDown={(event) => {
+              event.preventDefault();
+              triggerCombatAction("interact");
+            }}
+          >
+            <strong>Interact</strong>
+            <span>E</span>
           </button>
         </section>
       )}
