@@ -14,14 +14,20 @@ pub type RunSeed = u32;
 pub const TICK_HZ: u16 = 60;
 pub const MAX_PLAYERS: usize = 4;
 pub const WORLD_UNITS_PER_METER: i32 = 100;
-const PLAYER_SPEED: i32 = 260;
-const PLAYER_DIAGONAL_SPEED: i32 = 184;
+// physics-engine::World::step(1) integrates velocity as world units per simulation tick.
+// At 60 Hz and 100 world units per meter, 7 units/tick is 4.2 m/s rather than
+// the previous 260 units/tick (156 m/s).
+const PLAYER_SPEED: i32 = 7;
+const PLAYER_DIAGONAL_SPEED: i32 = 5;
 const PLAYER_BODY_BASE: u64 = 1_000;
 const STATIC_BODY_BASE: u64 = 10_000;
 const DOOR_BODY_BASE: u64 = 20_000;
 const PLAYER_HALF_EXTENTS: Vec3i = Vec3i::new(30, 50, 30);
 const PLAYER_Y: i32 = 50;
 const ATTACK_RANGE: i64 = 220;
+const SECONDARY_ATTACK_RANGE: i64 = 150;
+const SECONDARY_ATTACK_DAMAGE_NUMERATOR: u16 = 3;
+const SECONDARY_ATTACK_DAMAGE_DENOMINATOR: u16 = 2;
 const BASE_ATTACK_DAMAGE: u16 = 25;
 const ATTACK_DAMAGE_PER_LEVEL: u16 = 5;
 const BASE_MAX_HEALTH: u16 = 100;
@@ -29,14 +35,14 @@ const MAX_HEALTH_PER_LEVEL: u16 = 10;
 const EXPERIENCE_PER_LEVEL: u32 = 100;
 const MONSTER_EXPERIENCE_REWARD: u32 = 50;
 const DEFAULT_DUNGEON_SEED: RunSeed = 0xA420_0916;
-const ARENA_HALF_WIDTH: i32 = 900;
-const ARENA_HALF_DEPTH: i32 = 650;
+const ARENA_HALF_WIDTH: i32 = 3_000;
+const ARENA_HALF_DEPTH: i32 = 1_800;
 const WALL_HALF_THICKNESS: i32 = 25;
 const WALL_HALF_HEIGHT: i32 = 100;
 const DOOR_HALF_WIDTH: i32 = 90;
 const PARTITION_MARGIN: i32 = 25;
-const DOOR_EDGE_MARGIN: i32 = 140;
-const ROOM_SPAWN_MARGIN: i32 = 100;
+const DOOR_EDGE_MARGIN: i32 = 250;
+const ROOM_SPAWN_MARGIN: i32 = 220;
 const PLAYER_SPAWN_OFFSET: i32 = 60;
 const ROOM_ACTIVATION_MARGIN: i32 = 30;
 
@@ -108,6 +114,7 @@ pub trait AuthoritativeGame: Send + 'static {
 pub enum ArpgCommand {
     SetMovement { x: i8, z: i8 },
     PrimaryAttack,
+    SecondaryAttack,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -394,7 +401,13 @@ impl ArpgGame {
         Ok(())
     }
 
-    fn attack(&mut self, player_id: PlayerId) -> Result<(), GameError> {
+    fn attack(
+        &mut self,
+        player_id: PlayerId,
+        range: i64,
+        damage_numerator: u16,
+        damage_denominator: u16,
+    ) -> Result<(), GameError> {
         let player_position = self
             .world
             .body(Self::player_body_id(player_id))
@@ -406,14 +419,16 @@ impl ArpgGame {
                 .ok_or_else(|| GameError::new("attack references an unknown player"))?
                 .experience,
         );
-        let attack_damage = Self::attack_damage_for_level(player_level);
+        let attack_damage = Self::attack_damage_for_level(player_level)
+            .saturating_mul(damage_numerator)
+            / damage_denominator.max(1);
         let active_rooms = self
             .rooms
             .iter()
             .filter(|room| room.encounter_state == RoomEncounterState::Active)
             .map(|room| room.id)
             .collect::<BTreeSet<_>>();
-        let range_sq = ATTACK_RANGE * ATTACK_RANGE;
+        let range_sq = range * range;
         let target = self
             .monsters
             .iter_mut()
@@ -592,7 +607,13 @@ impl AuthoritativeGame for ArpgGame {
                 state.movement_x = x.clamp(-1, 1);
                 state.movement_z = z.clamp(-1, 1);
             }
-            ArpgCommand::PrimaryAttack => self.attack(command.player_id)?,
+            ArpgCommand::PrimaryAttack => self.attack(command.player_id, ATTACK_RANGE, 1, 1)?,
+            ArpgCommand::SecondaryAttack => self.attack(
+                command.player_id,
+                SECONDARY_ATTACK_RANGE,
+                SECONDARY_ATTACK_DAMAGE_NUMERATOR,
+                SECONDARY_ATTACK_DAMAGE_DENOMINATOR,
+            )?,
         }
         self.last_sequences
             .insert(command.player_id, command.sequence);
@@ -678,9 +699,9 @@ fn generate_dungeon(seed: RunSeed) -> GeneratedDungeon {
     let mut colliders = Vec::new();
     let mut doors = Vec::new();
     let mut rng = DungeonRng::new(u64::from(seed));
-    let left_partition_x = rng.range_i32(-160, -40);
-    let right_partition_x = rng.range_i32(300, 460);
-    let horizontal_partition_z = rng.range_i32(-80, 120);
+    let left_partition_x = rng.range_i32(-1_200, -800);
+    let right_partition_x = rng.range_i32(800, 1_200);
+    let horizontal_partition_z = rng.range_i32(-300, 300);
 
     push_wall(
         &mut colliders,
@@ -1021,8 +1042,8 @@ mod tests {
             health: BASE_MAX_HEALTH,
             experience: 0,
         });
-        assert_eq!(cardinal, Vec3i::new(260, 0, 0));
-        assert_eq!(diagonal, Vec3i::new(184, 0, 184));
+        assert_eq!(cardinal, Vec3i::new(7, 0, 0));
+        assert_eq!(diagonal, Vec3i::new(5, 0, 5));
     }
 
     #[test]
@@ -1136,6 +1157,49 @@ mod tests {
             game.players.get(&1).unwrap().experience,
             EXPERIENCE_PER_LEVEL + MONSTER_EXPERIENCE_REWARD
         );
+    }
+
+    #[test]
+    fn secondary_attack_trades_reach_for_more_damage() {
+        let mut game = ArpgGame::new_with_seed(42).unwrap();
+        let room_id = 2;
+        let (center_x, center_z) = game
+            .rooms
+            .iter()
+            .find(|room| room.id == room_id)
+            .unwrap()
+            .center();
+        game.player_spawns[0] = Vec3i::new(center_x, PLAYER_Y, center_z);
+        game.add_player(1).unwrap();
+        game.reconcile_encounters().unwrap();
+
+        let monster = game
+            .monsters
+            .iter_mut()
+            .find(|monster| monster.room_id == room_id)
+            .unwrap();
+        monster.position = Vec3i::new(center_x + 100, PLAYER_Y, center_z);
+        monster.health = 100;
+
+        game.apply_command(PlayerCommand::new(1, 1, ArpgCommand::SecondaryAttack).unwrap())
+            .unwrap();
+
+        assert_eq!(
+            game.monsters
+                .iter()
+                .find(|monster| monster.room_id == room_id)
+                .unwrap()
+                .health,
+            63
+        );
+    }
+
+    #[test]
+    fn generated_rooms_are_large_enough_for_arpg_combat() {
+        let dungeon = generate_dungeon(42);
+        assert!(dungeon.rooms.iter().all(|room| {
+            room.max_x - room.min_x >= 1_400 && room.max_z - room.min_z >= 1_400
+        }));
     }
 
     #[test]
@@ -1397,7 +1461,7 @@ mod tests {
             game.advance_tick().unwrap();
         }
         let x = game.snapshot().unwrap().players[0].position[0];
-        assert!(x >= -845, "player crossed the west wall: {x}");
+        assert!(x >= -2_945, "player crossed the west wall: {x}");
     }
 
     #[test]
