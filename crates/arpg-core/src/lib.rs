@@ -1838,6 +1838,52 @@ mod tests {
     }
 
     #[test]
+    fn defeated_player_cannot_move_or_start_actions() {
+        let mut game = ArpgGame::new_with_seed(42).unwrap();
+        let room_id = 2;
+        let (center_x, center_z) = game
+            .rooms
+            .iter()
+            .find(|room| room.id == room_id)
+            .unwrap()
+            .center();
+        game.player_spawns[0] = Vec3i::new(center_x, PLAYER_Y, center_z);
+        game.add_player(1).unwrap();
+        game.players.get_mut(&1).unwrap().health = MONSTER_ATTACK_DAMAGE;
+        game.reconcile_encounters().unwrap();
+        game.monsters
+            .iter_mut()
+            .find(|monster| monster.room_id == room_id)
+            .unwrap()
+            .position = Vec3i::new(center_x + 100, PLAYER_Y, center_z);
+
+        game.advance_tick().unwrap();
+        for _ in 0..MONSTER_ATTACK_WINDUP_TICKS {
+            game.advance_tick().unwrap();
+        }
+
+        let defeated = game.snapshot().unwrap().players[0].clone();
+        assert_eq!(defeated.health, 0);
+        assert!(!defeated.alive);
+        let position = defeated.position;
+
+        game.apply_command(
+            PlayerCommand::new(1, 1, ArpgCommand::SetMovement { x: -1, z: 0 }).unwrap(),
+        )
+        .unwrap();
+        game.apply_command(PlayerCommand::new(1, 2, ArpgCommand::PrimaryAttack).unwrap())
+            .unwrap();
+        for _ in 0..PRIMARY_WINDUP_TICKS {
+            game.advance_tick().unwrap();
+        }
+
+        let after = game.snapshot().unwrap().players[0].clone();
+        assert_eq!(after.position, position);
+        assert!(after.action.is_none());
+        assert_eq!(after.health, 0);
+    }
+
+    #[test]
     fn player_stagger_interrupts_monster_windup() {
         let mut game = ArpgGame::new_with_seed(42).unwrap();
         let room_id = 2;
