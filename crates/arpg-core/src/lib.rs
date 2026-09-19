@@ -1542,6 +1542,7 @@ mod tests {
             facing_x: 1,
             facing_z: 0,
             action: None,
+            hurt_ticks_remaining: 0,
             health: BASE_MAX_HEALTH,
             experience: 0,
             gold: 0,
@@ -1552,6 +1553,7 @@ mod tests {
             facing_x: 1,
             facing_z: 1,
             action: None,
+            hurt_ticks_remaining: 0,
             health: BASE_MAX_HEALTH,
             experience: 0,
             gold: 0,
@@ -1732,6 +1734,141 @@ mod tests {
                 .health,
             38
         );
+    }
+
+    #[test]
+    fn monster_attack_is_telegraphed_before_damage() {
+        let mut game = ArpgGame::new_with_seed(42).unwrap();
+        let room_id = 2;
+        let (center_x, center_z) = game
+            .rooms
+            .iter()
+            .find(|room| room.id == room_id)
+            .unwrap()
+            .center();
+        game.player_spawns[0] = Vec3i::new(center_x, PLAYER_Y, center_z);
+        game.add_player(1).unwrap();
+        game.reconcile_encounters().unwrap();
+        let monster = game
+            .monsters
+            .iter_mut()
+            .find(|monster| monster.room_id == room_id)
+            .unwrap();
+        monster.position = Vec3i::new(center_x + 100, PLAYER_Y, center_z);
+
+        game.advance_tick().unwrap();
+
+        let telegraph = game.snapshot().unwrap();
+        assert_eq!(telegraph.players[0].health, BASE_MAX_HEALTH);
+        let monster_action = telegraph
+            .monsters
+            .iter()
+            .find(|monster| monster.room_id == room_id)
+            .unwrap()
+            .action
+            .unwrap();
+        assert_eq!(monster_action.phase, ActionPhase::Windup);
+        assert_eq!(monster_action.ticks_remaining, MONSTER_ATTACK_WINDUP_TICKS);
+        assert_eq!(monster_action.target_player_id, 1);
+
+        for _ in 0..MONSTER_ATTACK_WINDUP_TICKS {
+            game.advance_tick().unwrap();
+        }
+
+        let impact = game.snapshot().unwrap();
+        assert_eq!(
+            impact.players[0].health,
+            BASE_MAX_HEALTH - MONSTER_ATTACK_DAMAGE
+        );
+        assert_eq!(
+            impact.players[0].reaction.unwrap().kind,
+            PlayerReactionKind::Hurt
+        );
+        assert_eq!(
+            impact
+                .monsters
+                .iter()
+                .find(|monster| monster.room_id == room_id)
+                .unwrap()
+                .action
+                .unwrap()
+                .phase,
+            ActionPhase::Active
+        );
+    }
+
+    #[test]
+    fn moving_out_of_monster_telegraph_causes_a_miss() {
+        let mut game = ArpgGame::new_with_seed(42).unwrap();
+        let room_id = 2;
+        let (center_x, center_z) = game
+            .rooms
+            .iter()
+            .find(|room| room.id == room_id)
+            .unwrap()
+            .center();
+        game.player_spawns[0] = Vec3i::new(center_x, PLAYER_Y, center_z);
+        game.add_player(1).unwrap();
+        game.reconcile_encounters().unwrap();
+        game.monsters
+            .iter_mut()
+            .find(|monster| monster.room_id == room_id)
+            .unwrap()
+            .position = Vec3i::new(center_x + 100, PLAYER_Y, center_z);
+
+        game.advance_tick().unwrap();
+        game.apply_command(
+            PlayerCommand::new(1, 1, ArpgCommand::SetMovement { x: -1, z: 0 }).unwrap(),
+        )
+        .unwrap();
+        for _ in 0..MONSTER_ATTACK_WINDUP_TICKS {
+            game.advance_tick().unwrap();
+        }
+
+        let snapshot = game.snapshot().unwrap();
+        assert_eq!(snapshot.players[0].health, BASE_MAX_HEALTH);
+        assert!(
+            snapshot.players[0].position[0] <= center_x - 100,
+            "player did not leave the telegraphed melee range"
+        );
+    }
+
+    #[test]
+    fn player_stagger_interrupts_monster_windup() {
+        let mut game = ArpgGame::new_with_seed(42).unwrap();
+        let room_id = 2;
+        let (center_x, center_z) = game
+            .rooms
+            .iter()
+            .find(|room| room.id == room_id)
+            .unwrap()
+            .center();
+        game.player_spawns[0] = Vec3i::new(center_x, PLAYER_Y, center_z);
+        game.add_player(1).unwrap();
+        game.reconcile_encounters().unwrap();
+        game.monsters
+            .iter_mut()
+            .find(|monster| monster.room_id == room_id)
+            .unwrap()
+            .position = Vec3i::new(center_x + 100, PLAYER_Y, center_z);
+
+        game.advance_tick().unwrap();
+        game.apply_command(PlayerCommand::new(1, 1, ArpgCommand::PrimaryAttack).unwrap())
+            .unwrap();
+        for _ in 0..PRIMARY_WINDUP_TICKS {
+            game.advance_tick().unwrap();
+        }
+
+        let monster = game
+            .snapshot()
+            .unwrap()
+            .monsters
+            .into_iter()
+            .find(|monster| monster.room_id == room_id)
+            .unwrap();
+        assert_eq!(monster.health, 75);
+        assert!(monster.action.is_none());
+        assert_eq!(monster.reaction.unwrap().kind, MonsterReactionKind::Stagger);
     }
 
     #[test]
@@ -2028,7 +2165,7 @@ mod tests {
         game.add_player(1).unwrap();
         let snapshot = game.snapshot().unwrap();
         let generated = generate_dungeon(snapshot.run_seed);
-        assert_eq!(snapshot.schema_version, 7);
+        assert_eq!(snapshot.schema_version, 8);
         assert_eq!(snapshot.run_seed, 0xDEAD_BEEF);
         assert_eq!(game.run_seed(), snapshot.run_seed);
         assert_eq!(snapshot.rooms, generated.rooms);
