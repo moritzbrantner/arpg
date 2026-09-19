@@ -60,7 +60,7 @@ test("changes and persists the movement hotkey", async ({ page }) => {
 
   settings = await openSettings(page);
   const moveForwardRow = settings.getByRole("row").filter({ hasText: "Move forward" });
-  await expect(moveForwardRow).toContainText("Arrow");
+  await expect(moveForwardRow).toContainText("[ArrowUp]");
   await settings.getByRole("button", { name: "Close" }).click();
 
   const canvas = page.getByLabel("ARPG game world");
@@ -94,7 +94,7 @@ test("replaces the primary-attack hotkey and disables the old binding", async ({
 
   settings = await openSettings(page);
   const primaryRow = settings.getByRole("row").filter({ hasText: "Primary attack" });
-  await expect(primaryRow).toContainText("R");
+  await expect(primaryRow).toContainText("[KeyR]");
   await settings.getByRole("button", { name: "Close" }).click();
 
   const actionStatus = page.locator(".action-status");
