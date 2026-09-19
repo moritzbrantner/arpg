@@ -8,6 +8,7 @@ use physics_engine::{BodyId, RigidBody, Vec3i, World, WorldConfig};
 use serde::{Deserialize, Serialize};
 
 pub type DoorId = u64;
+pub type GroundLootId = u64;
 pub type PlayerId = u32;
 pub type RoomId = u32;
 pub type RunSeed = u32;
@@ -22,6 +23,7 @@ const PLAYER_DIAGONAL_SPEED: i32 = 5;
 const PLAYER_BODY_BASE: u64 = 1_000;
 const STATIC_BODY_BASE: u64 = 10_000;
 const DOOR_BODY_BASE: u64 = 20_000;
+const GROUND_LOOT_ID_BASE: u64 = 30_000;
 const PLAYER_HALF_EXTENTS: Vec3i = Vec3i::new(30, 50, 30);
 const PLAYER_Y: i32 = 50;
 const ATTACK_RANGE: i64 = 220;
@@ -34,6 +36,11 @@ const PRIMARY_RECOVERY_TICKS: u8 = 8;
 const SECONDARY_WINDUP_TICKS: u8 = 10;
 const SECONDARY_ACTIVE_TICKS: u8 = 1;
 const SECONDARY_RECOVERY_TICKS: u8 = 14;
+const INTERACT_WINDUP_TICKS: u8 = 2;
+const INTERACT_ACTIVE_TICKS: u8 = 1;
+const INTERACT_RECOVERY_TICKS: u8 = 3;
+const INTERACT_RANGE: i64 = 160;
+const GROUND_LOOT_GOLD_AMOUNT: u32 = 10;
 const PRIMARY_STAGGER_TICKS: u8 = 4;
 const SECONDARY_STAGGER_TICKS: u8 = 8;
 const BASE_ATTACK_DAMAGE: u16 = 25;
@@ -123,6 +130,7 @@ pub enum ArpgCommand {
     SetMovement { x: i8, z: i8 },
     PrimaryAttack,
     SecondaryAttack,
+    Interact,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -130,6 +138,7 @@ pub enum ArpgCommand {
 pub enum ActionKind {
     PrimaryAttack,
     SecondaryAttack,
+    Interact,
 }
 
 impl ActionKind {
@@ -137,6 +146,7 @@ impl ActionKind {
         match self {
             Self::PrimaryAttack => PRIMARY_WINDUP_TICKS,
             Self::SecondaryAttack => SECONDARY_WINDUP_TICKS,
+            Self::Interact => INTERACT_WINDUP_TICKS,
         }
     }
 
@@ -144,6 +154,7 @@ impl ActionKind {
         match self {
             Self::PrimaryAttack => PRIMARY_ACTIVE_TICKS,
             Self::SecondaryAttack => SECONDARY_ACTIVE_TICKS,
+            Self::Interact => INTERACT_ACTIVE_TICKS,
         }
     }
 
@@ -151,6 +162,7 @@ impl ActionKind {
         match self {
             Self::PrimaryAttack => PRIMARY_RECOVERY_TICKS,
             Self::SecondaryAttack => SECONDARY_RECOVERY_TICKS,
+            Self::Interact => INTERACT_RECOVERY_TICKS,
         }
     }
 }
@@ -196,6 +208,7 @@ pub struct ArpgSnapshot {
     pub doors: Vec<DoorSnapshot>,
     pub players: Vec<PlayerSnapshot>,
     pub monsters: Vec<MonsterSnapshot>,
+    pub ground_loot: Vec<GroundLootSnapshot>,
     pub static_colliders: Vec<StaticColliderSnapshot>,
 }
 
@@ -263,6 +276,7 @@ pub struct PlayerSnapshot {
     pub experience_into_level: u32,
     pub experience_for_next_level: u32,
     pub attack_damage: u16,
+    pub gold: u32,
     pub facing: [i8; 2],
     pub action: Option<PlayerActionSnapshot>,
 }
@@ -276,6 +290,21 @@ pub struct MonsterSnapshot {
     pub health: u16,
     pub alive: bool,
     pub reaction: Option<MonsterReactionSnapshot>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LootKind {
+    Gold,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroundLootSnapshot {
+    pub id: GroundLootId,
+    pub position: [i32; 3],
+    pub kind: LootKind,
+    pub amount: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -324,6 +353,7 @@ struct PlayerState {
     action: Option<ActionState>,
     health: u16,
     experience: u32,
+    gold: u32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -333,6 +363,14 @@ struct MonsterState {
     position: Vec3i,
     health: u16,
     stagger_ticks_remaining: u8,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct GroundLootState {
+    id: GroundLootId,
+    position: Vec3i,
+    kind: LootKind,
+    amount: u32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -385,6 +423,8 @@ pub struct ArpgGame {
     doors: Vec<DoorSnapshot>,
     player_spawns: [Vec3i; MAX_PLAYERS],
     monsters: Vec<MonsterState>,
+    ground_loot: Vec<GroundLootState>,
+    next_ground_loot_id: GroundLootId,
     static_colliders: Vec<StaticColliderSnapshot>,
 }
 
@@ -431,6 +471,8 @@ impl ArpgGame {
             doors,
             player_spawns,
             monsters,
+            ground_loot: Vec::new(),
+            next_ground_loot_id: GROUND_LOOT_ID_BASE,
             static_colliders,
         })
     }
@@ -532,6 +574,55 @@ impl ArpgGame {
         dot > 0 && 4 * dot * dot >= distance_sq * facing_len_sq
     }
 
+    fn spawn_ground_loot(&mut self, position: Vec3i) -> Result<(), GameError> {
+        let id = self.next_ground_loot_id;
+        self.next_ground_loot_id = self
+            .next_ground_loot_id
+            .checked_add(1)
+            .ok_or_else(|| GameError::new("ground loot id overflow"))?;
+        self.ground_loot.push(GroundLootState {
+            id,
+            position,
+            kind: LootKind::Gold,
+            amount: GROUND_LOOT_GOLD_AMOUNT,
+        });
+        Ok(())
+    }
+
+    fn resolve_interaction(&mut self, player_id: PlayerId) -> Result<(), GameError> {
+        let player_position = self
+            .world
+            .body(Self::player_body_id(player_id))
+            .ok_or_else(|| GameError::new("player physics body is missing"))?
+            .position();
+        let range_sq = INTERACT_RANGE * INTERACT_RANGE;
+        let target = self
+            .ground_loot
+            .iter()
+            .enumerate()
+            .filter_map(|(index, loot)| {
+                let dx = i64::from(loot.position.x - player_position.x);
+                let dz = i64::from(loot.position.z - player_position.z);
+                let distance_sq = dx * dx + dz * dz;
+                (distance_sq <= range_sq).then_some((distance_sq, loot.id, index))
+            })
+            .min_by_key(|(distance_sq, id, _)| (*distance_sq, *id));
+        let Some((_, _, index)) = target else {
+            return Ok(());
+        };
+        let loot = self.ground_loot.remove(index);
+        let player = self
+            .players
+            .get_mut(&player_id)
+            .ok_or_else(|| GameError::new("interaction references an unknown player"))?;
+        match loot.kind {
+            LootKind::Gold => {
+                player.gold = player.gold.saturating_add(loot.amount);
+            }
+        }
+        Ok(())
+    }
+
     fn resolve_attack(
         &mut self,
         player_id: PlayerId,
@@ -558,6 +649,7 @@ impl ArpgGame {
                 SECONDARY_ATTACK_DAMAGE_DENOMINATOR,
                 SECONDARY_STAGGER_TICKS,
             ),
+            ActionKind::Interact => return Ok(()),
         };
         let attack_damage = Self::attack_damage_for_level(player_level)
             .saturating_mul(damage_numerator)
@@ -582,18 +674,19 @@ impl ArpgGame {
             })
             .min_by_key(|(distance_sq, id, _)| (*distance_sq, *id));
 
-        let killed = if let Some((_, _, monster)) = target {
+        let killed_position = if let Some((_, _, monster)) = target {
             let previous_health = monster.health;
             monster.health = monster.health.saturating_sub(attack_damage);
             if monster.health > 0 {
                 monster.stagger_ticks_remaining = stagger_ticks;
             }
-            previous_health > 0 && monster.health == 0
+            (previous_health > 0 && monster.health == 0).then_some(monster.position)
         } else {
-            false
+            None
         };
-        if killed {
+        if let Some(position) = killed_position {
             self.award_experience(player_id, MONSTER_EXPERIENCE_REWARD)?;
+            self.spawn_ground_loot(position)?;
         }
         self.reconcile_encounters()
     }
@@ -635,7 +728,12 @@ impl ArpgGame {
                 }
             };
             if let Some((kind, facing_x, facing_z)) = effect {
-                self.resolve_attack(player_id, kind, facing_x, facing_z)?;
+                match kind {
+                    ActionKind::PrimaryAttack | ActionKind::SecondaryAttack => {
+                        self.resolve_attack(player_id, kind, facing_x, facing_z)?;
+                    }
+                    ActionKind::Interact => self.resolve_interaction(player_id)?,
+                }
             }
         }
         Ok(())
@@ -760,6 +858,7 @@ impl AuthoritativeGame for ArpgGame {
                 action: None,
                 health: BASE_MAX_HEALTH,
                 experience: 0,
+                gold: 0,
             },
         );
         self.last_sequences.insert(player_id, 0);
@@ -807,6 +906,7 @@ impl AuthoritativeGame for ArpgGame {
             ArpgCommand::SecondaryAttack => {
                 self.start_action(command.player_id, ActionKind::SecondaryAttack)?
             }
+            ArpgCommand::Interact => self.start_action(command.player_id, ActionKind::Interact)?,
         }
         self.last_sequences
             .insert(command.player_id, command.sequence);
@@ -855,6 +955,7 @@ impl AuthoritativeGame for ArpgGame {
                     experience_into_level: state.experience % EXPERIENCE_PER_LEVEL,
                     experience_for_next_level: EXPERIENCE_PER_LEVEL,
                     attack_damage: Self::attack_damage_for_level(level),
+                    gold: state.gold,
                     facing: [state.facing_x, state.facing_z],
                     action: state.action.map(ActionState::snapshot),
                 })
@@ -871,7 +972,7 @@ impl AuthoritativeGame for ArpgGame {
         }));
 
         Ok(ArpgSnapshot {
-            schema_version: 6,
+            schema_version: 7,
             run_seed: self.run_seed,
             tick: self.tick,
             world_units_per_meter: WORLD_UNITS_PER_METER,
@@ -893,6 +994,16 @@ impl AuthoritativeGame for ArpgGame {
                             ticks_remaining: monster.stagger_ticks_remaining,
                         },
                     ),
+                })
+                .collect(),
+            ground_loot: self
+                .ground_loot
+                .iter()
+                .map(|loot| GroundLootSnapshot {
+                    id: loot.id,
+                    position: vec_to_array(loot.position),
+                    kind: loot.kind,
+                    amount: loot.amount,
                 })
                 .collect(),
             static_colliders,
@@ -1244,6 +1355,7 @@ mod tests {
             action: None,
             health: BASE_MAX_HEALTH,
             experience: 0,
+            gold: 0,
         });
         let diagonal = ArpgGame::movement_velocity(PlayerState {
             movement_x: 1,
@@ -1253,6 +1365,7 @@ mod tests {
             action: None,
             health: BASE_MAX_HEALTH,
             experience: 0,
+            gold: 0,
         });
         assert_eq!(cardinal, Vec3i::new(7, 0, 0));
         assert_eq!(diagonal, Vec3i::new(5, 0, 5));
@@ -1322,6 +1435,7 @@ mod tests {
             .unwrap();
         assert_eq!(first.experience, 0);
         assert_eq!(second.experience, MONSTER_EXPERIENCE_REWARD);
+        assert_eq!(snapshot.ground_loot.len(), 1);
 
         run_action(&mut game, 2, 2, ArpgCommand::PrimaryAttack);
         assert_eq!(
@@ -1429,6 +1543,78 @@ mod tests {
                 .health,
             38
         );
+    }
+
+    #[test]
+    fn kill_drop_pickup_requires_explicit_interaction() {
+        let mut game = ArpgGame::new_with_seed(42).unwrap();
+        let room_id = 2;
+        let (center_x, center_z) = game
+            .rooms
+            .iter()
+            .find(|room| room.id == room_id)
+            .unwrap()
+            .center();
+        game.player_spawns[0] = Vec3i::new(center_x, PLAYER_Y, center_z);
+        game.add_player(1).unwrap();
+        game.reconcile_encounters().unwrap();
+        let monster = game
+            .monsters
+            .iter_mut()
+            .find(|monster| monster.room_id == room_id)
+            .unwrap();
+        monster.position = Vec3i::new(center_x + 100, PLAYER_Y, center_z);
+        monster.health = BASE_ATTACK_DAMAGE;
+
+        run_action(&mut game, 1, 1, ArpgCommand::PrimaryAttack);
+
+        let after_kill = game.snapshot().unwrap();
+        assert_eq!(after_kill.players[0].gold, 0);
+        assert_eq!(after_kill.ground_loot.len(), 1);
+        assert_eq!(after_kill.ground_loot[0].kind, LootKind::Gold);
+        assert_eq!(after_kill.ground_loot[0].amount, GROUND_LOOT_GOLD_AMOUNT);
+        assert_eq!(
+            after_kill.ground_loot[0].position,
+            [center_x + 100, PLAYER_Y, center_z]
+        );
+
+        run_action(&mut game, 1, 2, ArpgCommand::Interact);
+
+        let after_pickup = game.snapshot().unwrap();
+        assert!(after_pickup.ground_loot.is_empty());
+        assert_eq!(after_pickup.players[0].gold, GROUND_LOOT_GOLD_AMOUNT);
+
+        run_action(&mut game, 1, 3, ArpgCommand::Interact);
+        assert_eq!(
+            game.snapshot().unwrap().players[0].gold,
+            GROUND_LOOT_GOLD_AMOUNT
+        );
+    }
+
+    #[test]
+    fn interaction_respects_pickup_range() {
+        let mut game = ArpgGame::new_with_seed(42).unwrap();
+        game.add_player(1).unwrap();
+        let player_position = game
+            .world
+            .body(ArpgGame::player_body_id(1))
+            .unwrap()
+            .position();
+        game.ground_loot.push(GroundLootState {
+            id: GROUND_LOOT_ID_BASE,
+            position: Vec3i::new(
+                player_position.x + i32::try_from(INTERACT_RANGE).unwrap() + 1,
+                PLAYER_Y,
+                player_position.z,
+            ),
+            kind: LootKind::Gold,
+            amount: GROUND_LOOT_GOLD_AMOUNT,
+        });
+
+        run_action(&mut game, 1, 1, ArpgCommand::Interact);
+
+        assert_eq!(game.snapshot().unwrap().ground_loot.len(), 1);
+        assert_eq!(game.snapshot().unwrap().players[0].gold, 0);
     }
 
     #[test]
@@ -1653,13 +1839,14 @@ mod tests {
         game.add_player(1).unwrap();
         let snapshot = game.snapshot().unwrap();
         let generated = generate_dungeon(snapshot.run_seed);
-        assert_eq!(snapshot.schema_version, 6);
+        assert_eq!(snapshot.schema_version, 7);
         assert_eq!(snapshot.run_seed, 0xDEAD_BEEF);
         assert_eq!(game.run_seed(), snapshot.run_seed);
         assert_eq!(snapshot.rooms, generated.rooms);
         assert_eq!(snapshot.doors, generated.doors);
         assert_eq!(snapshot.static_colliders, generated.static_colliders);
         assert_eq!(snapshot.monsters.len(), generated.monsters.len());
+        assert!(snapshot.ground_loot.is_empty());
         assert!(snapshot.monsters.iter().all(|monster| monster.room_id > 1));
         assert_eq!(snapshot.players[0].level, 1);
         assert_eq!(snapshot.players[0].experience, 0);
