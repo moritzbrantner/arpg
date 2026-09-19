@@ -45,5 +45,14 @@ jobs:
       - name: Build browser MVP
         working-directory: web
         run: bun run build
+      - name: Install Playwright acceptance runner
+        working-directory: web
+        run: npm install --no-save --package-lock=false @playwright/test@1.55.0
+      - name: Install Chromium
+        working-directory: web
+        run: npx playwright install --with-deps chromium
+      - name: Test hotkey rebinding in the built browser app
+        working-directory: web
+        run: bun run test:e2e
       - name: Verify build kept lockfiles unchanged
         run: git diff --exit-code -- Cargo.lock web/bun.lock
