@@ -870,7 +870,7 @@ function App() {
           </div>
         )}
         <p>{status}</p>
-        {player && !player.alive && <p className="downed-status">Downed</p>}
+        {player && !player.alive && <p className="defeated-status">Defeated</p>}
         {player?.action && (
           <p className="action-status">
             {player.action.kind === "secondaryAttack"
