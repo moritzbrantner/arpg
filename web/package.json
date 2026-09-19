@@ -7,6 +7,8 @@
     "vendor": "node scripts/vendor-foundations.mjs",
     "wasm": "wasm-pack build ../crates/arpg-web-wasm --target web --out-dir ../../web/src/wasm --out-name arpg_web_wasm -- --locked",
     "test": "bun test src/virtual-stick.test.js src/dedicated-session.test.js",
+    "test:wasm": "wasm-pack build ../crates/arpg-web-wasm --target nodejs --out-dir ../../web/.wasm-test --out-name arpg_web_wasm -- --locked && node scripts/wasm-contract.mjs && rm -rf .wasm-test",
+    "test:e2e": "playwright test",
     "build": "bun run vendor && bun run wasm && vite build",
     "dev": "bun run vendor && bun run wasm && vite"
   },

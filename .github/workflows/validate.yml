@@ -16,6 +16,7 @@ jobs:
       install_command: ""
       cache_bun: false
       cache_cargo: true
+      pre_validate_command: git fetch origin ${{ github.event.pull_request.head.sha || github.sha }} --depth=1 && git checkout --detach ${{ github.event.pull_request.head.sha || github.sha }} && test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha || github.sha }}"
       format_command: cargo fmt --all -- --check
       lint_command: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       test_command: cargo test --locked --workspace --all-features
@@ -27,6 +28,8 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.98.0
@@ -42,8 +45,57 @@ jobs:
       - name: Test browser input helpers
         working-directory: web
         run: bun run test
+      - name: Test real Wasm boundary
+        working-directory: web
+        run: bun run test:wasm
       - name: Build browser MVP
         working-directory: web
         run: bun run build
+      - name: Build dedicated acceptance server
+        run: cargo build --locked -p arpg-game-server --bin server
+      - name: Install browser acceptance runner
+        working-directory: web
+        run: npm install --no-save --package-lock=false @playwright/test@1.55.0
+      - name: Install Chromium
+        working-directory: web
+        run: npx playwright install --with-deps chromium
+      - name: Run browser and real WebTransport acceptance
+        working-directory: web
+        run: bun run test:e2e
       - name: Verify build kept lockfiles unchanged
         run: git diff --exit-code -- Cargo.lock web/bun.lock
+
+  performance-evidence:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.0
+      - name: Collect deterministic product evidence
+        run: python scripts/collect_performance_evidence.py
+      - name: Check out canonical Performance Evidence contract
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          repository: moritzbrantner/performance-evidence
+          ref: c137f34e627451817d46343eabd5cc04580db474
+          path: .performance-evidence-contract
+      - name: Install canonical contract validator
+        run: python -m pip install -r .performance-evidence-contract/requirements-dev.txt
+      - name: Validate canonical performance evidence
+        run: |
+          cp .artifacts/performance-evidence/arpg-product-composition.json \
+            .performance-evidence-contract/fixtures/valid/arpg-product-composition.json
+          python .performance-evidence-contract/scripts/validate_schema.py
+      - name: Upload performance evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: arpg-performance-evidence
+          include-hidden-files: true
+          path: .artifacts/performance-evidence/*.json
+          if-no-files-found: error
+          retention-days: 14

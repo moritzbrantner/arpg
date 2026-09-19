@@ -7,6 +7,12 @@ const vendor = (...parts) => resolve(here, "src", "vendor", "input-bindings", ..
 
 export default defineConfig({
   base: "/arpg/",
+  // input-bindings-react is authored and packaged with TypeScript's react-jsx runtime.
+  // Its source is vendored deliberately, so preserve that upstream compilation contract.
+  esbuild: {
+    jsx: "automatic",
+    jsxImportSource: "react",
+  },
   resolve: {
     alias: [
       {
