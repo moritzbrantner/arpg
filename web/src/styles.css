@@ -50,6 +50,7 @@ input, select { min-width: 0; max-width: 100%; padding: 0.55rem 0.65rem; width: 
 .combat-action.is-committed[data-phase="active"] { transform: scale(1.04); box-shadow: 0 0 0 3px #f5df9baa, 0 0.4rem 1.5rem #0008; }
 .combat-action.is-committed[data-phase="recovery"] { opacity: 0.72; }
 .action-status { color: #e3c787 !important; font-variant-numeric: tabular-nums; text-transform: capitalize; }
+.defeated-status { color: #ef8175 !important; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; }
 
 .settings-backdrop { position: absolute; z-index: 100; inset: 0; display: flex; justify-content: flex-end; overflow: hidden; background: #000b; overscroll-behavior: contain; }
 .settings-panel { width: min(56rem, 96vw); height: 100dvh; max-height: 100dvh; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; scrollbar-gutter: stable; background: #171513; border-left: 1px solid #3e3933; box-shadow: -14px 0 40px #0008; }

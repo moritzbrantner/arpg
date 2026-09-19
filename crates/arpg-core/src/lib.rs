@@ -41,6 +41,12 @@ const INTERACT_ACTIVE_TICKS: u8 = 1;
 const INTERACT_RECOVERY_TICKS: u8 = 3;
 const INTERACT_RANGE: i64 = 160;
 const GROUND_LOOT_GOLD_AMOUNT: u32 = 10;
+const MONSTER_ATTACK_RANGE: i64 = 180;
+const MONSTER_ATTACK_DAMAGE: u16 = 10;
+const MONSTER_ATTACK_WINDUP_TICKS: u8 = 18;
+const MONSTER_ATTACK_ACTIVE_TICKS: u8 = 1;
+const MONSTER_ATTACK_RECOVERY_TICKS: u8 = 30;
+const PLAYER_HURT_TICKS: u8 = 6;
 const PRIMARY_STAGGER_TICKS: u8 = 4;
 const SECONDARY_STAGGER_TICKS: u8 = 8;
 const BASE_ATTACK_DAMAGE: u16 = 25;
@@ -197,6 +203,28 @@ pub struct MonsterReactionSnapshot {
     pub ticks_remaining: u8,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PlayerReactionKind {
+    Hurt,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlayerReactionSnapshot {
+    pub kind: PlayerReactionKind,
+    pub ticks_remaining: u8,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MonsterActionSnapshot {
+    pub phase: ActionPhase,
+    pub ticks_remaining: u8,
+    pub target_player_id: PlayerId,
+    pub range: i32,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ArpgSnapshot {
@@ -277,8 +305,10 @@ pub struct PlayerSnapshot {
     pub experience_for_next_level: u32,
     pub attack_damage: u16,
     pub gold: u32,
+    pub alive: bool,
     pub facing: [i8; 2],
     pub action: Option<PlayerActionSnapshot>,
+    pub reaction: Option<PlayerReactionSnapshot>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -289,6 +319,7 @@ pub struct MonsterSnapshot {
     pub position: [i32; 3],
     pub health: u16,
     pub alive: bool,
+    pub action: Option<MonsterActionSnapshot>,
     pub reaction: Option<MonsterReactionSnapshot>,
 }
 
@@ -345,12 +376,31 @@ impl ActionState {
 }
 
 #[derive(Clone, Copy, Debug)]
+struct MonsterActionState {
+    phase: ActionPhase,
+    ticks_remaining: u8,
+    target_player_id: PlayerId,
+}
+
+impl MonsterActionState {
+    fn snapshot(self) -> MonsterActionSnapshot {
+        MonsterActionSnapshot {
+            phase: self.phase,
+            ticks_remaining: self.ticks_remaining,
+            target_player_id: self.target_player_id,
+            range: i32::try_from(MONSTER_ATTACK_RANGE).expect("monster attack range must fit i32"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
 struct PlayerState {
     movement_x: i8,
     movement_z: i8,
     facing_x: i8,
     facing_z: i8,
     action: Option<ActionState>,
+    hurt_ticks_remaining: u8,
     health: u16,
     experience: u32,
     gold: u32,
@@ -362,6 +412,7 @@ struct MonsterState {
     room_id: RoomId,
     position: Vec3i,
     health: u16,
+    action: Option<MonsterActionState>,
     stagger_ticks_remaining: u8,
 }
 
@@ -503,7 +554,7 @@ impl ArpgGame {
     }
 
     fn movement_velocity(state: PlayerState) -> Vec3i {
-        if state.action.is_some() {
+        if state.health == 0 || state.action.is_some() {
             return Vec3i::ZERO;
         }
         let x = i32::from(state.movement_x.clamp(-1, 1));
@@ -546,7 +597,7 @@ impl ArpgGame {
             .players
             .get_mut(&player_id)
             .ok_or_else(|| GameError::new("action references an unknown player"))?;
-        if state.action.is_some() {
+        if state.health == 0 || state.action.is_some() {
             return Ok(());
         }
         state.action = Some(ActionState {
@@ -679,6 +730,7 @@ impl ArpgGame {
             monster.health = monster.health.saturating_sub(attack_damage);
             if monster.health > 0 {
                 monster.stagger_ticks_remaining = stagger_ticks;
+                monster.action = None;
             }
             (previous_health > 0 && monster.health == 0).then_some(monster.position)
         } else {
@@ -735,6 +787,131 @@ impl ArpgGame {
                     ActionKind::Interact => self.resolve_interaction(player_id)?,
                 }
             }
+        }
+        Ok(())
+    }
+
+    fn resolve_monster_attack(
+        &mut self,
+        monster_id: u32,
+        target_player_id: PlayerId,
+    ) -> Result<(), GameError> {
+        let monster_position = self
+            .monsters
+            .iter()
+            .find(|monster| monster.id == monster_id && monster.health > 0)
+            .map(|monster| monster.position);
+        let Some(monster_position) = monster_position else {
+            return Ok(());
+        };
+        let target_position = self
+            .world
+            .body(Self::player_body_id(target_player_id))
+            .map(|body| body.position());
+        let Some(target_position) = target_position else {
+            return Ok(());
+        };
+        let target_alive = self
+            .players
+            .get(&target_player_id)
+            .is_some_and(|player| player.health > 0);
+        if !target_alive {
+            return Ok(());
+        }
+
+        let dx = i64::from(target_position.x - monster_position.x);
+        let dz = i64::from(target_position.z - monster_position.z);
+        if dx * dx + dz * dz > MONSTER_ATTACK_RANGE * MONSTER_ATTACK_RANGE {
+            return Ok(());
+        }
+
+        let player = self
+            .players
+            .get_mut(&target_player_id)
+            .ok_or_else(|| GameError::new("monster attack references an unknown player"))?;
+        player.health = player.health.saturating_sub(MONSTER_ATTACK_DAMAGE);
+        player.hurt_ticks_remaining = PLAYER_HURT_TICKS;
+        player.action = None;
+        Ok(())
+    }
+
+    fn advance_monster_actions(&mut self) -> Result<(), GameError> {
+        let active_rooms = self
+            .rooms
+            .iter()
+            .filter(|room| room.encounter_state == RoomEncounterState::Active)
+            .map(|room| room.id)
+            .collect::<BTreeSet<_>>();
+        let targets = self
+            .players
+            .iter()
+            .filter(|(_, state)| state.health > 0)
+            .filter_map(|(&player_id, _)| {
+                let position = self.world.body(Self::player_body_id(player_id))?.position();
+                let room_id = self.room_at_position(position)?;
+                Some((player_id, room_id, position))
+            })
+            .collect::<Vec<_>>();
+
+        let mut hits = Vec::new();
+        for monster in &mut self.monsters {
+            if monster.health == 0
+                || monster.stagger_ticks_remaining > 0
+                || !active_rooms.contains(&monster.room_id)
+            {
+                if monster.stagger_ticks_remaining > 0 || monster.health == 0 {
+                    monster.action = None;
+                }
+                continue;
+            }
+
+            if let Some(mut action) = monster.action {
+                if action.ticks_remaining > 1 {
+                    action.ticks_remaining -= 1;
+                    monster.action = Some(action);
+                    continue;
+                }
+                match action.phase {
+                    ActionPhase::Windup => {
+                        action.phase = ActionPhase::Active;
+                        action.ticks_remaining = MONSTER_ATTACK_ACTIVE_TICKS;
+                        monster.action = Some(action);
+                        hits.push((monster.id, action.target_player_id));
+                    }
+                    ActionPhase::Active => {
+                        action.phase = ActionPhase::Recovery;
+                        action.ticks_remaining = MONSTER_ATTACK_RECOVERY_TICKS;
+                        monster.action = Some(action);
+                    }
+                    ActionPhase::Recovery => {
+                        monster.action = None;
+                    }
+                }
+                continue;
+            }
+
+            let range_sq = MONSTER_ATTACK_RANGE * MONSTER_ATTACK_RANGE;
+            let target = targets
+                .iter()
+                .filter(|(_, room_id, _)| *room_id == monster.room_id)
+                .filter_map(|&(player_id, _, position)| {
+                    let dx = i64::from(position.x - monster.position.x);
+                    let dz = i64::from(position.z - monster.position.z);
+                    let distance_sq = dx * dx + dz * dz;
+                    (distance_sq <= range_sq).then_some((distance_sq, player_id))
+                })
+                .min_by_key(|(distance_sq, player_id)| (*distance_sq, *player_id));
+            if let Some((_, target_player_id)) = target {
+                monster.action = Some(MonsterActionState {
+                    phase: ActionPhase::Windup,
+                    ticks_remaining: MONSTER_ATTACK_WINDUP_TICKS,
+                    target_player_id,
+                });
+            }
+        }
+
+        for (monster_id, target_player_id) in hits {
+            self.resolve_monster_attack(monster_id, target_player_id)?;
         }
         Ok(())
     }
@@ -856,6 +1033,7 @@ impl AuthoritativeGame for ArpgGame {
                 facing_x: 1,
                 facing_z: 0,
                 action: None,
+                hurt_ticks_remaining: 0,
                 health: BASE_MAX_HEALTH,
                 experience: 0,
                 gold: 0,
@@ -914,6 +1092,9 @@ impl AuthoritativeGame for ArpgGame {
     }
 
     fn advance_tick(&mut self) -> Result<(), GameError> {
+        for player in self.players.values_mut() {
+            player.hurt_ticks_remaining = player.hurt_ticks_remaining.saturating_sub(1);
+        }
         for monster in &mut self.monsters {
             monster.stagger_ticks_remaining = monster.stagger_ticks_remaining.saturating_sub(1);
         }
@@ -928,6 +1109,7 @@ impl AuthoritativeGame for ArpgGame {
         self.world.step(1).map_err(physics_error)?;
         self.reconcile_encounters()?;
         self.advance_actions()?;
+        self.advance_monster_actions()?;
         self.tick = self
             .tick
             .checked_add(1)
@@ -956,8 +1138,13 @@ impl AuthoritativeGame for ArpgGame {
                     experience_for_next_level: EXPERIENCE_PER_LEVEL,
                     attack_damage: Self::attack_damage_for_level(level),
                     gold: state.gold,
+                    alive: state.health > 0,
                     facing: [state.facing_x, state.facing_z],
                     action: state.action.map(ActionState::snapshot),
+                    reaction: (state.hurt_ticks_remaining > 0).then_some(PlayerReactionSnapshot {
+                        kind: PlayerReactionKind::Hurt,
+                        ticks_remaining: state.hurt_ticks_remaining,
+                    }),
                 })
             })
             .collect::<Result<Vec<_>, GameError>>()?;
@@ -972,7 +1159,7 @@ impl AuthoritativeGame for ArpgGame {
         }));
 
         Ok(ArpgSnapshot {
-            schema_version: 7,
+            schema_version: 8,
             run_seed: self.run_seed,
             tick: self.tick,
             world_units_per_meter: WORLD_UNITS_PER_METER,
@@ -988,6 +1175,7 @@ impl AuthoritativeGame for ArpgGame {
                     position: vec_to_array(monster.position),
                     health: monster.health,
                     alive: monster.health > 0,
+                    action: monster.action.map(MonsterActionState::snapshot),
                     reaction: (monster.stagger_ticks_remaining > 0).then_some(
                         MonsterReactionSnapshot {
                             kind: MonsterReactionKind::Stagger,
@@ -1222,6 +1410,7 @@ fn generated_monsters(rooms: &[RoomSnapshot], rng: &mut DungeonRng) -> Vec<Monst
                 ),
             ),
             health: 100,
+            action: None,
             stagger_ticks_remaining: 0,
         })
         .collect()
@@ -1353,6 +1542,7 @@ mod tests {
             facing_x: 1,
             facing_z: 0,
             action: None,
+            hurt_ticks_remaining: 0,
             health: BASE_MAX_HEALTH,
             experience: 0,
             gold: 0,
@@ -1363,6 +1553,7 @@ mod tests {
             facing_x: 1,
             facing_z: 1,
             action: None,
+            hurt_ticks_remaining: 0,
             health: BASE_MAX_HEALTH,
             experience: 0,
             gold: 0,
@@ -1543,6 +1734,191 @@ mod tests {
                 .health,
             38
         );
+    }
+
+    #[test]
+    fn monster_attack_is_telegraphed_before_damage() {
+        let mut game = ArpgGame::new_with_seed(42).unwrap();
+        let room_id = 2;
+        let (center_x, center_z) = game
+            .rooms
+            .iter()
+            .find(|room| room.id == room_id)
+            .unwrap()
+            .center();
+        game.player_spawns[0] = Vec3i::new(center_x, PLAYER_Y, center_z);
+        game.add_player(1).unwrap();
+        game.reconcile_encounters().unwrap();
+        let monster = game
+            .monsters
+            .iter_mut()
+            .find(|monster| monster.room_id == room_id)
+            .unwrap();
+        monster.position = Vec3i::new(center_x + 100, PLAYER_Y, center_z);
+
+        game.advance_tick().unwrap();
+
+        let telegraph = game.snapshot().unwrap();
+        assert_eq!(telegraph.players[0].health, BASE_MAX_HEALTH);
+        let monster_action = telegraph
+            .monsters
+            .iter()
+            .find(|monster| monster.room_id == room_id)
+            .unwrap()
+            .action
+            .unwrap();
+        assert_eq!(monster_action.phase, ActionPhase::Windup);
+        assert_eq!(monster_action.ticks_remaining, MONSTER_ATTACK_WINDUP_TICKS);
+        assert_eq!(monster_action.target_player_id, 1);
+        assert_eq!(
+            monster_action.range,
+            i32::try_from(MONSTER_ATTACK_RANGE).unwrap()
+        );
+
+        for _ in 0..MONSTER_ATTACK_WINDUP_TICKS {
+            game.advance_tick().unwrap();
+        }
+
+        let impact = game.snapshot().unwrap();
+        assert_eq!(
+            impact.players[0].health,
+            BASE_MAX_HEALTH - MONSTER_ATTACK_DAMAGE
+        );
+        assert_eq!(
+            impact.players[0].reaction.unwrap().kind,
+            PlayerReactionKind::Hurt
+        );
+        assert_eq!(
+            impact
+                .monsters
+                .iter()
+                .find(|monster| monster.room_id == room_id)
+                .unwrap()
+                .action
+                .unwrap()
+                .phase,
+            ActionPhase::Active
+        );
+    }
+
+    #[test]
+    fn moving_out_of_monster_telegraph_causes_a_miss() {
+        let mut game = ArpgGame::new_with_seed(42).unwrap();
+        let room_id = 2;
+        let (center_x, center_z) = game
+            .rooms
+            .iter()
+            .find(|room| room.id == room_id)
+            .unwrap()
+            .center();
+        game.player_spawns[0] = Vec3i::new(center_x, PLAYER_Y, center_z);
+        game.add_player(1).unwrap();
+        game.reconcile_encounters().unwrap();
+        game.monsters
+            .iter_mut()
+            .find(|monster| monster.room_id == room_id)
+            .unwrap()
+            .position = Vec3i::new(center_x + 100, PLAYER_Y, center_z);
+
+        game.advance_tick().unwrap();
+        game.apply_command(
+            PlayerCommand::new(1, 1, ArpgCommand::SetMovement { x: -1, z: 0 }).unwrap(),
+        )
+        .unwrap();
+        for _ in 0..MONSTER_ATTACK_WINDUP_TICKS {
+            game.advance_tick().unwrap();
+        }
+
+        let snapshot = game.snapshot().unwrap();
+        assert_eq!(snapshot.players[0].health, BASE_MAX_HEALTH);
+        assert!(
+            snapshot.players[0].position[0] <= center_x - 100,
+            "player did not leave the telegraphed melee range"
+        );
+    }
+
+    #[test]
+    fn defeated_player_cannot_move_or_start_actions() {
+        let mut game = ArpgGame::new_with_seed(42).unwrap();
+        let room_id = 2;
+        let (center_x, center_z) = game
+            .rooms
+            .iter()
+            .find(|room| room.id == room_id)
+            .unwrap()
+            .center();
+        game.player_spawns[0] = Vec3i::new(center_x, PLAYER_Y, center_z);
+        game.add_player(1).unwrap();
+        game.players.get_mut(&1).unwrap().health = MONSTER_ATTACK_DAMAGE;
+        game.reconcile_encounters().unwrap();
+        game.monsters
+            .iter_mut()
+            .find(|monster| monster.room_id == room_id)
+            .unwrap()
+            .position = Vec3i::new(center_x + 100, PLAYER_Y, center_z);
+
+        game.advance_tick().unwrap();
+        for _ in 0..MONSTER_ATTACK_WINDUP_TICKS {
+            game.advance_tick().unwrap();
+        }
+
+        let defeated = game.snapshot().unwrap().players[0].clone();
+        assert_eq!(defeated.health, 0);
+        assert!(!defeated.alive);
+        let position = defeated.position;
+
+        game.apply_command(
+            PlayerCommand::new(1, 1, ArpgCommand::SetMovement { x: -1, z: 0 }).unwrap(),
+        )
+        .unwrap();
+        game.apply_command(PlayerCommand::new(1, 2, ArpgCommand::PrimaryAttack).unwrap())
+            .unwrap();
+        for _ in 0..PRIMARY_WINDUP_TICKS {
+            game.advance_tick().unwrap();
+        }
+
+        let after = game.snapshot().unwrap().players[0].clone();
+        assert_eq!(after.position, position);
+        assert!(after.action.is_none());
+        assert_eq!(after.health, 0);
+    }
+
+    #[test]
+    fn player_stagger_interrupts_monster_windup() {
+        let mut game = ArpgGame::new_with_seed(42).unwrap();
+        let room_id = 2;
+        let (center_x, center_z) = game
+            .rooms
+            .iter()
+            .find(|room| room.id == room_id)
+            .unwrap()
+            .center();
+        game.player_spawns[0] = Vec3i::new(center_x, PLAYER_Y, center_z);
+        game.add_player(1).unwrap();
+        game.reconcile_encounters().unwrap();
+        game.monsters
+            .iter_mut()
+            .find(|monster| monster.room_id == room_id)
+            .unwrap()
+            .position = Vec3i::new(center_x + 100, PLAYER_Y, center_z);
+
+        game.advance_tick().unwrap();
+        game.apply_command(PlayerCommand::new(1, 1, ArpgCommand::PrimaryAttack).unwrap())
+            .unwrap();
+        for _ in 0..PRIMARY_WINDUP_TICKS {
+            game.advance_tick().unwrap();
+        }
+
+        let monster = game
+            .snapshot()
+            .unwrap()
+            .monsters
+            .into_iter()
+            .find(|monster| monster.room_id == room_id)
+            .unwrap();
+        assert_eq!(monster.health, 75);
+        assert!(monster.action.is_none());
+        assert_eq!(monster.reaction.unwrap().kind, MonsterReactionKind::Stagger);
     }
 
     #[test]
@@ -1839,7 +2215,7 @@ mod tests {
         game.add_player(1).unwrap();
         let snapshot = game.snapshot().unwrap();
         let generated = generate_dungeon(snapshot.run_seed);
-        assert_eq!(snapshot.schema_version, 7);
+        assert_eq!(snapshot.schema_version, 8);
         assert_eq!(snapshot.run_seed, 0xDEAD_BEEF);
         assert_eq!(game.run_seed(), snapshot.run_seed);
         assert_eq!(snapshot.rooms, generated.rooms);
