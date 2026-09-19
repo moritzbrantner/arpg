@@ -1178,30 +1178,59 @@ mod tests {
             .iter_mut()
             .find(|monster| monster.room_id == room_id)
             .unwrap();
-        monster.position = Vec3i::new(center_x + 100, PLAYER_Y, center_z);
+        monster.position = Vec3i::new(center_x + 180, PLAYER_Y, center_z);
         monster.health = 100;
 
         game.apply_command(PlayerCommand::new(1, 1, ArpgCommand::SecondaryAttack).unwrap())
             .unwrap();
-
         assert_eq!(
             game.monsters
                 .iter()
                 .find(|monster| monster.room_id == room_id)
                 .unwrap()
                 .health,
-            63
+            100
+        );
+
+        game.apply_command(PlayerCommand::new(1, 2, ArpgCommand::PrimaryAttack).unwrap())
+            .unwrap();
+        assert_eq!(
+            game.monsters
+                .iter()
+                .find(|monster| monster.room_id == room_id)
+                .unwrap()
+                .health,
+            75
+        );
+
+        game.monsters
+            .iter_mut()
+            .find(|monster| monster.room_id == room_id)
+            .unwrap()
+            .position = Vec3i::new(center_x + 100, PLAYER_Y, center_z);
+        game.apply_command(PlayerCommand::new(1, 3, ArpgCommand::SecondaryAttack).unwrap())
+            .unwrap();
+        assert_eq!(
+            game.monsters
+                .iter()
+                .find(|monster| monster.room_id == room_id)
+                .unwrap()
+                .health,
+            38
         );
     }
 
     #[test]
     fn generated_rooms_are_large_enough_for_arpg_combat() {
-        let dungeon = generate_dungeon(42);
-        assert!(
-            dungeon.rooms.iter().all(|room| {
-                room.max_x - room.min_x >= 1_400 && room.max_z - room.min_z >= 1_400
-            })
-        );
+        for seed in 0..64 {
+            let dungeon = generate_dungeon(seed);
+            assert!(
+                dungeon.rooms.iter().all(|room| {
+                    room.max_x - room.min_x >= 1_400 && room.max_z - room.min_z >= 1_400
+                }),
+                "seed {seed} generated a cramped room"
+            );
+        }
     }
 
     #[test]
