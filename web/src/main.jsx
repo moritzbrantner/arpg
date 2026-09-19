@@ -16,7 +16,7 @@ const PROFILE_KEY = "arpg-input-profile-v1";
 const SETUP_URL_KEY = "arpg-setup-service-url-v1";
 const DEDICATED_URL_KEY = "arpg-dedicated-url-v1";
 const GRAPHICS_KEY = "arpg-graphics-v1";
-const PROTOCOL_VERSION = 2;
+const PROTOCOL_VERSION = 3;
 const gameplayContext = { op: "context", id: "gameplay" };
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
@@ -36,6 +36,7 @@ const inputRegistry = {
     ["game.moveLeft", "Move left", "KeyA", "allow", "Movement"],
     ["game.moveRight", "Move right", "KeyD", "allow", "Movement"],
     ["game.primaryAttack", "Primary attack", "Space", "never", "Combat"],
+    ["game.secondaryAttack", "Heavy attack", "KeyQ", "never", "Combat"],
   ]
     .map(([id, title, code, repeatPolicy, category]) => ({
       id,
@@ -110,6 +111,63 @@ function decodeSnapshot(encoded) {
   return envelope.payload;
 }
 
+function segmentIntersectsRect(startX, startZ, endX, endZ, minX, maxX, minZ, maxZ) {
+  let minimumT = 0;
+  let maximumT = 1;
+  for (const [start, end, minimum, maximum] of [
+    [startX, endX, minX, maxX],
+    [startZ, endZ, minZ, maxZ],
+  ]) {
+    const delta = end - start;
+    if (Math.abs(delta) < 1e-9) {
+      if (start < minimum || start > maximum) return false;
+      continue;
+    }
+    const first = (minimum - start) / delta;
+    const second = (maximum - start) / delta;
+    const enter = Math.min(first, second);
+    const exit = Math.max(first, second);
+    minimumT = Math.max(minimumT, enter);
+    maximumT = Math.min(maximumT, exit);
+    if (minimumT > maximumT) return false;
+  }
+  return maximumT >= 0.03 && minimumT <= 0.97;
+}
+
+function barrierOccludesFocus(collider, target, scale) {
+  if (!target || (collider.kind !== "wall" && collider.kind !== "door")) return false;
+  const centerX = collider.position[0] / scale;
+  const centerZ = collider.position[2] / scale;
+  const halfX = collider.halfExtents[0] / scale + 0.35;
+  const halfZ = collider.halfExtents[2] / scale + 0.35;
+  const cameraX = target[0] + 10;
+  const cameraZ = target[2] + 10;
+  return segmentIntersectsRect(
+    cameraX,
+    cameraZ,
+    target[0],
+    target[2],
+    centerX - halfX,
+    centerX + halfX,
+    centerZ - halfZ,
+    centerZ + halfZ,
+  );
+}
+
+function dungeonFloor(snapshot, scale) {
+  if (!snapshot.rooms?.length) {
+    return { center: [0, -0.08, 0], size: [18, 0.12, 13] };
+  }
+  const minX = Math.min(...snapshot.rooms.map((room) => room.minX)) / scale;
+  const maxX = Math.max(...snapshot.rooms.map((room) => room.maxX)) / scale;
+  const minZ = Math.min(...snapshot.rooms.map((room) => room.minZ)) / scale;
+  const maxZ = Math.max(...snapshot.rooms.map((room) => room.maxZ)) / scale;
+  return {
+    center: [(minX + maxX) / 2, -0.08, (minZ + maxZ) / 2],
+    size: [maxX - minX, 0.12, maxZ - minZ],
+  };
+}
+
 function buildFrame(snapshot, focusPlayerId, width, height) {
   const scale = snapshot.worldUnitsPerMeter;
   const focus =
@@ -139,23 +197,32 @@ function buildFrame(snapshot, focusPlayerId, width, height) {
   camera.position.set(target[0] + 10, 11, target[2] + 10);
   camera.lookAt(target[0], 0, target[2]);
   camera.updateMatrixWorld(true);
+  const floor = dungeonFloor(snapshot, scale);
 
   const nodes = [
     {
       id: "floor",
-      geometry: { kind: "box", size: [18, 0.12, 13] },
+      geometry: { kind: "box", size: floor.size },
       color: "#292722",
-      transform: { translation: [0, -0.08, 0] },
+      transform: { translation: floor.center },
     },
-    ...snapshot.staticColliders.map((collider) => ({
-      id: `static-${collider.id}`,
-      geometry: {
-        kind: "box",
-        size: collider.halfExtents.map((value) => (value * 2) / scale),
-      },
-      color: collider.kind === "pillar" ? "#5d5142" : "#403a33",
-      transform: { translation: collider.position.map((value) => value / scale) },
-    })),
+    ...snapshot.staticColliders.map((collider) => {
+      const fullSize = collider.halfExtents.map((value) => (value * 2) / scale);
+      const isBarrier = collider.kind === "wall" || collider.kind === "door";
+      const lowered = isBarrier && barrierOccludesFocus(collider, target, scale);
+      const visualHeight = lowered ? Math.min(fullSize[1], 0.55) : fullSize[1];
+      const translation = collider.position.map((value) => value / scale);
+      if (isBarrier) translation[1] = visualHeight / 2;
+      return {
+        id: `static-${collider.id}`,
+        geometry: {
+          kind: "box",
+          size: [fullSize[0], visualHeight, fullSize[2]],
+        },
+        color: lowered ? "#62594e" : collider.kind === "pillar" ? "#5d5142" : "#403a33",
+        transform: { translation },
+      };
+    }),
     ...snapshot.players.map((player) => ({
       id: `player-${player.id}`,
       geometry: { kind: "cylinder", radius: 0.3, height: 1 },
@@ -364,10 +431,9 @@ function App() {
     resetTouchStick();
   };
 
-  const triggerTouchAttack = (event) => {
-    event.preventDefault();
+  const triggerCombatAction = (type) => {
     if (!playerId) return;
-    dispatchCommand({ type: "primaryAttack" });
+    dispatchCommand({ type });
   };
 
   const configureSession = (session, role) => {
@@ -615,8 +681,12 @@ function App() {
           return;
         }
         if (settingsOpen) return;
-        if (dispatch.action === "game.primaryAttack" && dispatch.phase === "press") {
-          dispatchCommand({ type: "primaryAttack" });
+        const combatCommand = {
+          "game.primaryAttack": "primaryAttack",
+          "game.secondaryAttack": "secondaryAttack",
+        }[dispatch.action];
+        if (combatCommand && dispatch.phase === "press") {
+          dispatchCommand({ type: combatCommand });
           return;
         }
         const key = {
@@ -701,8 +771,10 @@ function App() {
           </div>
         )}
         <p>{status}</p>
-        <p className="desktop-controls-hint">WASD to move · Space to attack · Esc for settings</p>
-        <p className="mobile-controls-hint">Left stick to move · Attack to strike</p>
+        <p className="desktop-controls-hint">
+          WASD move · Space primary · Q heavy · Esc settings
+        </p>
+        <p className="mobile-controls-hint">Left stick to move · use the combat buttons to strike</p>
       </section>
 
       {ready && !settingsOpen && (
@@ -722,15 +794,36 @@ function App() {
           >
             <span ref={touchKnobRef} className="virtual-stick-knob" />
           </div>
+        </section>
+      )}
+
+      {ready && !settingsOpen && (
+        <section className="combat-actions" aria-label="Combat actions">
           <button
             type="button"
-            className="touch-attack"
+            className="combat-action combat-action-primary"
             aria-label="Primary attack"
             disabled={!playerId}
-            onPointerDown={triggerTouchAttack}
-            onContextMenu={(event) => event.preventDefault()}
+            onPointerDown={(event) => {
+              event.preventDefault();
+              triggerCombatAction("primaryAttack");
+            }}
           >
-            Attack
+            <strong>Attack</strong>
+            <span>Space</span>
+          </button>
+          <button
+            type="button"
+            className="combat-action combat-action-secondary"
+            aria-label="Heavy attack"
+            disabled={!playerId}
+            onPointerDown={(event) => {
+              event.preventDefault();
+              triggerCombatAction("secondaryAttack");
+            }}
+          >
+            <strong>Heavy</strong>
+            <span>Q</span>
           </button>
         </section>
       )}
