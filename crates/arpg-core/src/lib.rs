@@ -1240,17 +1240,36 @@ mod tests {
         let cardinal = ArpgGame::movement_velocity(PlayerState {
             movement_x: 1,
             movement_z: 0,
+            facing_x: 1,
+            facing_z: 0,
+            action: None,
             health: BASE_MAX_HEALTH,
             experience: 0,
         });
         let diagonal = ArpgGame::movement_velocity(PlayerState {
             movement_x: 1,
             movement_z: 1,
+            facing_x: 1,
+            facing_z: 1,
+            action: None,
             health: BASE_MAX_HEALTH,
             experience: 0,
         });
         assert_eq!(cardinal, Vec3i::new(7, 0, 0));
         assert_eq!(diagonal, Vec3i::new(5, 0, 5));
+    }
+
+    fn run_action(
+        game: &mut ArpgGame,
+        player_id: PlayerId,
+        sequence: u32,
+        command: ArpgCommand,
+    ) {
+        game.apply_command(PlayerCommand::new(player_id, sequence, command).unwrap())
+            .unwrap();
+        while game.players.get(&player_id).unwrap().action.is_some() {
+            game.advance_tick().unwrap();
+        }
     }
 
     #[test]
@@ -1292,13 +1311,9 @@ mod tests {
         monster.position = Vec3i::new(center_x + 100, PLAYER_Y, center_z);
 
         for sequence in 1..=3 {
-            game.apply_command(
-                PlayerCommand::new(1, sequence, ArpgCommand::PrimaryAttack).unwrap(),
-            )
-            .unwrap();
+            run_action(&mut game, 1, sequence, ArpgCommand::PrimaryAttack);
         }
-        game.apply_command(PlayerCommand::new(2, 1, ArpgCommand::PrimaryAttack).unwrap())
-            .unwrap();
+        run_action(&mut game, 2, 1, ArpgCommand::PrimaryAttack);
 
         let snapshot = game.snapshot().unwrap();
         let first = snapshot
@@ -1314,8 +1329,7 @@ mod tests {
         assert_eq!(first.experience, 0);
         assert_eq!(second.experience, MONSTER_EXPERIENCE_REWARD);
 
-        game.apply_command(PlayerCommand::new(2, 2, ArpgCommand::PrimaryAttack).unwrap())
-            .unwrap();
+        run_action(&mut game, 2, 2, ArpgCommand::PrimaryAttack);
         assert_eq!(
             game.snapshot()
                 .unwrap()
@@ -1350,8 +1364,7 @@ mod tests {
         monster.position = Vec3i::new(center_x + 100, PLAYER_Y, center_z);
         monster.health = 30;
 
-        game.apply_command(PlayerCommand::new(1, 1, ArpgCommand::PrimaryAttack).unwrap())
-            .unwrap();
+        run_action(&mut game, 1, 1, ArpgCommand::PrimaryAttack);
         assert_eq!(
             game.monsters
                 .iter()
@@ -1388,8 +1401,7 @@ mod tests {
         monster.position = Vec3i::new(center_x + 180, PLAYER_Y, center_z);
         monster.health = 100;
 
-        game.apply_command(PlayerCommand::new(1, 1, ArpgCommand::SecondaryAttack).unwrap())
-            .unwrap();
+        run_action(&mut game, 1, 1, ArpgCommand::SecondaryAttack);
         assert_eq!(
             game.monsters
                 .iter()
@@ -1399,8 +1411,7 @@ mod tests {
             100
         );
 
-        game.apply_command(PlayerCommand::new(1, 2, ArpgCommand::PrimaryAttack).unwrap())
-            .unwrap();
+        run_action(&mut game, 1, 2, ArpgCommand::PrimaryAttack);
         assert_eq!(
             game.monsters
                 .iter()
@@ -1415,8 +1426,7 @@ mod tests {
             .find(|monster| monster.room_id == room_id)
             .unwrap()
             .position = Vec3i::new(center_x + 100, PLAYER_Y, center_z);
-        game.apply_command(PlayerCommand::new(1, 3, ArpgCommand::SecondaryAttack).unwrap())
-            .unwrap();
+        run_action(&mut game, 1, 3, ArpgCommand::SecondaryAttack);
         assert_eq!(
             game.monsters
                 .iter()
@@ -1424,6 +1434,126 @@ mod tests {
                 .unwrap()
                 .health,
             38
+        );
+    }
+
+    #[test]
+    fn attacks_have_authoritative_commitment_active_and_recovery_phases() {
+        let mut game = ArpgGame::new_with_seed(42).unwrap();
+        let room_id = 2;
+        let (center_x, center_z) = game
+            .rooms
+            .iter()
+            .find(|room| room.id == room_id)
+            .unwrap()
+            .center();
+        game.player_spawns[0] = Vec3i::new(center_x, PLAYER_Y, center_z);
+        game.add_player(1).unwrap();
+        game.reconcile_encounters().unwrap();
+        let monster = game
+            .monsters
+            .iter_mut()
+            .find(|monster| monster.room_id == room_id)
+            .unwrap();
+        monster.position = Vec3i::new(center_x + 100, PLAYER_Y, center_z);
+
+        game.apply_command(
+            PlayerCommand::new(1, 1, ArpgCommand::SetMovement { x: 1, z: 0 }).unwrap(),
+        )
+        .unwrap();
+        game.apply_command(PlayerCommand::new(1, 2, ArpgCommand::PrimaryAttack).unwrap())
+            .unwrap();
+
+        let start_position = game.snapshot().unwrap().players[0].position;
+        let action = game.snapshot().unwrap().players[0].action.unwrap();
+        assert_eq!(action.kind, ActionKind::PrimaryAttack);
+        assert_eq!(action.phase, ActionPhase::Windup);
+        assert_eq!(action.ticks_remaining, PRIMARY_WINDUP_TICKS);
+
+        for _ in 0..PRIMARY_WINDUP_TICKS {
+            game.advance_tick().unwrap();
+        }
+
+        let active = game.snapshot().unwrap();
+        assert_eq!(active.players[0].position, start_position);
+        assert_eq!(active.players[0].action.unwrap().phase, ActionPhase::Active);
+        assert_eq!(
+            active
+                .monsters
+                .iter()
+                .find(|monster| monster.room_id == room_id)
+                .unwrap()
+                .health,
+            75
+        );
+        assert_eq!(
+            active
+                .monsters
+                .iter()
+                .find(|monster| monster.room_id == room_id)
+                .unwrap()
+                .reaction
+                .unwrap()
+                .kind,
+            MonsterReactionKind::Stagger
+        );
+
+        game.advance_tick().unwrap();
+        assert_eq!(
+            game.snapshot().unwrap().players[0].action.unwrap().phase,
+            ActionPhase::Recovery
+        );
+        for _ in 0..PRIMARY_RECOVERY_TICKS {
+            game.advance_tick().unwrap();
+        }
+        assert!(game.snapshot().unwrap().players[0].action.is_none());
+        game.advance_tick().unwrap();
+        assert!(game.snapshot().unwrap().players[0].position[0] > start_position[0]);
+    }
+
+    #[test]
+    fn attack_targeting_respects_committed_facing() {
+        let mut game = ArpgGame::new_with_seed(42).unwrap();
+        let room_id = 2;
+        let (center_x, center_z) = game
+            .rooms
+            .iter()
+            .find(|room| room.id == room_id)
+            .unwrap()
+            .center();
+        game.player_spawns[0] = Vec3i::new(center_x, PLAYER_Y, center_z);
+        game.add_player(1).unwrap();
+        game.reconcile_encounters().unwrap();
+        let monster = game
+            .monsters
+            .iter_mut()
+            .find(|monster| monster.room_id == room_id)
+            .unwrap();
+        monster.position = Vec3i::new(center_x - 100, PLAYER_Y, center_z);
+        monster.health = 100;
+
+        run_action(&mut game, 1, 1, ArpgCommand::PrimaryAttack);
+        assert_eq!(
+            game.monsters
+                .iter()
+                .find(|monster| monster.room_id == room_id)
+                .unwrap()
+                .health,
+            100
+        );
+
+        game.apply_command(
+            PlayerCommand::new(1, 2, ArpgCommand::SetMovement { x: -1, z: 0 }).unwrap(),
+        )
+        .unwrap();
+        run_action(&mut game, 1, 3, ArpgCommand::PrimaryAttack);
+        assert_eq!(
+            game.monsters
+                .iter()
+                .find(|monster| monster.room_id == room_id)
+                .unwrap()
+                .health,
+            75
         );
     }
 
@@ -1529,7 +1659,7 @@ mod tests {
         game.add_player(1).unwrap();
         let snapshot = game.snapshot().unwrap();
         let generated = generate_dungeon(snapshot.run_seed);
-        assert_eq!(snapshot.schema_version, 5);
+        assert_eq!(snapshot.schema_version, 6);
         assert_eq!(snapshot.run_seed, 0xDEAD_BEEF);
         assert_eq!(game.run_seed(), snapshot.run_seed);
         assert_eq!(snapshot.rooms, generated.rooms);
@@ -1577,10 +1707,7 @@ mod tests {
             .unwrap();
         monster.position = Vec3i::new(center_x + 100, PLAYER_Y, center_z);
         for sequence in 1..=4 {
-            game.apply_command(
-                PlayerCommand::new(1, sequence, ArpgCommand::PrimaryAttack).unwrap(),
-            )
-            .unwrap();
+            run_action(&mut game, 1, sequence, ArpgCommand::PrimaryAttack);
         }
 
         assert_eq!(room_state(&game, room_id), RoomEncounterState::Cleared);
@@ -1619,10 +1746,7 @@ mod tests {
         monster.position = Vec3i::new(player_position.x + 100, PLAYER_Y, player_position.z);
 
         for sequence in 1..=4 {
-            game.apply_command(
-                PlayerCommand::new(1, sequence, ArpgCommand::PrimaryAttack).unwrap(),
-            )
-            .unwrap();
+            run_action(&mut game, 1, sequence, ArpgCommand::PrimaryAttack);
         }
         assert_eq!(
             game.monsters
