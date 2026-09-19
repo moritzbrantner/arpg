@@ -166,7 +166,7 @@ describe("game-server WebTransport framing", () => {
   });
 
   test("verifies snapshot length and state hash before exposing ARPG payload", () => {
-    const payload = new TextEncoder().encode('{"protocolVersion":3,"payload":{"tick":9}}');
+    const payload = new TextEncoder().encode('{"protocolVersion":4,"payload":{"tick":9}}');
     const frame = new Uint8Array(20 + payload.byteLength);
     const view = new DataView(frame.buffer);
     frame[0] = 3;
@@ -179,7 +179,7 @@ describe("game-server WebTransport framing", () => {
     const decoded = decodeGameServerSnapshot(frame);
     expect(decoded.tick).toBe(9n);
     expect(new TextDecoder().decode(decoded.payload)).toBe(
-      '{"protocolVersion":3,"payload":{"tick":9}}',
+      '{"protocolVersion":4,"payload":{"tick":9}}',
     );
 
     frame[20] ^= 1;

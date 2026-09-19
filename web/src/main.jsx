@@ -16,7 +16,7 @@ const PROFILE_KEY = "arpg-input-profile-v1";
 const SETUP_URL_KEY = "arpg-setup-service-url-v1";
 const DEDICATED_URL_KEY = "arpg-dedicated-url-v1";
 const GRAPHICS_KEY = "arpg-graphics-v1";
-const PROTOCOL_VERSION = 3;
+const PROTOCOL_VERSION = 4;
 const gameplayContext = { op: "context", id: "gameplay" };
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
@@ -223,20 +223,54 @@ function buildFrame(snapshot, focusPlayerId, width, height) {
         transform: { translation },
       };
     }),
-    ...snapshot.players.map((player) => ({
-      id: `player-${player.id}`,
-      geometry: { kind: "cylinder", radius: 0.3, height: 1 },
-      color: player.id === focusPlayerId ? "#d6b45f" : "#6f91b6",
-      transform: { translation: player.position.map((value) => value / scale) },
-    })),
+    ...snapshot.players.flatMap((player) => {
+      const position = player.position.map((value) => value / scale);
+      const facing = player.action?.facing ?? player.facing ?? [1, 0];
+      const facingLength = Math.hypot(facing[0], facing[1]) || 1;
+      const facingX = facing[0] / facingLength;
+      const facingZ = facing[1] / facingLength;
+      const actionColor =
+        player.action?.phase === "windup"
+          ? "#e3a45d"
+          : player.action?.phase === "active"
+            ? "#fff0a3"
+            : player.action?.phase === "recovery"
+              ? "#9d8060"
+              : null;
+      const color = actionColor ?? (player.id === focusPlayerId ? "#d6b45f" : "#6f91b6");
+      return [
+        {
+          id: `player-${player.id}`,
+          geometry: { kind: "cylinder", radius: 0.3, height: 1 },
+          color,
+          transform: { translation: position },
+        },
+        {
+          id: `player-facing-${player.id}`,
+          geometry: { kind: "sphere", radius: 0.09 },
+          color: "#f5df9b",
+          transform: {
+            translation: [
+              position[0] + facingX * 0.48,
+              Math.max(position[1], 0.12),
+              position[2] + facingZ * 0.48,
+            ],
+          },
+        },
+      ];
+    }),
     ...snapshot.monsters
       .filter((monster) => monster.alive)
-      .map((monster) => ({
-        id: `monster-${monster.id}`,
-        geometry: { kind: "sphere", radius: 0.42 },
-        color: "#8f4037",
-        transform: { translation: monster.position.map((value) => value / scale) },
-      })),
+      .map((monster) => {
+        const translation = monster.position.map((value) => value / scale);
+        if (monster.reaction?.kind === "stagger") translation[1] += 0.08;
+        return {
+          id: `monster-${monster.id}`,
+          geometry: { kind: "sphere", radius: 0.42 },
+          color: monster.reaction?.kind === "stagger" ? "#e8a25d" : "#8f4037",
+          transform: { translation },
+        };
+      }),
   ];
 
   return {
@@ -771,6 +805,12 @@ function App() {
           </div>
         )}
         <p>{status}</p>
+        {player?.action && (
+          <p className="action-status">
+            {player.action.kind === "secondaryAttack" ? "Heavy" : "Primary"} ·{" "}
+            {player.action.phase} · {player.action.ticksRemaining}t
+          </p>
+        )}
         <p className="desktop-controls-hint">
           WASD move · Space primary · Q heavy · Esc settings
         </p>
@@ -801,9 +841,12 @@ function App() {
         <section className="combat-actions" aria-label="Combat actions">
           <button
             type="button"
-            className="combat-action combat-action-primary"
+            className={`combat-action combat-action-primary ${
+              player?.action?.kind === "primaryAttack" ? "is-committed" : ""
+            }`}
+            data-phase={player?.action?.kind === "primaryAttack" ? player.action.phase : undefined}
             aria-label="Primary attack"
-            disabled={!playerId}
+            disabled={!playerId || Boolean(player?.action)}
             onPointerDown={(event) => {
               event.preventDefault();
               triggerCombatAction("primaryAttack");
@@ -814,9 +857,12 @@ function App() {
           </button>
           <button
             type="button"
-            className="combat-action combat-action-secondary"
+            className={`combat-action combat-action-secondary ${
+              player?.action?.kind === "secondaryAttack" ? "is-committed" : ""
+            }`}
+            data-phase={player?.action?.kind === "secondaryAttack" ? player.action.phase : undefined}
             aria-label="Heavy attack"
-            disabled={!playerId}
+            disabled={!playerId || Boolean(player?.action)}
             onPointerDown={(event) => {
               event.preventDefault();
               triggerCombatAction("secondaryAttack");
