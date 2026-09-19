@@ -577,8 +577,7 @@ impl ArpgGame {
                 let dx = i64::from(monster.position.x - player_position.x);
                 let dz = i64::from(monster.position.z - player_position.z);
                 let distance_sq = dx * dx + dz * dz;
-                (distance_sq <= range_sq
-                    && Self::target_is_in_front(facing_x, facing_z, dx, dz))
+                (distance_sq <= range_sq && Self::target_is_in_front(facing_x, facing_z, dx, dz))
                     .then_some((distance_sq, monster.id, monster))
             })
             .min_by_key(|(distance_sq, id, _)| (*distance_sq, *id));
@@ -1259,12 +1258,7 @@ mod tests {
         assert_eq!(diagonal, Vec3i::new(5, 0, 5));
     }
 
-    fn run_action(
-        game: &mut ArpgGame,
-        player_id: PlayerId,
-        sequence: u32,
-        command: ArpgCommand,
-    ) {
+    fn run_action(game: &mut ArpgGame, player_id: PlayerId, sequence: u32, command: ArpgCommand) {
         game.apply_command(PlayerCommand::new(player_id, sequence, command).unwrap())
             .unwrap();
         while game.players.get(&player_id).unwrap().action.is_some() {
