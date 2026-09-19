@@ -8,7 +8,8 @@
     "wasm": "wasm-pack build ../crates/arpg-web-wasm --target web --out-dir ../../web/src/wasm --out-name arpg_web_wasm -- --locked",
     "test": "bun test src/virtual-stick.test.js src/dedicated-session.test.js",
     "build": "bun run vendor && bun run wasm && vite build",
-    "dev": "bun run vendor && bun run wasm && vite"
+    "dev": "bun run vendor && bun run wasm && vite",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@moritzbrantner/three-d-renderer": "github:moritzbrantner/3d-lab#2af3ef54bb515c8f5611d4f7d39d484202a42784",
