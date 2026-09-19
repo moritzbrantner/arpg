@@ -1141,12 +1141,10 @@ impl AuthoritativeGame for ArpgGame {
                     alive: state.health > 0,
                     facing: [state.facing_x, state.facing_z],
                     action: state.action.map(ActionState::snapshot),
-                    reaction: (state.hurt_ticks_remaining > 0).then_some(
-                        PlayerReactionSnapshot {
-                            kind: PlayerReactionKind::Hurt,
-                            ticks_remaining: state.hurt_ticks_remaining,
-                        },
-                    ),
+                    reaction: (state.hurt_ticks_remaining > 0).then_some(PlayerReactionSnapshot {
+                        kind: PlayerReactionKind::Hurt,
+                        ticks_remaining: state.hurt_ticks_remaining,
+                    }),
                 })
             })
             .collect::<Result<Vec<_>, GameError>>()?;
@@ -1772,7 +1770,10 @@ mod tests {
         assert_eq!(monster_action.phase, ActionPhase::Windup);
         assert_eq!(monster_action.ticks_remaining, MONSTER_ATTACK_WINDUP_TICKS);
         assert_eq!(monster_action.target_player_id, 1);
-        assert_eq!(monster_action.range, i32::try_from(MONSTER_ATTACK_RANGE).unwrap());
+        assert_eq!(
+            monster_action.range,
+            i32::try_from(MONSTER_ATTACK_RANGE).unwrap()
+        );
 
         for _ in 0..MONSTER_ATTACK_WINDUP_TICKS {
             game.advance_tick().unwrap();
