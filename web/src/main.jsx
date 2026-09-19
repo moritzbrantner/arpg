@@ -16,7 +16,7 @@ const PROFILE_KEY = "arpg-input-profile-v1";
 const SETUP_URL_KEY = "arpg-setup-service-url-v1";
 const DEDICATED_URL_KEY = "arpg-dedicated-url-v1";
 const GRAPHICS_KEY = "arpg-graphics-v1";
-const PROTOCOL_VERSION = 5;
+const PROTOCOL_VERSION = 6;
 const gameplayContext = { op: "context", id: "gameplay" };
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
@@ -238,7 +238,11 @@ function buildFrame(snapshot, focusPlayerId, width, height) {
             : player.action?.phase === "recovery"
               ? "#9d8060"
               : null;
-      const color = actionColor ?? (player.id === focusPlayerId ? "#d6b45f" : "#6f91b6");
+      const color = !player.alive
+        ? "#45413d"
+        : player.reaction?.kind === "hurt"
+          ? "#e05a4f"
+          : actionColor ?? (player.id === focusPlayerId ? "#d6b45f" : "#6f91b6");
       return [
         {
           id: `player-${player.id}`,
@@ -262,15 +266,65 @@ function buildFrame(snapshot, focusPlayerId, width, height) {
     }),
     ...snapshot.monsters
       .filter((monster) => monster.alive)
-      .map((monster) => {
+      .flatMap((monster) => {
         const translation = monster.position.map((value) => value / scale);
         if (monster.reaction?.kind === "stagger") translation[1] += 0.08;
-        return {
-          id: `monster-${monster.id}`,
-          geometry: { kind: "sphere", radius: 0.42 },
-          color: monster.reaction?.kind === "stagger" ? "#e8a25d" : "#8f4037",
-          transform: { translation },
-        };
+        const phase = monster.action?.phase;
+        const monsterColor =
+          monster.reaction?.kind === "stagger"
+            ? "#e8a25d"
+            : phase === "active"
+              ? "#ff6a4f"
+              : phase === "windup"
+                ? "#c85b46"
+                : phase === "recovery"
+                  ? "#6e3934"
+                  : "#8f4037";
+        const nodes = [
+          {
+            id: `monster-${monster.id}`,
+            geometry: { kind: "sphere", radius: 0.42 },
+            color: monsterColor,
+            transform: { translation },
+          },
+        ];
+        if ((phase === "windup" || phase === "active") && monster.action?.range) {
+          const radius = monster.action.range / scale;
+          const telegraphColor = phase === "active" ? "#f06a4e" : "#824239";
+          for (let index = 0; index < 12; index += 1) {
+            const angle = (index / 12) * Math.PI * 2;
+            nodes.push({
+              id: `monster-${monster.id}-telegraph-${index}`,
+              geometry: { kind: "sphere", radius: phase === "active" ? 0.1 : 0.075 },
+              color: telegraphColor,
+              transform: {
+                translation: [
+                  monster.position[0] / scale + Math.cos(angle) * radius,
+                  0.075,
+                  monster.position[2] / scale + Math.sin(angle) * radius,
+                ],
+              },
+            });
+          }
+          const targetPlayer = snapshot.players.find(
+            (candidate) => candidate.id === monster.action.targetPlayerId,
+          );
+          if (targetPlayer?.alive) {
+            nodes.push({
+              id: `monster-${monster.id}-target`,
+              geometry: { kind: "sphere", radius: 0.12 },
+              color: telegraphColor,
+              transform: {
+                translation: [
+                  targetPlayer.position[0] / scale,
+                  0.14,
+                  targetPlayer.position[2] / scale,
+                ],
+              },
+            });
+          }
+        }
+        return nodes;
       }),
     ...(snapshot.groundLoot ?? []).map((loot) => ({
       id: `loot-${loot.id}`,
@@ -458,7 +512,7 @@ function App() {
   };
 
   const beginTouchStick = (event) => {
-    if (!playerId || touchPointerIdRef.current !== null) return;
+    if (!playerId || !player?.alive || touchPointerIdRef.current !== null) return;
     event.preventDefault();
     touchPointerIdRef.current = event.pointerId;
     event.currentTarget.setPointerCapture?.(event.pointerId);
@@ -475,7 +529,7 @@ function App() {
   };
 
   const triggerCombatAction = (type) => {
-    if (!playerId) return;
+    if (!playerId || !player?.alive) return;
     dispatchCommand({ type });
   };
 
@@ -816,6 +870,7 @@ function App() {
           </div>
         )}
         <p>{status}</p>
+        {player && !player.alive && <p className="downed-status">Downed</p>}
         {player?.action && (
           <p className="action-status">
             {player.action.kind === "secondaryAttack"
@@ -841,7 +896,7 @@ function App() {
             className="virtual-stick"
             role="group"
             aria-label="Movement joystick"
-            aria-disabled={!playerId}
+            aria-disabled={!playerId || !player?.alive}
             onPointerDown={beginTouchStick}
             onPointerMove={updateTouchStick}
             onPointerUp={endTouchStick}
@@ -863,7 +918,7 @@ function App() {
             }`}
             data-phase={player?.action?.kind === "primaryAttack" ? player.action.phase : undefined}
             aria-label="Primary attack"
-            disabled={!playerId || Boolean(player?.action)}
+            disabled={!playerId || !player?.alive || Boolean(player?.action)}
             onPointerDown={(event) => {
               event.preventDefault();
               triggerCombatAction("primaryAttack");
@@ -879,7 +934,7 @@ function App() {
             }`}
             data-phase={player?.action?.kind === "secondaryAttack" ? player.action.phase : undefined}
             aria-label="Heavy attack"
-            disabled={!playerId || Boolean(player?.action)}
+            disabled={!playerId || !player?.alive || Boolean(player?.action)}
             onPointerDown={(event) => {
               event.preventDefault();
               triggerCombatAction("secondaryAttack");
@@ -895,7 +950,7 @@ function App() {
             }`}
             data-phase={player?.action?.kind === "interact" ? player.action.phase : undefined}
             aria-label="Interact or pick up"
-            disabled={!playerId || Boolean(player?.action)}
+            disabled={!playerId || !player?.alive || Boolean(player?.action)}
             onPointerDown={(event) => {
               event.preventDefault();
               triggerCombatAction("interact");
