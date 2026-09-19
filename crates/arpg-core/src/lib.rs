@@ -1197,9 +1197,11 @@ mod tests {
     #[test]
     fn generated_rooms_are_large_enough_for_arpg_combat() {
         let dungeon = generate_dungeon(42);
-        assert!(dungeon.rooms.iter().all(|room| {
-            room.max_x - room.min_x >= 1_400 && room.max_z - room.min_z >= 1_400
-        }));
+        assert!(
+            dungeon.rooms.iter().all(|room| {
+                room.max_x - room.min_x >= 1_400 && room.max_z - room.min_z >= 1_400
+            })
+        );
     }
 
     #[test]
