@@ -1355,6 +1355,7 @@ mod tests {
             action: None,
             health: BASE_MAX_HEALTH,
             experience: 0,
+            gold: 0,
         });
         let diagonal = ArpgGame::movement_velocity(PlayerState {
             movement_x: 1,
@@ -1364,6 +1365,7 @@ mod tests {
             action: None,
             health: BASE_MAX_HEALTH,
             experience: 0,
+            gold: 0,
         });
         assert_eq!(cardinal, Vec3i::new(7, 0, 0));
         assert_eq!(diagonal, Vec3i::new(5, 0, 5));
@@ -1433,6 +1435,7 @@ mod tests {
             .unwrap();
         assert_eq!(first.experience, 0);
         assert_eq!(second.experience, MONSTER_EXPERIENCE_REWARD);
+        assert_eq!(snapshot.ground_loot.len(), 1);
 
         run_action(&mut game, 2, 2, ArpgCommand::PrimaryAttack);
         assert_eq!(
@@ -1540,6 +1543,78 @@ mod tests {
                 .health,
             38
         );
+    }
+
+    #[test]
+    fn kill_drop_pickup_requires_explicit_interaction() {
+        let mut game = ArpgGame::new_with_seed(42).unwrap();
+        let room_id = 2;
+        let (center_x, center_z) = game
+            .rooms
+            .iter()
+            .find(|room| room.id == room_id)
+            .unwrap()
+            .center();
+        game.player_spawns[0] = Vec3i::new(center_x, PLAYER_Y, center_z);
+        game.add_player(1).unwrap();
+        game.reconcile_encounters().unwrap();
+        let monster = game
+            .monsters
+            .iter_mut()
+            .find(|monster| monster.room_id == room_id)
+            .unwrap();
+        monster.position = Vec3i::new(center_x + 100, PLAYER_Y, center_z);
+        monster.health = BASE_ATTACK_DAMAGE;
+
+        run_action(&mut game, 1, 1, ArpgCommand::PrimaryAttack);
+
+        let after_kill = game.snapshot().unwrap();
+        assert_eq!(after_kill.players[0].gold, 0);
+        assert_eq!(after_kill.ground_loot.len(), 1);
+        assert_eq!(after_kill.ground_loot[0].kind, LootKind::Gold);
+        assert_eq!(after_kill.ground_loot[0].amount, GROUND_LOOT_GOLD_AMOUNT);
+        assert_eq!(
+            after_kill.ground_loot[0].position,
+            [center_x + 100, PLAYER_Y, center_z]
+        );
+
+        run_action(&mut game, 1, 2, ArpgCommand::Interact);
+
+        let after_pickup = game.snapshot().unwrap();
+        assert!(after_pickup.ground_loot.is_empty());
+        assert_eq!(after_pickup.players[0].gold, GROUND_LOOT_GOLD_AMOUNT);
+
+        run_action(&mut game, 1, 3, ArpgCommand::Interact);
+        assert_eq!(
+            game.snapshot().unwrap().players[0].gold,
+            GROUND_LOOT_GOLD_AMOUNT
+        );
+    }
+
+    #[test]
+    fn interaction_respects_pickup_range() {
+        let mut game = ArpgGame::new_with_seed(42).unwrap();
+        game.add_player(1).unwrap();
+        let player_position = game
+            .world
+            .body(ArpgGame::player_body_id(1))
+            .unwrap()
+            .position();
+        game.ground_loot.push(GroundLootState {
+            id: GROUND_LOOT_ID_BASE,
+            position: Vec3i::new(
+                player_position.x + i32::try_from(INTERACT_RANGE).unwrap() + 1,
+                PLAYER_Y,
+                player_position.z,
+            ),
+            kind: LootKind::Gold,
+            amount: GROUND_LOOT_GOLD_AMOUNT,
+        });
+
+        run_action(&mut game, 1, 1, ArpgCommand::Interact);
+
+        assert_eq!(game.snapshot().unwrap().ground_loot.len(), 1);
+        assert_eq!(game.snapshot().unwrap().players[0].gold, 0);
     }
 
     #[test]
@@ -1764,13 +1839,14 @@ mod tests {
         game.add_player(1).unwrap();
         let snapshot = game.snapshot().unwrap();
         let generated = generate_dungeon(snapshot.run_seed);
-        assert_eq!(snapshot.schema_version, 6);
+        assert_eq!(snapshot.schema_version, 7);
         assert_eq!(snapshot.run_seed, 0xDEAD_BEEF);
         assert_eq!(game.run_seed(), snapshot.run_seed);
         assert_eq!(snapshot.rooms, generated.rooms);
         assert_eq!(snapshot.doors, generated.doors);
         assert_eq!(snapshot.static_colliders, generated.static_colliders);
         assert_eq!(snapshot.monsters.len(), generated.monsters.len());
+        assert!(snapshot.ground_loot.is_empty());
         assert!(snapshot.monsters.iter().all(|monster| monster.room_id > 1));
         assert_eq!(snapshot.players[0].level, 1);
         assert_eq!(snapshot.players[0].experience, 0);
