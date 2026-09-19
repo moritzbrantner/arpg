@@ -222,6 +222,7 @@ pub struct MonsterActionSnapshot {
     pub phase: ActionPhase,
     pub ticks_remaining: u8,
     pub target_player_id: PlayerId,
+    pub range: i32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -387,6 +388,7 @@ impl MonsterActionState {
             phase: self.phase,
             ticks_remaining: self.ticks_remaining,
             target_player_id: self.target_player_id,
+            range: i32::try_from(MONSTER_ATTACK_RANGE).expect("monster attack range must fit i32"),
         }
     }
 }
@@ -1770,6 +1772,7 @@ mod tests {
         assert_eq!(monster_action.phase, ActionPhase::Windup);
         assert_eq!(monster_action.ticks_remaining, MONSTER_ATTACK_WINDUP_TICKS);
         assert_eq!(monster_action.target_player_id, 1);
+        assert_eq!(monster_action.range, i32::try_from(MONSTER_ATTACK_RANGE).unwrap());
 
         for _ in 0..MONSTER_ATTACK_WINDUP_TICKS {
             game.advance_tick().unwrap();
