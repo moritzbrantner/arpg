@@ -40,9 +40,11 @@ input, select { min-width: 0; max-width: 100%; padding: 0.55rem 0.65rem; width: 
 .combat-action span { color: #d4c9b7; font-size: 0.68rem; font-weight: 500; }
 .combat-action-primary { border-color: #9f564f; background: #682f2be6; }
 .combat-action-secondary { border-color: #8e7a56; background: #4e4231e8; }
+.combat-action-interact { border-color: #768c65; background: #34452fe8; }
 .combat-action:active { transform: scale(0.96); }
 .combat-action-primary:active { background: #7b3832; }
 .combat-action-secondary:active { background: #615139; }
+.combat-action-interact:active { background: #40583a; }
 .combat-action.is-committed:disabled { opacity: 1; cursor: default; }
 .combat-action.is-committed[data-phase="windup"] { transform: scale(0.94); box-shadow: 0 0 0 2px #d6b45f88, 0 0.4rem 1.5rem #0008; }
 .combat-action.is-committed[data-phase="active"] { transform: scale(1.04); box-shadow: 0 0 0 3px #f5df9baa, 0 0.4rem 1.5rem #0008; }
