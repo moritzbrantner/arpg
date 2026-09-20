@@ -6,7 +6,7 @@
   "scripts": {
     "vendor": "node scripts/vendor-foundations.mjs",
     "wasm": "wasm-pack build ../crates/arpg-web-wasm --target web --out-dir ../../web/src/wasm --out-name arpg_web_wasm -- --locked",
-    "test": "bun test src/virtual-stick.test.js src/dedicated-session.test.js",
+    "test": "bun test src/virtual-stick.test.js src/dedicated-session.test.js src/jsx-runtime.test.js",
     "build": "bun run vendor && bun run wasm && vite build",
     "dev": "bun run vendor && bun run wasm && vite"
   },
