@@ -11,7 +11,7 @@
     "dev": "bun run vendor && bun run wasm && vite"
   },
   "dependencies": {
-    "@moritzbrantner/three-d-renderer": "github:moritzbrantner/3d-lab#2af3ef54bb515c8f5611d4f7d39d484202a42784",
+    "@moritzbrantner/three-d-renderer": "github:moritzbrantner/3d-lab#7889a0066df928b101d42fb16f32353bd26c0696",
     "react": "19.1.1",
     "react-dom": "19.1.1",
     "three": "0.185.1"

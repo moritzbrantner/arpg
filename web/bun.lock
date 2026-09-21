@@ -5,7 +5,7 @@
     "": {
       "name": "arpg-web",
       "dependencies": {
-        "@moritzbrantner/three-d-renderer": "github:moritzbrantner/3d-lab#2af3ef54bb515c8f5611d4f7d39d484202a42784",
+        "@moritzbrantner/three-d-renderer": "github:moritzbrantner/3d-lab#7889a0066df928b101d42fb16f32353bd26c0696",
         "react": "19.1.1",
         "react-dom": "19.1.1",
         "three": "0.185.1",
@@ -68,7 +68,7 @@
 
     "@esbuild/win32-x64": ["@esbuild/win32-x64@0.25.12", "", { "os": "win32", "cpu": "x64" }, "sha512-alJC0uCZpTFrSL0CCDjcgleBXPnCrEAhTBILpeAp7M/OFgoqtAetfBzX0xM00MUsVVPpVjlPuMbREqnZCXaTnA=="],
 
-    "@moritzbrantner/three-d-renderer": ["@moritzbrantner/three-d-renderer@github:moritzbrantner/3d-lab#2af3ef5", { "dependencies": { "three": "0.185.1" } }, "moritzbrantner-3d-lab-2af3ef5", "sha512-KDrFRiPAN78ip8/jJ7gi1vU3RBfMV1fYWv7yAH87C42/Y9R9txSaizw2mo79lvMiAb1x26NHX3GlGdf/EEpwLQ=="],
+    "@moritzbrantner/three-d-renderer": ["@moritzbrantner/three-d-renderer@github:moritzbrantner/3d-lab#7889a00", { "dependencies": { "three": "0.185.1" } }, "moritzbrantner-3d-lab-7889a00", "sha512-f731aZ6QaUE+riqSqP9qWiPsJmrLL5JOWX6LSmEb1FM4eVrXeNTJuR69ONQUVbawncGRCeZJhuz2InHrLx9MZg=="],
 
     "@napi-rs/lzma-linux-x64-gnu": ["@napi-rs/lzma-linux-x64-gnu@1.5.1", "", { "os": "linux", "cpu": "x64" }, "sha512-oTXEIha4SsuXdTA4Iyskj0kpdx2yVXdhd75c2v3xGrHFfVMsbhTPZU/nMPL4sWKo4pBHm3aucLaqGlF696dTyQ=="],
 
