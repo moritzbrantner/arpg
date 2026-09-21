@@ -44,6 +44,9 @@ Build one reusable ARPG locomotion model for player-controlled characters.
 - movement cancellation rules for attacks and interactions;
 - controller, keyboard, and pointer intent projected into the same gameplay commands;
 - animation speed and foot presentation derived from authoritative movement rather than driving it.
+- consume pinned `3d-lab` procedural animation for two-bone leg IK, foot placement/locking, pelvis correction, and surface-normal alignment, using `physics-engine` contact/query evidence rather than renderer-owned ground truth;
+- drive foot-plant weights and other pose constraints from authored presentation metadata and authoritative movement/cue state without allowing animation contacts to change movement, attacks, hit timing, or collision truth;
+- add bounded motion warping later for attacks and interactions so visuals can converge on authoritative targets while `arpg-core` remains authoritative for displacement, action phases, targeting, and hits.
 
 Acceptance: moving around an empty room should already feel intentional and satisfying before enemies or loot are added.
 
