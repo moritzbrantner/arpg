@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  MAX_SAVE_FILE_BYTES,
   SAVE_DOCUMENT_FORMAT,
   SAVE_DOCUMENT_VERSION,
   SAVE_STORAGE_KEY,
@@ -53,6 +54,10 @@ describe("save documents", () => {
     const encoded = serializeSaveDocument(document);
     expect(encoded.endsWith("\n")).toBe(true);
     expect(parseSaveDocument(encoded)).toEqual(document);
+  });
+
+  test("bounds imported save files to a practical local size", () => {
+    expect(MAX_SAVE_FILE_BYTES).toBe(4 * 1024 * 1024);
   });
 
   test("rejects unrelated and future save formats before Wasm load", () => {
