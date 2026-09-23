@@ -1079,7 +1079,7 @@ function App() {
 
         <footer className="character-select-footer">
           <span className="character-select-status">
-            {ready ? "World runtime ready" : status}
+            {ready && status === "Choose a character to enter the world" ? "World runtime ready" : status}
           </span>
           <div className="character-select-save-actions">
             <button
