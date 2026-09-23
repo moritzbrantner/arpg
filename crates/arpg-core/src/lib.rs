@@ -16,6 +16,7 @@ pub const TICK_HZ: u16 = 60;
 pub const MAX_PLAYERS: usize = 4;
 pub const WORLD_UNITS_PER_METER: i32 = 100;
 pub const SAVE_STATE_SCHEMA_VERSION: u16 = 1;
+pub const SAVE_STATE_RULES_VERSION: u16 = 1;
 // physics-engine::World::step(1) integrates velocity as world units per simulation tick.
 // At 60 Hz and 100 world units per meter, 7 units/tick is 4.2 m/s rather than
 // the previous 260 units/tick (156 m/s).
@@ -343,6 +344,7 @@ pub struct GroundLootSnapshot {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ArpgSaveState {
     pub schema_version: u16,
+    pub rules_version: u16,
     pub run_seed: RunSeed,
     pub tick: u64,
     pub players: Vec<PlayerSaveState>,
@@ -613,6 +615,7 @@ impl ArpgGame {
 
         Ok(ArpgSaveState {
             schema_version: SAVE_STATE_SCHEMA_VERSION,
+            rules_version: SAVE_STATE_RULES_VERSION,
             run_seed: self.run_seed,
             tick: self.tick,
             players,
@@ -659,6 +662,12 @@ impl ArpgGame {
             return Err(GameError::new(format!(
                 "unsupported ARPG save schema version {}; expected {}",
                 save.schema_version, SAVE_STATE_SCHEMA_VERSION
+            )));
+        }
+        if save.rules_version != SAVE_STATE_RULES_VERSION {
+            return Err(GameError::new(format!(
+                "unsupported ARPG save rules version {}; expected {}",
+                save.rules_version, SAVE_STATE_RULES_VERSION
             )));
         }
         if save.players.len() > MAX_PLAYERS {
@@ -708,6 +717,9 @@ impl ArpgGame {
                     "saved player health exceeds authoritative maximum",
                 ));
             }
+            if player.hurt_ticks_remaining > PLAYER_HURT_TICKS {
+                return Err(GameError::new("saved player hurt reaction is invalid"));
+            }
             if let Some(action) = player.action {
                 Self::validate_action_snapshot(action)?;
             }
@@ -725,10 +737,21 @@ impl ArpgGame {
                     "saved monster health exceeds authoritative maximum",
                 ));
             }
-            if let Some(action) = monster.action
-                && (action.ticks_remaining == 0 || action.target_player_id == 0)
-            {
-                return Err(GameError::new("saved monster action is invalid"));
+            if monster.stagger_ticks_remaining > SECONDARY_STAGGER_TICKS {
+                return Err(GameError::new("saved monster stagger reaction is invalid"));
+            }
+            if let Some(action) = monster.action {
+                let maximum_ticks = match action.phase {
+                    ActionPhase::Windup => MONSTER_ATTACK_WINDUP_TICKS,
+                    ActionPhase::Active => MONSTER_ATTACK_ACTIVE_TICKS,
+                    ActionPhase::Recovery => MONSTER_ATTACK_RECOVERY_TICKS,
+                };
+                if action.ticks_remaining == 0
+                    || action.ticks_remaining > maximum_ticks
+                    || action.target_player_id == 0
+                {
+                    return Err(GameError::new("saved monster action is invalid"));
+                }
             }
             if monster_states.insert(monster.id, monster).is_some() {
                 return Err(GameError::new("save contains duplicate monster ids"));
@@ -760,7 +783,7 @@ impl ArpgGame {
         let mut ground_loot = Vec::with_capacity(save.ground_loot.len());
         for loot in save.ground_loot {
             if loot.id < GROUND_LOOT_ID_BASE
-                || loot.amount == 0
+                || loot.amount != GROUND_LOOT_GOLD_AMOUNT
                 || !loot_ids.insert(loot.id)
                 || loot.id >= save.next_ground_loot_id
             {
@@ -843,8 +866,13 @@ impl ArpgGame {
 
     fn validate_action_snapshot(action: PlayerActionSnapshot) -> Result<(), GameError> {
         Self::validate_facing(action.facing)?;
-        if action.ticks_remaining == 0 {
-            return Err(GameError::new("saved player action has no remaining ticks"));
+        let maximum_ticks = match action.phase {
+            ActionPhase::Windup => action.kind.windup_ticks(),
+            ActionPhase::Active => action.kind.active_ticks(),
+            ActionPhase::Recovery => action.kind.recovery_ticks(),
+        };
+        if action.ticks_remaining == 0 || action.ticks_remaining > maximum_ticks {
+            return Err(GameError::new("saved player action timing is invalid"));
         }
         Ok(())
     }
@@ -2790,6 +2818,15 @@ mod tests {
                 .unwrap_err()
                 .message()
                 .contains("unsupported ARPG save schema version")
+        );
+
+        let mut save = game.save_state().unwrap();
+        save.rules_version += 1;
+        assert!(
+            ArpgGame::from_save_state(save)
+                .unwrap_err()
+                .message()
+                .contains("unsupported ARPG save rules version")
         );
 
         let mut save = game.save_state().unwrap();
