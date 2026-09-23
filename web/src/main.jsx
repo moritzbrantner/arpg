@@ -952,16 +952,16 @@ function App() {
 
   const exportSave = () => {
     try {
-      const document = captureSaveDocument();
-      const blob = new Blob([serializeSaveDocument(document)], { type: "application/json" });
+      const saveDocument = captureSaveDocument();
+      const blob = new Blob([serializeSaveDocument(saveDocument)], { type: "application/json" });
       const url = URL.createObjectURL(blob);
-      const link = document.createElement?.("a");
+      const link = globalThis.document?.createElement?.("a");
       if (!link) throw new Error("Browser download API is unavailable");
       link.href = url;
-      link.download = saveFileName(document);
+      link.download = saveFileName(saveDocument);
       link.click();
       URL.revokeObjectURL(url);
-      setStatus(`Save exported · tick ${document.coreState.tick}`);
+      setStatus(`Save exported · tick ${saveDocument.coreState.tick}`);
     } catch (error) {
       setStatus(`Could not export save: ${error}`);
     }
