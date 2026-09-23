@@ -669,7 +669,9 @@ impl ArpgGame {
         game.tick = save.tick;
 
         if save.rooms.len() != game.rooms.len() {
-            return Err(GameError::new("save room set does not match generated dungeon"));
+            return Err(GameError::new(
+                "save room set does not match generated dungeon",
+            ));
         }
         let mut room_states = BTreeMap::new();
         for room in save.rooms {
@@ -693,12 +695,18 @@ impl ArpgGame {
         let mut player_ids = BTreeSet::new();
         for player in &save.players {
             if player.id == 0 || !player_ids.insert(player.id) {
-                return Err(GameError::new("save contains invalid or duplicate player ids"));
+                return Err(GameError::new(
+                    "save contains invalid or duplicate player ids",
+                ));
             }
             Self::validate_axis(player.movement, "movement")?;
             Self::validate_facing(player.facing)?;
-            if player.health > Self::max_health_for_level(Self::level_for_experience(player.experience)) {
-                return Err(GameError::new("saved player health exceeds authoritative maximum"));
+            if player.health
+                > Self::max_health_for_level(Self::level_for_experience(player.experience))
+            {
+                return Err(GameError::new(
+                    "saved player health exceeds authoritative maximum",
+                ));
             }
             if let Some(action) = player.action {
                 Self::validate_action_snapshot(action)?;
@@ -706,12 +714,16 @@ impl ArpgGame {
         }
 
         if save.monsters.len() != game.monsters.len() {
-            return Err(GameError::new("save monster set does not match generated dungeon"));
+            return Err(GameError::new(
+                "save monster set does not match generated dungeon",
+            ));
         }
         let mut monster_states = BTreeMap::new();
         for monster in save.monsters {
             if monster.health > 100 {
-                return Err(GameError::new("saved monster health exceeds authoritative maximum"));
+                return Err(GameError::new(
+                    "saved monster health exceeds authoritative maximum",
+                ));
             }
             if let Some(action) = monster.action
                 && (action.ticks_remaining == 0 || action.target_player_id == 0)
@@ -727,7 +739,9 @@ impl ArpgGame {
                 .remove(&monster.id)
                 .ok_or_else(|| GameError::new("save is missing a generated monster"))?;
             if saved.room_id != monster.room_id {
-                return Err(GameError::new("saved monster room does not match generated dungeon"));
+                return Err(GameError::new(
+                    "saved monster room does not match generated dungeon",
+                ));
             }
             monster.position = array_to_vec(saved.position);
             monster.health = saved.health;
@@ -760,7 +774,9 @@ impl ArpgGame {
             });
         }
         if save.next_ground_loot_id < GROUND_LOOT_ID_BASE {
-            return Err(GameError::new("save contains an invalid next ground loot id"));
+            return Err(GameError::new(
+                "save contains an invalid next ground loot id",
+            ));
         }
         game.ground_loot = ground_loot;
         game.next_ground_loot_id = save.next_ground_loot_id;
@@ -768,7 +784,10 @@ impl ArpgGame {
         for player in save.players {
             game.add_player(player.id)?;
             game.world
-                .set_position(Self::player_body_id(player.id), array_to_vec(player.position))
+                .set_position(
+                    Self::player_body_id(player.id),
+                    array_to_vec(player.position),
+                )
                 .map_err(physics_error)?;
             let state = game
                 .players
@@ -803,8 +822,13 @@ impl ArpgGame {
     }
 
     fn validate_axis(axis: [i8; 2], label: &str) -> Result<(), GameError> {
-        if axis.into_iter().any(|component| !(-1..=1).contains(&component)) {
-            return Err(GameError::new(format!("saved {label} axis is outside -1..=1")));
+        if axis
+            .into_iter()
+            .any(|component| !(-1..=1).contains(&component))
+        {
+            return Err(GameError::new(format!(
+                "saved {label} axis is outside -1..=1"
+            )));
         }
         Ok(())
     }
