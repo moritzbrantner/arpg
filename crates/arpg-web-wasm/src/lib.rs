@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use arpg_core::{ArpgGame, AuthoritativeGame, PlayerCommand};
+use arpg_core::{ArpgGame, ArpgSaveState, AuthoritativeGame, PlayerCommand};
 use arpg_protocol::{JsonProtocol, WireProtocol};
 use wasm_bindgen::prelude::*;
 
@@ -61,6 +61,21 @@ impl WasmGame {
         let bytes = self.protocol.encode_snapshot(&snapshot).map_err(js_error)?;
         String::from_utf8(bytes).map_err(js_error)
     }
+
+    #[wasm_bindgen(js_name = saveStateJson)]
+    pub fn save_state_json(&self) -> Result<String, JsValue> {
+        let save = self.game.save_state().map_err(js_error)?;
+        serde_json::to_string(&save).map_err(js_error)
+    }
+}
+
+#[wasm_bindgen(js_name = loadGameFromSaveStateJson)]
+pub fn load_game_from_save_state_json(encoded: &str) -> Result<WasmGame, JsValue> {
+    let save = serde_json::from_str::<ArpgSaveState>(encoded).map_err(js_error)?;
+    Ok(WasmGame {
+        game: ArpgGame::from_save_state(save).map_err(js_error)?,
+        protocol: JsonProtocol,
+    })
 }
 
 fn js_error(error: impl std::fmt::Display) -> JsValue {
