@@ -6,7 +6,7 @@ import { InputRuntimeController } from "@moritzbrantner/input-bindings-runtime";
 import { attachKeyboardRuntime } from "@moritzbrantner/input-bindings-web";
 import { KeybindingEditor } from "@moritzbrantner/input-bindings-react";
 import "@moritzbrantner/input-bindings-react/styles.css";
-import initWasm, { WasmGame } from "./wasm/arpg_web_wasm.js";
+import initWasm, { WasmGame, loadGameFromSaveStateJson } from "./wasm/arpg_web_wasm.js";
 import { DedicatedGameSession } from "./dedicated-session.js";
 import { ResilientLobbySession } from "./vendor/multiplayer-setup-service/resilient-lobby-session.js";
 import { sampleVirtualStick } from "./virtual-stick.js";
@@ -16,6 +16,15 @@ import {
   persistSelectedCharacterId,
   resolveCharacter,
 } from "./character-selection.js";
+import {
+  createSaveDocument,
+  hasPersistedSaveDocument,
+  loadPersistedSaveDocument,
+  parseSaveDocument,
+  persistSaveDocument,
+  saveFileName,
+  serializeSaveDocument,
+} from "./save-state.js";
 import "./styles.css";
 
 const PROFILE_KEY = "arpg-input-profile-v1";
@@ -363,6 +372,7 @@ function App() {
   const touchStickRef = useRef(null);
   const touchKnobRef = useRef(null);
   const touchPointerIdRef = useRef(null);
+  const saveFileInputRef = useRef(null);
   const initialRunSeedRef = useRef(requestedRunSeed() ?? freshRunSeed());
   const movementRef = useRef({
     forward: false,
@@ -381,6 +391,9 @@ function App() {
   const [status, setStatus] = useState("Loading Rust simulation…");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [inWorld, setInWorld] = useState(false);
+  const [savedGameAvailable, setSavedGameAvailable] = useState(() =>
+    hasPersistedSaveDocument(localStorage),
+  );
   const [selectedCharacterId, setSelectedCharacterId] = useState(() =>
     loadSelectedCharacterId(localStorage),
   );
@@ -868,6 +881,108 @@ function App() {
     setSelectedCharacterId(persistSelectedCharacterId(localStorage, characterId));
   };
 
+  const captureSaveDocument = () => {
+    if (modeRef.current !== "local" || !gameRef.current || !playerId) {
+      throw new Error("Saving is available for local games");
+    }
+    return createSaveDocument(gameRef.current.saveStateJson(), {
+      characterId: selectedCharacter.id,
+      controlledPlayerId: playerId,
+    });
+  };
+
+  const applySaveDocument = (document, sourceLabel, persistImported = false) => {
+    const controlledPlayerId = document.client.controlledPlayerId;
+    const savedPlayer = document.coreState.players?.find(
+      (candidate) => candidate.id === controlledPlayerId,
+    );
+    if (!savedPlayer) {
+      throw new Error("Save file does not contain its controlled player");
+    }
+
+    const loadedGame = loadGameFromSaveStateJson(JSON.stringify(document.coreState));
+    closeSession();
+    gameRef.current?.free?.();
+    gameRef.current = loadedGame;
+    resetMovement();
+    movementRef.current.lastX = savedPlayer.movement?.[0] ?? 0;
+    movementRef.current.lastZ = savedPlayer.movement?.[1] ?? 0;
+    sequenceRef.current = savedPlayer.lastSequence ?? 0;
+    setModeValue("local");
+    setPlayerId(controlledPlayerId);
+    setSelectedCharacterId(
+      persistSelectedCharacterId(localStorage, document.presentation.characterId),
+    );
+    setSnapshot(decodeSnapshot(loadedGame.snapshotJson()));
+    setInWorld(true);
+    setSettingsOpen(false);
+    if (persistImported) {
+      persistSaveDocument(localStorage, document);
+      setSavedGameAvailable(true);
+    }
+    setStatus(
+      `${sourceLabel} · tick ${document.coreState.tick} · seed ${document.coreState.runSeed}`,
+    );
+  };
+
+  const saveGameLocally = () => {
+    try {
+      const document = captureSaveDocument();
+      persistSaveDocument(localStorage, document);
+      setSavedGameAvailable(true);
+      setStatus(`Game saved locally · tick ${document.coreState.tick}`);
+    } catch (error) {
+      setStatus(`Could not save game: ${error}`);
+    }
+  };
+
+  const loadSavedGame = () => {
+    try {
+      const document = loadPersistedSaveDocument(localStorage);
+      if (!document) {
+        setSavedGameAvailable(false);
+        setStatus("No local save is available");
+        return;
+      }
+      applySaveDocument(document, "Loaded local save");
+    } catch (error) {
+      setStatus(`Could not load saved game: ${error}`);
+    }
+  };
+
+  const exportSave = () => {
+    try {
+      const saveDocument = captureSaveDocument();
+      const blob = new Blob([serializeSaveDocument(saveDocument)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const link = globalThis.document?.createElement?.("a");
+      if (!link) throw new Error("Browser download API is unavailable");
+      link.href = url;
+      link.download = saveFileName(saveDocument);
+      link.click();
+      URL.revokeObjectURL(url);
+      setStatus(`Save exported · tick ${saveDocument.coreState.tick}`);
+    } catch (error) {
+      setStatus(`Could not export save: ${error}`);
+    }
+  };
+
+  const requestSaveImport = () => {
+    saveFileInputRef.current?.click();
+  };
+
+  const importSave = async (event) => {
+    const [file] = event.target.files ?? [];
+    event.target.value = "";
+    if (!file) return;
+    try {
+      const document = parseSaveDocument(await file.text());
+      applySaveDocument(document, `Imported ${file.name}`, true);
+    } catch (error) {
+      setStatus(`Could not import save: ${error}`);
+    }
+  };
+
   const copyInvite = async () => {
     const url = new URL(location.pathname, location.origin);
     url.searchParams.set("join", lobbyCode);
@@ -964,16 +1079,35 @@ function App() {
 
         <footer className="character-select-footer">
           <span className="character-select-status">
-            {ready ? "World runtime ready" : status}
+            {ready && status === "Choose a character to enter the world" ? "World runtime ready" : status}
           </span>
-          <button
-            type="button"
-            className="enter-world-button"
-            onClick={enterWorld}
-            disabled={!ready}
-          >
-            Enter World
-          </button>
+          <div className="character-select-save-actions">
+            <button
+              type="button"
+              onClick={loadSavedGame}
+              disabled={!ready || !savedGameAvailable}
+            >
+              Load Saved Game
+            </button>
+            <button type="button" onClick={requestSaveImport} disabled={!ready}>
+              Import Save
+            </button>
+            <button
+              type="button"
+              className="enter-world-button"
+              onClick={enterWorld}
+              disabled={!ready}
+            >
+              Enter World
+            </button>
+          </div>
+          <input
+            ref={saveFileInputRef}
+            className="save-file-input"
+            type="file"
+            accept=".json,application/json"
+            onChange={importSave}
+          />
         </footer>
       </main>
     );
@@ -1135,6 +1269,55 @@ function App() {
               <button type="button" onClick={startLocal}>
                 Start local game
               </button>
+            </section>
+
+            <section>
+              <h2>Save & load</h2>
+              <div className="save-state-summary">
+                <strong>{savedGameAvailable ? "Local save available" : "No local save yet"}</strong>
+                <span>
+                  {mode === "local"
+                    ? "Current local authority can be saved or exported."
+                    : "Loading a save returns to local play; network sessions are not overwritten."}
+                </span>
+              </div>
+              <div className="settings-actions save-state-actions">
+                <button
+                  type="button"
+                  onClick={saveGameLocally}
+                  disabled={mode !== "local" || !gameRef.current || !playerId}
+                >
+                  Save game
+                </button>
+                <button
+                  type="button"
+                  onClick={loadSavedGame}
+                  disabled={!ready || !savedGameAvailable}
+                >
+                  Load saved game
+                </button>
+                <button
+                  type="button"
+                  onClick={exportSave}
+                  disabled={mode !== "local" || !gameRef.current || !playerId}
+                >
+                  Export save
+                </button>
+                <button type="button" onClick={requestSaveImport} disabled={!ready}>
+                  Import save
+                </button>
+              </div>
+              <input
+                ref={saveFileInputRef}
+                className="save-file-input"
+                type="file"
+                accept=".json,application/json"
+                onChange={importSave}
+              />
+              <p className="settings-note">
+                Saves are versioned and validated by the Rust authority before they replace the
+                current game. Exported JSON can be imported on another browser or device.
+              </p>
             </section>
 
             <section>

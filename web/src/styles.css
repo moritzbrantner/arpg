@@ -401,6 +401,21 @@ input, select { min-width: 0; max-width: 100%; padding: 0.55rem 0.65rem; width: 
   color: #8f887b;
   font-size: 0.78rem;
 }
+.character-select-save-actions {
+  display: flex;
+  gap: 0.65rem;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.character-select-save-actions > button:not(.enter-world-button) {
+  min-height: 3.15rem;
+  border-color: #5a5349;
+  background: #171916e8;
+}
+.save-file-input {
+  display: none;
+}
 .enter-world-button {
   min-width: 11rem;
   min-height: 3.15rem;
@@ -472,6 +487,26 @@ input, select { min-width: 0; max-width: 100%; padding: 0.55rem 0.65rem; width: 
 .settings-actions { display: flex; gap: 0.6rem; flex-wrap: wrap; margin: 0.7rem 0; }
 .settings-actions button { min-height: 2.75rem; }
 .settings-note { font-size: 0.85rem; }
+.save-state-summary {
+  display: grid;
+  gap: 0.25rem;
+  margin: 0.4rem 0 0.9rem;
+  padding: 0.8rem 0.9rem;
+  border: 1px solid #38332e;
+  background: #12110f;
+}
+.save-state-summary strong {
+  color: #eee8dc;
+  font-size: 0.92rem;
+}
+.save-state-summary span {
+  color: #a99f91;
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+.save-state-actions button {
+  min-width: 8.5rem;
+}
 .checkbox-row { display: flex !important; grid-template-columns: none; align-items: center; gap: 0.6rem !important; }
 .checkbox-row input { width: auto; }
 .keybindings-section { min-width: 0; border-bottom: 0 !important; }
@@ -568,6 +603,11 @@ input, select { min-width: 0; max-width: 100%; padding: 0.55rem 0.65rem; width: 
   .character-card-meta { display: inline; }
   .character-select-footer { align-items: stretch; flex-direction: column; gap: 0.6rem; }
   .character-select-status { margin: 0; text-align: center; }
+  .character-select-save-actions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .character-select-save-actions > button,
   .enter-world-button { width: 100%; }
 }
 

@@ -15,6 +15,8 @@ pub type RunSeed = u32;
 pub const TICK_HZ: u16 = 60;
 pub const MAX_PLAYERS: usize = 4;
 pub const WORLD_UNITS_PER_METER: i32 = 100;
+pub const SAVE_STATE_SCHEMA_VERSION: u16 = 1;
+pub const SAVE_STATE_RULES_VERSION: u16 = 1;
 // physics-engine::World::step(1) integrates velocity as world units per simulation tick.
 // At 60 Hz and 100 world units per meter, 7 units/tick is 4.2 m/s rather than
 // the previous 260 units/tick (156 m/s).
@@ -339,6 +341,61 @@ pub struct GroundLootSnapshot {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ArpgSaveState {
+    pub schema_version: u16,
+    pub rules_version: u16,
+    pub run_seed: RunSeed,
+    pub tick: u64,
+    pub players: Vec<PlayerSaveState>,
+    pub rooms: Vec<RoomSaveState>,
+    pub monsters: Vec<MonsterSaveState>,
+    pub ground_loot: Vec<GroundLootSnapshot>,
+    pub next_ground_loot_id: GroundLootId,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlayerSaveState {
+    pub id: PlayerId,
+    pub position: [i32; 3],
+    pub movement: [i8; 2],
+    pub facing: [i8; 2],
+    pub action: Option<PlayerActionSnapshot>,
+    pub hurt_ticks_remaining: u8,
+    pub health: u16,
+    pub experience: u32,
+    pub gold: u32,
+    pub last_sequence: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RoomSaveState {
+    pub id: RoomId,
+    pub encounter_state: RoomEncounterState,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MonsterActionSaveState {
+    pub phase: ActionPhase,
+    pub ticks_remaining: u8,
+    pub target_player_id: PlayerId,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MonsterSaveState {
+    pub id: u32,
+    pub room_id: RoomId,
+    pub position: [i32; 3],
+    pub health: u16,
+    pub action: Option<MonsterActionSaveState>,
+    pub stagger_ticks_remaining: u8,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StaticColliderSnapshot {
     pub id: u64,
@@ -530,6 +587,294 @@ impl ArpgGame {
 
     pub fn run_seed(&self) -> RunSeed {
         self.run_seed
+    }
+
+    pub fn save_state(&self) -> Result<ArpgSaveState, GameError> {
+        let players = self
+            .players
+            .iter()
+            .map(|(&id, state)| {
+                let body = self
+                    .world
+                    .body(Self::player_body_id(id))
+                    .ok_or_else(|| GameError::new("player physics body is missing"))?;
+                Ok(PlayerSaveState {
+                    id,
+                    position: vec_to_array(body.position()),
+                    movement: [state.movement_x, state.movement_z],
+                    facing: [state.facing_x, state.facing_z],
+                    action: state.action.map(ActionState::snapshot),
+                    hurt_ticks_remaining: state.hurt_ticks_remaining,
+                    health: state.health,
+                    experience: state.experience,
+                    gold: state.gold,
+                    last_sequence: self.last_sequences.get(&id).copied().unwrap_or_default(),
+                })
+            })
+            .collect::<Result<Vec<_>, GameError>>()?;
+
+        Ok(ArpgSaveState {
+            schema_version: SAVE_STATE_SCHEMA_VERSION,
+            rules_version: SAVE_STATE_RULES_VERSION,
+            run_seed: self.run_seed,
+            tick: self.tick,
+            players,
+            rooms: self
+                .rooms
+                .iter()
+                .map(|room| RoomSaveState {
+                    id: room.id,
+                    encounter_state: room.encounter_state,
+                })
+                .collect(),
+            monsters: self
+                .monsters
+                .iter()
+                .map(|monster| MonsterSaveState {
+                    id: monster.id,
+                    room_id: monster.room_id,
+                    position: vec_to_array(monster.position),
+                    health: monster.health,
+                    action: monster.action.map(|action| MonsterActionSaveState {
+                        phase: action.phase,
+                        ticks_remaining: action.ticks_remaining,
+                        target_player_id: action.target_player_id,
+                    }),
+                    stagger_ticks_remaining: monster.stagger_ticks_remaining,
+                })
+                .collect(),
+            ground_loot: self
+                .ground_loot
+                .iter()
+                .map(|loot| GroundLootSnapshot {
+                    id: loot.id,
+                    position: vec_to_array(loot.position),
+                    kind: loot.kind,
+                    amount: loot.amount,
+                })
+                .collect(),
+            next_ground_loot_id: self.next_ground_loot_id,
+        })
+    }
+
+    pub fn from_save_state(save: ArpgSaveState) -> Result<Self, GameError> {
+        if save.schema_version != SAVE_STATE_SCHEMA_VERSION {
+            return Err(GameError::new(format!(
+                "unsupported ARPG save schema version {}; expected {}",
+                save.schema_version, SAVE_STATE_SCHEMA_VERSION
+            )));
+        }
+        if save.rules_version != SAVE_STATE_RULES_VERSION {
+            return Err(GameError::new(format!(
+                "unsupported ARPG save rules version {}; expected {}",
+                save.rules_version, SAVE_STATE_RULES_VERSION
+            )));
+        }
+        if save.players.len() > MAX_PLAYERS {
+            return Err(GameError::new("save contains too many players"));
+        }
+
+        let mut game = Self::new_with_seed(save.run_seed)?;
+        game.tick = save.tick;
+
+        if save.rooms.len() != game.rooms.len() {
+            return Err(GameError::new(
+                "save room set does not match generated dungeon",
+            ));
+        }
+        let mut room_states = BTreeMap::new();
+        for room in save.rooms {
+            if room_states.insert(room.id, room.encounter_state).is_some() {
+                return Err(GameError::new("save contains duplicate room ids"));
+            }
+        }
+        for room in &mut game.rooms {
+            let state = room_states
+                .remove(&room.id)
+                .ok_or_else(|| GameError::new("save is missing a generated room"))?;
+            if room.kind == RoomKind::Start && state != RoomEncounterState::Cleared {
+                return Err(GameError::new("start room must remain cleared"));
+            }
+            room.encounter_state = state;
+        }
+        if !room_states.is_empty() {
+            return Err(GameError::new("save contains unknown room ids"));
+        }
+
+        let mut player_ids = BTreeSet::new();
+        for player in &save.players {
+            if player.id == 0 || !player_ids.insert(player.id) {
+                return Err(GameError::new(
+                    "save contains invalid or duplicate player ids",
+                ));
+            }
+            Self::validate_axis(player.movement, "movement")?;
+            Self::validate_facing(player.facing)?;
+            if player.health
+                > Self::max_health_for_level(Self::level_for_experience(player.experience))
+            {
+                return Err(GameError::new(
+                    "saved player health exceeds authoritative maximum",
+                ));
+            }
+            if player.hurt_ticks_remaining > PLAYER_HURT_TICKS {
+                return Err(GameError::new("saved player hurt reaction is invalid"));
+            }
+            if let Some(action) = player.action {
+                Self::validate_action_snapshot(action)?;
+            }
+        }
+
+        if save.monsters.len() != game.monsters.len() {
+            return Err(GameError::new(
+                "save monster set does not match generated dungeon",
+            ));
+        }
+        let mut monster_states = BTreeMap::new();
+        for monster in save.monsters {
+            if monster.health > 100 {
+                return Err(GameError::new(
+                    "saved monster health exceeds authoritative maximum",
+                ));
+            }
+            if monster.stagger_ticks_remaining > SECONDARY_STAGGER_TICKS {
+                return Err(GameError::new("saved monster stagger reaction is invalid"));
+            }
+            if let Some(action) = monster.action {
+                let maximum_ticks = match action.phase {
+                    ActionPhase::Windup => MONSTER_ATTACK_WINDUP_TICKS,
+                    ActionPhase::Active => MONSTER_ATTACK_ACTIVE_TICKS,
+                    ActionPhase::Recovery => MONSTER_ATTACK_RECOVERY_TICKS,
+                };
+                if action.ticks_remaining == 0
+                    || action.ticks_remaining > maximum_ticks
+                    || action.target_player_id == 0
+                {
+                    return Err(GameError::new("saved monster action is invalid"));
+                }
+            }
+            if monster_states.insert(monster.id, monster).is_some() {
+                return Err(GameError::new("save contains duplicate monster ids"));
+            }
+        }
+        for monster in &mut game.monsters {
+            let saved = monster_states
+                .remove(&monster.id)
+                .ok_or_else(|| GameError::new("save is missing a generated monster"))?;
+            if saved.room_id != monster.room_id {
+                return Err(GameError::new(
+                    "saved monster room does not match generated dungeon",
+                ));
+            }
+            monster.position = array_to_vec(saved.position);
+            monster.health = saved.health;
+            monster.action = saved.action.map(|action| MonsterActionState {
+                phase: action.phase,
+                ticks_remaining: action.ticks_remaining,
+                target_player_id: action.target_player_id,
+            });
+            monster.stagger_ticks_remaining = saved.stagger_ticks_remaining;
+        }
+        if !monster_states.is_empty() {
+            return Err(GameError::new("save contains unknown monster ids"));
+        }
+
+        let mut loot_ids = BTreeSet::new();
+        let mut ground_loot = Vec::with_capacity(save.ground_loot.len());
+        for loot in save.ground_loot {
+            if loot.id < GROUND_LOOT_ID_BASE
+                || loot.amount != GROUND_LOOT_GOLD_AMOUNT
+                || !loot_ids.insert(loot.id)
+                || loot.id >= save.next_ground_loot_id
+            {
+                return Err(GameError::new("save contains invalid ground loot"));
+            }
+            ground_loot.push(GroundLootState {
+                id: loot.id,
+                position: array_to_vec(loot.position),
+                kind: loot.kind,
+                amount: loot.amount,
+            });
+        }
+        if save.next_ground_loot_id < GROUND_LOOT_ID_BASE {
+            return Err(GameError::new(
+                "save contains an invalid next ground loot id",
+            ));
+        }
+        game.ground_loot = ground_loot;
+        game.next_ground_loot_id = save.next_ground_loot_id;
+
+        for player in save.players {
+            game.add_player(player.id)?;
+            game.world
+                .set_position(
+                    Self::player_body_id(player.id),
+                    array_to_vec(player.position),
+                )
+                .map_err(physics_error)?;
+            let state = game
+                .players
+                .get_mut(&player.id)
+                .expect("saved player was just added");
+            *state = PlayerState {
+                movement_x: player.movement[0],
+                movement_z: player.movement[1],
+                facing_x: player.facing[0],
+                facing_z: player.facing[1],
+                action: player.action.map(|action| ActionState {
+                    kind: action.kind,
+                    phase: action.phase,
+                    ticks_remaining: action.ticks_remaining,
+                    facing_x: action.facing[0],
+                    facing_z: action.facing[1],
+                }),
+                hurt_ticks_remaining: player.hurt_ticks_remaining,
+                health: player.health,
+                experience: player.experience,
+                gold: player.gold,
+            };
+            game.last_sequences.insert(player.id, player.last_sequence);
+            let velocity = Self::movement_velocity(*state);
+            game.world
+                .set_velocity(Self::player_body_id(player.id), velocity)
+                .map_err(physics_error)?;
+        }
+
+        game.sync_door_locks()?;
+        Ok(game)
+    }
+
+    fn validate_axis(axis: [i8; 2], label: &str) -> Result<(), GameError> {
+        if axis
+            .into_iter()
+            .any(|component| !(-1..=1).contains(&component))
+        {
+            return Err(GameError::new(format!(
+                "saved {label} axis is outside -1..=1"
+            )));
+        }
+        Ok(())
+    }
+
+    fn validate_facing(facing: [i8; 2]) -> Result<(), GameError> {
+        Self::validate_axis(facing, "facing")?;
+        if facing == [0, 0] {
+            return Err(GameError::new("saved facing cannot be zero"));
+        }
+        Ok(())
+    }
+
+    fn validate_action_snapshot(action: PlayerActionSnapshot) -> Result<(), GameError> {
+        Self::validate_facing(action.facing)?;
+        let maximum_ticks = match action.phase {
+            ActionPhase::Windup => action.kind.windup_ticks(),
+            ActionPhase::Active => action.kind.active_ticks(),
+            ActionPhase::Recovery => action.kind.recovery_ticks(),
+        };
+        if action.ticks_remaining == 0 || action.ticks_remaining > maximum_ticks {
+            return Err(GameError::new("saved player action timing is invalid"));
+        }
+        Ok(())
     }
 
     fn player_body_id(player_id: PlayerId) -> BodyId {
@@ -2413,4 +2758,83 @@ mod tests {
             .map(|monster| (monster.id, monster.room_id, vec_to_array(monster.position)))
             .collect()
     }
+    #[test]
+    fn save_state_round_trip_preserves_authoritative_state_and_continuation() {
+        let mut game = ArpgGame::new_with_seed(0x51A7_E123).unwrap();
+        game.add_player(1).unwrap();
+        game.apply_command(
+            PlayerCommand::new(1, 1, ArpgCommand::SetMovement { x: 1, z: -1 }).unwrap(),
+        )
+        .unwrap();
+        for _ in 0..17 {
+            game.advance_tick().unwrap();
+        }
+        game.apply_command(PlayerCommand::new(1, 2, ArpgCommand::PrimaryAttack).unwrap())
+            .unwrap();
+        for _ in 0..3 {
+            game.advance_tick().unwrap();
+        }
+
+        let save = game.save_state().unwrap();
+        let mut restored = ArpgGame::from_save_state(save).unwrap();
+        assert_eq!(restored.snapshot().unwrap(), game.snapshot().unwrap());
+
+        let next = PlayerCommand::new(1, 3, ArpgCommand::SetMovement { x: 0, z: 1 }).unwrap();
+        game.apply_command(next.clone()).unwrap();
+        restored.apply_command(next).unwrap();
+        for _ in 0..25 {
+            game.advance_tick().unwrap();
+            restored.advance_tick().unwrap();
+        }
+        assert_eq!(restored.snapshot().unwrap(), game.snapshot().unwrap());
+    }
+
+    #[test]
+    fn save_state_restores_command_sequence_fence() {
+        let mut game = ArpgGame::new_with_seed(17).unwrap();
+        game.add_player(1).unwrap();
+        game.apply_command(PlayerCommand::new(1, 9, ArpgCommand::PrimaryAttack).unwrap())
+            .unwrap();
+
+        let mut restored = ArpgGame::from_save_state(game.save_state().unwrap()).unwrap();
+        let stale = restored
+            .apply_command(PlayerCommand::new(1, 9, ArpgCommand::Interact).unwrap())
+            .unwrap_err();
+        assert_eq!(stale.message(), "command sequence is stale");
+        restored
+            .apply_command(PlayerCommand::new(1, 10, ArpgCommand::Interact).unwrap())
+            .unwrap();
+    }
+
+    #[test]
+    fn save_state_rejects_unknown_schema_and_tampered_seed_state() {
+        let mut game = ArpgGame::new_with_seed(91).unwrap();
+        game.add_player(1).unwrap();
+        let mut save = game.save_state().unwrap();
+
+        save.schema_version += 1;
+        assert!(
+            ArpgGame::from_save_state(save)
+                .unwrap_err()
+                .message()
+                .contains("unsupported ARPG save schema version")
+        );
+
+        let mut save = game.save_state().unwrap();
+        save.rules_version += 1;
+        assert!(
+            ArpgGame::from_save_state(save)
+                .unwrap_err()
+                .message()
+                .contains("unsupported ARPG save rules version")
+        );
+
+        let mut save = game.save_state().unwrap();
+        save.rooms.pop();
+        assert_eq!(
+            ArpgGame::from_save_state(save).unwrap_err().message(),
+            "save room set does not match generated dungeon"
+        );
+    }
+
 }
