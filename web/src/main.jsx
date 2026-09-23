@@ -10,6 +10,12 @@ import initWasm, { WasmGame } from "./wasm/arpg_web_wasm.js";
 import { DedicatedGameSession } from "./dedicated-session.js";
 import { ResilientLobbySession } from "./vendor/multiplayer-setup-service/resilient-lobby-session.js";
 import { sampleVirtualStick } from "./virtual-stick.js";
+import {
+  CHARACTER_PRESETS,
+  loadSelectedCharacterId,
+  persistSelectedCharacterId,
+  resolveCharacter,
+} from "./character-selection.js";
 import "./styles.css";
 
 const PROFILE_KEY = "arpg-input-profile-v1";
@@ -169,7 +175,7 @@ function dungeonFloor(snapshot, scale) {
   };
 }
 
-function buildFrame(snapshot, focusPlayerId, width, height) {
+function buildFrame(snapshot, focusPlayerId, width, height, focusPlayerAccent = "#d6b45f") {
   const scale = snapshot.worldUnitsPerMeter;
   const focus =
     snapshot.players.find((player) => player.id === focusPlayerId) ?? snapshot.players[0];
@@ -242,7 +248,7 @@ function buildFrame(snapshot, focusPlayerId, width, height) {
         ? "#45413d"
         : player.reaction?.kind === "hurt"
           ? "#e05a4f"
-          : actionColor ?? (player.id === focusPlayerId ? "#d6b45f" : "#6f91b6");
+          : actionColor ?? (player.id === focusPlayerId ? focusPlayerAccent : "#6f91b6");
       return [
         {
           id: `player-${player.id}`,
@@ -374,6 +380,10 @@ function App() {
   const [playerId, setPlayerId] = useState(1);
   const [status, setStatus] = useState("Loading Rust simulation…");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [inWorld, setInWorld] = useState(false);
+  const [selectedCharacterId, setSelectedCharacterId] = useState(() =>
+    loadSelectedCharacterId(localStorage),
+  );
   const [profile, setProfile] = useState(loadProfile);
   const [graphics, setGraphics] = useState(loadGraphics);
   const [setupUrl, setSetupUrl] = useState(
@@ -387,6 +397,10 @@ function App() {
     () => new URLSearchParams(location.search).get("join") ?? "",
   );
 
+  const selectedCharacter = useMemo(
+    () => resolveCharacter(selectedCharacterId),
+    [selectedCharacterId],
+  );
   const player = useMemo(
     () => snapshot?.players.find((candidate) => candidate.id === playerId) ?? null,
     [snapshot, playerId],
@@ -595,11 +609,36 @@ function App() {
     });
   };
 
+  const enterWorld = () => {
+    if (!ready) return;
+    const selectedId = persistSelectedCharacterId(localStorage, selectedCharacterId);
+    const selected = resolveCharacter(selectedId);
+    closeSession();
+    createAuthority(initialRunSeedRef.current ?? freshRunSeed());
+    initialRunSeedRef.current = null;
+    setModeValue("local");
+    setInWorld(true);
+    setStatus(`Local Rust/Wasm authority · ${selected.name}`);
+  };
+
+  const returnToCharacters = () => {
+    closeSession();
+    resetMovement();
+    gameRef.current?.free?.();
+    gameRef.current = null;
+    sequenceRef.current = 0;
+    setSnapshot(null);
+    setPlayerId(1);
+    setSettingsOpen(false);
+    setInWorld(false);
+    setStatus("Choose a character to enter the world");
+  };
+
   const startLocal = () => {
     closeSession();
     createAuthority();
     setModeValue("local");
-    setStatus("Local Rust/Wasm authority");
+    setStatus(`Local Rust/Wasm authority · ${selectedCharacter.name}`);
   };
 
   const startDedicated = async () => {
@@ -696,9 +735,8 @@ function App() {
     initWasm()
       .then(() => {
         if (cancelled) return;
-        createAuthority(initialRunSeedRef.current);
         setReady(true);
-        setStatus("Local Rust/Wasm authority");
+        setStatus("Choose a character to enter the world");
       })
       .catch((error) => setStatus(`Wasm failed: ${error}`));
     return () => {
@@ -709,7 +747,7 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (!ready) return undefined;
+    if (!ready || !inWorld) return undefined;
     const timer = setInterval(() => {
       if (
         modeRef.current === "guest" ||
@@ -726,10 +764,10 @@ function App() {
       }
     }, 1000 / 60);
     return () => clearInterval(timer);
-  }, [ready]);
+  }, [ready, inWorld]);
 
   useEffect(() => {
-    if (!canvasRef.current) return undefined;
+    if (!inWorld || !canvasRef.current) return undefined;
     const renderer = createThreeSceneRenderer(canvasRef.current, {
       background: "#11100f",
       shadows: graphics.shadows,
@@ -740,7 +778,7 @@ function App() {
       const rect = canvasRef.current.getBoundingClientRect();
       renderer.setSize(rect.width, rect.height, devicePixelRatio);
       if (snapshot) {
-        renderer.render(buildFrame(snapshot, playerId, rect.width, rect.height));
+        renderer.render(buildFrame(snapshot, playerId, rect.width, rect.height, selectedCharacter.accent));
       }
     };
     const observer = new ResizeObserver(resize);
@@ -751,22 +789,22 @@ function App() {
       renderer.dispose();
       rendererRef.current = null;
     };
-  }, [graphics.shadows, graphics.pixelRatioLimit]);
+  }, [graphics.shadows, graphics.pixelRatioLimit, inWorld, selectedCharacter.accent]);
 
   useEffect(() => {
     const renderer = rendererRef.current;
     const canvas = canvasRef.current;
     if (!renderer || !canvas || !snapshot) return;
     const rect = canvas.getBoundingClientRect();
-    renderer.render(buildFrame(snapshot, playerId, rect.width, rect.height));
-  }, [snapshot, playerId]);
+    renderer.render(buildFrame(snapshot, playerId, rect.width, rect.height, selectedCharacter.accent));
+  }, [snapshot, playerId, selectedCharacter.accent]);
 
   useEffect(() => {
     if (settingsOpen) resetTouchStick();
   }, [settingsOpen]);
 
   useEffect(() => {
-    if (!ready) return undefined;
+    if (!ready || !inWorld) return undefined;
     const controller = new InputRuntimeController({
       registry: inputRegistry,
       profile,
@@ -804,7 +842,7 @@ function App() {
       stopPropagation: true,
     });
     return detach;
-  }, [ready, profile, settingsOpen, mode, playerId]);
+  }, [ready, inWorld, profile, settingsOpen, mode, playerId]);
 
   const updateProfile = (next) => {
     localStorage.setItem(PROFILE_KEY, JSON.stringify(next));
@@ -826,6 +864,10 @@ function App() {
     localStorage.setItem(DEDICATED_URL_KEY, value);
   };
 
+  const selectCharacter = (characterId) => {
+    setSelectedCharacterId(persistSelectedCharacterId(localStorage, characterId));
+  };
+
   const copyInvite = async () => {
     const url = new URL(location.pathname, location.origin);
     url.searchParams.set("join", lobbyCode);
@@ -842,6 +884,101 @@ function App() {
           ? "Peer guest"
           : "Dedicated online";
 
+  if (!inWorld) {
+    return (
+      <main className="character-select-shell" aria-label="Character selection">
+        <div className="character-select-atmosphere" aria-hidden="true" />
+        <header className="character-select-header">
+          <div>
+            <span className="character-select-eyebrow">ARPG</span>
+            <h1>Choose your character</h1>
+            <p>Select an adventurer, then enter the world.</p>
+          </div>
+          <div className="realm-chip" aria-label="Current realm">
+            <span>Realm</span>
+            <strong>Local Realm</strong>
+          </div>
+        </header>
+
+        <div className="character-select-layout">
+          <section className="character-stage" aria-live="polite">
+            <div className="character-stage-ground" aria-hidden="true" />
+            <div
+              className={`character-avatar character-avatar-${selectedCharacter.tone}`}
+              style={{ "--character-accent": selectedCharacter.accent }}
+              aria-hidden="true"
+            >
+              <span className="character-aura" />
+              <span className="character-head" />
+              <span className="character-torso" />
+              <span className="character-arm character-arm-left" />
+              <span className="character-arm character-arm-right" />
+              <span className="character-leg character-leg-left" />
+              <span className="character-leg character-leg-right" />
+              <span className="character-weapon" />
+            </div>
+            <div className="character-stage-copy">
+              <span>{selectedCharacter.role}</span>
+              <h2>{selectedCharacter.name}</h2>
+              <p>
+                {selectedCharacter.appearance} appearance · {selectedCharacter.location}
+              </p>
+            </div>
+          </section>
+
+          <aside className="character-roster" aria-label="Characters">
+            <div className="character-roster-heading">
+              <span>Characters</span>
+              <strong>{CHARACTER_PRESETS.length}</strong>
+            </div>
+            <div className="character-roster-list">
+              {CHARACTER_PRESETS.map((character) => {
+                const selected = character.id === selectedCharacter.id;
+                return (
+                  <button
+                    key={character.id}
+                    type="button"
+                    className={`character-card ${selected ? "is-selected" : ""}`}
+                    aria-pressed={selected}
+                    onClick={() => selectCharacter(character.id)}
+                  >
+                    <span
+                      className={`character-card-portrait character-card-portrait-${character.tone}`}
+                      style={{ "--character-accent": character.accent }}
+                      aria-hidden="true"
+                    />
+                    <span className="character-card-copy">
+                      <strong>{character.name}</strong>
+                      <small>{character.role}</small>
+                    </span>
+                    <span className="character-card-meta">{character.appearance}</span>
+                  </button>
+                );
+              })}
+            </div>
+            <p className="character-selection-note">
+              Appearance profiles currently share the same authoritative gameplay rules.
+            </p>
+          </aside>
+        </div>
+
+        <footer className="character-select-footer">
+          <span className="character-select-status">
+            {ready ? "World runtime ready" : status}
+          </span>
+          <button
+            type="button"
+            className="enter-world-button"
+            onClick={enterWorld}
+            disabled={!ready}
+          >
+            Enter World
+          </button>
+        </footer>
+      </main>
+    );
+  }
+
   return (
     <main className="game-shell">
       <canvas ref={canvasRef} className="game-canvas" aria-label="ARPG game world" />
@@ -850,9 +987,14 @@ function App() {
           <strong>ARPG foundation MVP</strong>
           <span>{modeLabel}</span>
         </div>
-        <button type="button" onClick={() => setSettingsOpen(true)}>
-          Settings
-        </button>
+        <div className="game-header-actions">
+          <button type="button" onClick={returnToCharacters}>
+            Characters
+          </button>
+          <button type="button" onClick={() => setSettingsOpen(true)}>
+            Settings
+          </button>
+        </div>
       </header>
 
       <section className="hud" aria-label="Player status">
