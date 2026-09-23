@@ -1,6 +1,7 @@
 export const SAVE_STORAGE_KEY = "arpg-save-document-v1";
 export const SAVE_DOCUMENT_FORMAT = "arpg-save";
 export const SAVE_DOCUMENT_VERSION = 1;
+export const MAX_SAVE_FILE_BYTES = 4 * 1024 * 1024;
 
 function assertObject(value, label) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -37,7 +38,16 @@ export function parseSaveDocument(text) {
     );
   }
 
-  assertObject(document.coreState, "coreState");
+  const coreState = assertObject(document.coreState, "coreState");
+  if (!Number.isInteger(coreState.runSeed) || coreState.runSeed < 0) {
+    throw new Error("Save file has an invalid run seed");
+  }
+  if (!Number.isInteger(coreState.tick) || coreState.tick < 0) {
+    throw new Error("Save file has an invalid tick");
+  }
+  if (!Array.isArray(coreState.players)) {
+    throw new Error("Save file is missing its player set");
+  }
   const presentation = assertObject(document.presentation, "presentation");
   const client = assertObject(document.client, "client");
   if (typeof presentation.characterId !== "string" || !presentation.characterId) {
