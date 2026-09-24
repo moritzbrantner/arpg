@@ -7,7 +7,7 @@
       "dependencies": {
         "@moritzbrantner/three-d-renderer": "github:moritzbrantner/3d-lab#7889a0066df928b101d42fb16f32353bd26c0696",
         "react": "19.1.1",
-        "react-dom": "19.1.1",
+        "react-dom": "19.3.0",
         "three": "0.185.1",
       },
       "devDependencies": {
@@ -140,11 +140,11 @@
 
     "react": ["react@19.1.1", "", {}, "sha512-w8nqGImo45dmMIfljjMwOGtbmC/mk4CMYhWIicdSflH91J9TyCyczcPFXJzrZ/ZXcgGRFeP6BU0BEJTw6tZdfQ=="],
 
-    "react-dom": ["react-dom@19.1.1", "", { "dependencies": { "scheduler": "^0.26.0" }, "peerDependencies": { "react": "^19.1.1" } }, "sha512-Dlq/5LAZgF0Gaz6yiqZCf6VCcZs1ghAJyrsu84Q/GT0gV+mCxbfmKNoGRKBYMJ8IEdGPqu49YWXD02GCknEDkw=="],
+    "react-dom": ["react-dom@19.3.0", "", { "dependencies": { "scheduler": "^0.28.0" }, "peerDependencies": { "react": "^19.3.0" } }, "sha512-JDk8dgif51OjFoDE70+OT9ICyYr+69HlmihNwp1+Nsfbna3t5sIiCa9ZJktDmQ4/1b/rn26hIAR2uYXDMr5r0Q=="],
 
     "rollup": ["rollup@4.63.3", "", { "dependencies": { "@types/estree": "1.0.9" }, "optionalDependencies": { "@napi-rs/lzma-linux-x64-gnu": "1.5.1", "@rollup/rollup-android-arm-eabi": "4.63.3", "@rollup/rollup-android-arm64": "4.63.3", "@rollup/rollup-darwin-arm64": "4.63.3", "@rollup/rollup-darwin-x64": "4.63.3", "@rollup/rollup-freebsd-arm64": "4.63.3", "@rollup/rollup-freebsd-x64": "4.63.3", "@rollup/rollup-linux-arm-gnueabihf": "4.63.3", "@rollup/rollup-linux-arm-musleabihf": "4.63.3", "@rollup/rollup-linux-arm64-gnu": "4.63.3", "@rollup/rollup-linux-arm64-musl": "4.63.3", "@rollup/rollup-linux-loong64-gnu": "4.63.3", "@rollup/rollup-linux-loong64-musl": "4.63.3", "@rollup/rollup-linux-ppc64-gnu": "4.63.3", "@rollup/rollup-linux-ppc64-musl": "4.63.3", "@rollup/rollup-linux-riscv64-gnu": "4.63.3", "@rollup/rollup-linux-riscv64-musl": "4.63.3", "@rollup/rollup-linux-s390x-gnu": "4.63.3", "@rollup/rollup-linux-x64-gnu": "4.63.3", "@rollup/rollup-linux-x64-musl": "4.63.3", "@rollup/rollup-openbsd-x64": "4.63.3", "@rollup/rollup-openharmony-arm64": "4.63.3", "@rollup/rollup-win32-arm64-msvc": "4.63.3", "@rollup/rollup-win32-ia32-msvc": "4.63.3", "@rollup/rollup-win32-x64-gnu": "4.63.3", "@rollup/rollup-win32-x64-msvc": "4.63.3", "fsevents": "~2.3.2" }, "bin": { "rollup": "dist/bin/rollup" } }, "sha512-1i2XreiAoMMXuPGD6Msj2xWrMMkHojNRKivInxGQcg7/1KuPuYlfUutLyh4drnOxUTHX9cHI4wFoat8D/NKaBw=="],
 
-    "scheduler": ["scheduler@0.26.0", "", {}, "sha512-NlHwttCI/l5gCPR3D1nNXtWABUmBwvZpEQiD4IXSbIDq8BzLIK/7Ir5gTFSGZDUu37K5cMNp0hFtzO38sC7gWA=="],
+    "scheduler": ["scheduler@0.28.0", "", {}, "sha512-juorfCmIkIw8tT+p5BXSm6PJjQF/ycEYmKyzURCIt/RaZIhL+PulbQ9Yu2z1HdOJDdqDTlxA1+xKBmHXJsczAw=="],
 
     "source-map-js": ["source-map-js@1.2.1", "", {}, "sha512-UXWMKhLOwVKb728IUtQPXxfYU+usdybtUrK/8uGE8CQMvrhOpwvzDBwj0QhSL7MQc7vIsISBG8VQ8+IDQxpfQA=="],
 
