@@ -13,6 +13,7 @@ The browser slice currently proves:
 - an isometric follow camera and simple 3D scene rendered through `3d-lab`;
 - nearby primary attacks against deterministic monster state;
 - deterministic character progression exposed through authoritative snapshots;
+- a deterministic combat training arena available through the character screen or `?scenario=training&seed=<u32>`, with pause, single-step, explicit simulation speed, seed restart, and live combat diagnostics;
 - a settings menu with graphics controls and the reusable `input-bindings` keybinding editor;
 - local Rust/Wasm play;
 - one fresh 32-bit run seed per new authority, carried in authoritative snapshots so multiplayer and replay evidence identify the exact generated dungeon;
