@@ -401,6 +401,20 @@ input, select { min-width: 0; max-width: 100%; padding: 0.55rem 0.65rem; width: 
   color: #8f887b;
   font-size: 0.78rem;
 }
+.training-entry-button {
+  min-width: 10rem;
+  min-height: 3.15rem;
+  padding-inline: 1.2rem;
+  border-color: #5d6256;
+  border-radius: 2px;
+  background: #252923e8;
+  color: #d7d1c5;
+  font-weight: 700;
+}
+.training-entry-button:hover:not(:disabled) {
+  border-color: #858b79;
+  background: #30362de8;
+}
 .enter-world-button {
   min-width: 11rem;
   min-height: 3.15rem;
@@ -427,6 +441,89 @@ input, select { min-width: 0; max-width: 100%; padding: 0.55rem 0.65rem; width: 
 .game-header button { min-height: 2.75rem; pointer-events: auto; }
 .game-header > .game-header-actions { align-items: center; gap: 0.5rem; }
 .game-header-actions button { min-width: 6.25rem; }
+.training-panel {
+  position: absolute;
+  z-index: 12;
+  top: max(4.8rem, calc(env(safe-area-inset-top) + 4rem));
+  right: max(1rem, env(safe-area-inset-right));
+  display: grid;
+  gap: 0.7rem;
+  width: min(31rem, calc(100% - 2rem));
+  padding: 0.8rem;
+  border: 1px solid #4c463f;
+  border-radius: 6px;
+  background: #171513e8;
+  box-shadow: 0 0.8rem 2.4rem #0008;
+  backdrop-filter: blur(10px);
+}
+.training-panel > header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 1rem;
+}
+.training-panel > header span {
+  color: #a99f91;
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+}
+.training-actions,
+.training-seed {
+  display: flex;
+  align-items: end;
+  gap: 0.5rem;
+}
+.training-actions button,
+.training-seed button {
+  min-height: 2.45rem;
+}
+.training-actions label,
+.training-seed label {
+  display: grid;
+  gap: 0.2rem;
+  color: #aaa294;
+  font-size: 0.7rem;
+}
+.training-actions select {
+  min-width: 5rem;
+  min-height: 2.45rem;
+}
+.training-seed label {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.training-seed input {
+  width: 100%;
+  min-height: 2.45rem;
+  font-variant-numeric: tabular-nums;
+}
+.training-diagnostics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.45rem;
+  margin: 0;
+}
+.training-diagnostics div {
+  min-width: 0;
+  padding: 0.45rem 0.55rem;
+  border: 1px solid #35312d;
+  background: #11100fba;
+}
+.training-diagnostics dt {
+  color: #918a7e;
+  font-size: 0.66rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.training-diagnostics dd {
+  overflow: hidden;
+  margin: 0.15rem 0 0;
+  color: #e0d8ca;
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .hud { position: absolute; z-index: 10; left: 1rem; bottom: 1rem; width: min(32rem, calc(100% - 2rem)); padding: 0.75rem 0.9rem; background: #171513dc; border: 1px solid #3e3933; border-radius: 6px; pointer-events: none; }
 .hud p { margin: 0.35rem 0 0; color: #bdb3a3; font-size: 0.85rem; }
 .health { height: 0.55rem; background: #351a19; border: 1px solid #6a322f; overflow: hidden; }
@@ -545,6 +642,19 @@ input, select { min-width: 0; max-width: 100%; padding: 0.55rem 0.65rem; width: 
   .game-header > div { flex-direction: column; gap: 0.15rem; }
   .game-header > .game-header-actions { flex-direction: row; gap: 0.4rem; }
   .game-header-actions button { min-width: auto; padding-inline: 0.65rem; }
+  .training-panel {
+    top: calc(max(4.8rem, env(safe-area-inset-top) + 4rem));
+    right: max(0.75rem, env(safe-area-inset-right));
+    left: max(0.75rem, env(safe-area-inset-left));
+    width: auto;
+  }
+  .training-actions,
+  .training-seed {
+    flex-wrap: wrap;
+  }
+  .training-seed label {
+    flex-basis: 100%;
+  }
   .settings-panel { width: 100vw; max-width: 100vw; border-left: 0; }
   .settings-panel > header { padding-right: max(1rem, env(safe-area-inset-right)); padding-left: max(1rem, env(safe-area-inset-left)); }
   .settings-panel > header p { margin-bottom: 0; font-size: 0.85rem; }
@@ -568,6 +678,7 @@ input, select { min-width: 0; max-width: 100%; padding: 0.55rem 0.65rem; width: 
   .character-card-meta { display: inline; }
   .character-select-footer { align-items: stretch; flex-direction: column; gap: 0.6rem; }
   .character-select-status { margin: 0; text-align: center; }
+  .training-entry-button,
   .enter-world-button { width: 100%; }
 }
 
