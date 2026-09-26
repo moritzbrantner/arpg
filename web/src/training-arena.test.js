@@ -45,6 +45,29 @@ test("schedules fractional and accelerated simulation speeds deterministically",
   expect(trainingTicksForFrame(2, 0)).toEqual({ ticks: 2, carry: 0 });
 });
 
+test("preserves fractional clock carry across paused frames", () => {
+  let carry = 0;
+  let ticks = 0;
+
+  for (let frame = 0; frame < 3; frame += 1) {
+    const next = trainingTicksForFrame(0.25, carry);
+    ticks += next.ticks;
+    carry = next.carry;
+  }
+
+  const carryWhilePaused = carry;
+
+  for (let frame = 0; frame < 3; frame += 1) {
+    const next = trainingTicksForFrame(0.25, carry);
+    ticks += next.ticks;
+    carry = next.carry;
+  }
+
+  expect(carryWhilePaused).toBe(0.75);
+  expect(ticks).toBe(1);
+  expect(carry).toBe(0.5);
+});
+
 test("writes and removes the training scenario without discarding other query state", () => {
   const enabled = new URL(withTrainingRequest("https://example.test/game?join=ABCD", true, 99));
   expect(enabled.searchParams.get("scenario")).toBe("training");
