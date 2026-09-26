@@ -1624,17 +1624,18 @@ mod tests {
     fn action_commitment_stops_controlled_movement_immediately() {
         let mut game = ArpgGame::new_with_seed(42).unwrap();
         game.add_player(1).unwrap();
-        game.apply_command(PlayerCommand::new(
-            1,
-            1,
-            ArpgCommand::SetMovement { x: 1, z: 0 },
-        ).unwrap())
+        game.apply_command(
+            PlayerCommand::new(1, 1, ArpgCommand::SetMovement { x: 1, z: 0 }).unwrap(),
+        )
         .unwrap();
         for _ in 0..3 {
             game.advance_tick().unwrap();
         }
         assert_eq!(
-            game.world.body(ArpgGame::player_body_id(1)).unwrap().velocity(),
+            game.world
+                .body(ArpgGame::player_body_id(1))
+                .unwrap()
+                .velocity(),
             Vec3i::new(7, 0, 0)
         );
 
@@ -1643,7 +1644,10 @@ mod tests {
         game.advance_tick().unwrap();
 
         assert_eq!(
-            game.world.body(ArpgGame::player_body_id(1)).unwrap().velocity(),
+            game.world
+                .body(ArpgGame::player_body_id(1))
+                .unwrap()
+                .velocity(),
             Vec3i::ZERO
         );
     }
@@ -1658,11 +1662,9 @@ mod tests {
         game.world
             .set_position(body_id, Vec3i::new(contact_x, PLAYER_Y, start_z))
             .unwrap();
-        game.apply_command(PlayerCommand::new(
-            1,
-            1,
-            ArpgCommand::SetMovement { x: 1, z: 1 },
-        ).unwrap())
+        game.apply_command(
+            PlayerCommand::new(1, 1, ArpgCommand::SetMovement { x: 1, z: 1 }).unwrap(),
+        )
         .unwrap();
 
         for _ in 0..10 {
