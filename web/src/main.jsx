@@ -16,6 +16,14 @@ import {
   persistSelectedCharacterId,
   resolveCharacter,
 } from "./character-selection.js";
+import {
+  DEFAULT_TRAINING_SEED,
+  TRAINING_SPEEDS,
+  parseRunSeed,
+  readTrainingRequest,
+  trainingTicksForFrame,
+  withTrainingRequest,
+} from "./training-arena.js";
 import "./styles.css";
 
 const PROFILE_KEY = "arpg-input-profile-v1";
@@ -100,10 +108,7 @@ function freshRunSeed() {
 }
 
 function requestedRunSeed() {
-  const raw = new URLSearchParams(location.search).get("seed");
-  if (raw === null) return null;
-  const parsed = Number(raw);
-  return Number.isInteger(parsed) && parsed >= 0 && parsed <= 0xffff_ffff ? parsed : null;
+  return parseRunSeed(new URLSearchParams(location.search).get("seed"));
 }
 
 function encodeCommand(payload) {
@@ -363,7 +368,12 @@ function App() {
   const touchStickRef = useRef(null);
   const touchKnobRef = useRef(null);
   const touchPointerIdRef = useRef(null);
-  const initialRunSeedRef = useRef(requestedRunSeed() ?? freshRunSeed());
+  const initialTrainingRef = useRef(readTrainingRequest(location.search));
+  const initialRunSeedRef = useRef(
+    requestedRunSeed() ??
+      (initialTrainingRef.current.requested ? initialTrainingRef.current.seed : freshRunSeed()),
+  );
+  const trainingClockCarryRef = useRef(0);
   const movementRef = useRef({
     forward: false,
     backward: false,
@@ -381,6 +391,14 @@ function App() {
   const [status, setStatus] = useState("Loading Rust simulation…");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [inWorld, setInWorld] = useState(false);
+  const [scenario, setScenario] = useState(
+    initialTrainingRef.current.requested ? "training" : "adventure",
+  );
+  const [trainingPaused, setTrainingPaused] = useState(false);
+  const [trainingSpeed, setTrainingSpeed] = useState(1);
+  const [trainingSeedDraft, setTrainingSeedDraft] = useState(
+    String(initialTrainingRef.current.seed),
+  );
   const [selectedCharacterId, setSelectedCharacterId] = useState(() =>
     loadSelectedCharacterId(localStorage),
   );
@@ -609,6 +627,58 @@ function App() {
     });
   };
 
+  const leaveTrainingScenario = () => {
+    trainingClockCarryRef.current = 0;
+    setScenario("adventure");
+    history.replaceState(null, "", withTrainingRequest(location.href, false, 0));
+  };
+
+  const enterTrainingArena = (candidateSeed = trainingSeedDraft) => {
+    if (!ready) return;
+    const seed = parseRunSeed(candidateSeed);
+    if (seed === null) {
+      setStatus("Training seed must be an unsigned 32-bit integer");
+      return;
+    }
+    const selectedId = persistSelectedCharacterId(localStorage, selectedCharacterId);
+    const selected = resolveCharacter(selectedId);
+    closeSession();
+    createAuthority(seed);
+    initialRunSeedRef.current = null;
+    trainingClockCarryRef.current = 0;
+    setTrainingSeedDraft(String(seed));
+    setTrainingPaused(false);
+    setTrainingSpeed(1);
+    setScenario("training");
+    setModeValue("local");
+    setInWorld(true);
+    history.replaceState(null, "", withTrainingRequest(location.href, true, seed));
+    setStatus(`Training arena · ${selected.name}`);
+  };
+
+  const restartTrainingArena = (candidateSeed = trainingSeedDraft) => {
+    const seed = parseRunSeed(candidateSeed);
+    if (seed === null || scenario !== "training") {
+      setStatus("Training seed must be an unsigned 32-bit integer");
+      return;
+    }
+    createAuthority(seed);
+    trainingClockCarryRef.current = 0;
+    setTrainingSeedDraft(String(seed));
+    history.replaceState(null, "", withTrainingRequest(location.href, true, seed));
+    setStatus(`Training arena restarted · seed ${seed}`);
+  };
+
+  const stepTrainingArena = () => {
+    if (scenario !== "training" || !trainingPaused || !gameRef.current) return;
+    try {
+      gameRef.current.advanceTick();
+      updateSnapshotFromGame();
+    } catch (error) {
+      setStatus(`Simulation stopped: ${error}`);
+    }
+  };
+
   const enterWorld = () => {
     if (!ready) return;
     const selectedId = persistSelectedCharacterId(localStorage, selectedCharacterId);
@@ -616,6 +686,7 @@ function App() {
     closeSession();
     createAuthority(initialRunSeedRef.current ?? freshRunSeed());
     initialRunSeedRef.current = null;
+    leaveTrainingScenario();
     setModeValue("local");
     setInWorld(true);
     setStatus(`Local Rust/Wasm authority · ${selected.name}`);
@@ -631,12 +702,14 @@ function App() {
     setPlayerId(1);
     setSettingsOpen(false);
     setInWorld(false);
+    leaveTrainingScenario();
     setStatus("Choose a character to enter the world");
   };
 
   const startLocal = () => {
     closeSession();
     createAuthority();
+    leaveTrainingScenario();
     setModeValue("local");
     setStatus(`Local Rust/Wasm authority · ${selectedCharacter.name}`);
   };
@@ -653,6 +726,7 @@ function App() {
     resetMovement();
     setSnapshot(null);
     setPlayerId(null);
+    leaveTrainingScenario();
     setModeValue("dedicated");
 
     const session = new DedicatedGameSession({ endpoint: dedicatedUrl.trim() });
@@ -692,6 +766,7 @@ function App() {
     try {
       closeSession();
       createAuthority();
+      leaveTrainingScenario();
       const session = new ResilientLobbySession({
         apiBase: setupUrl,
         topology: "host",
@@ -716,6 +791,7 @@ function App() {
       resetMovement();
       setSnapshot(null);
       setPlayerId(null);
+      leaveTrainingScenario();
       const session = new ResilientLobbySession({
         apiBase: setupUrl,
         topology: "host",
@@ -736,7 +812,23 @@ function App() {
       .then(() => {
         if (cancelled) return;
         setReady(true);
-        setStatus("Choose a character to enter the world");
+        if (initialTrainingRef.current.requested) {
+          const seed = initialRunSeedRef.current ?? DEFAULT_TRAINING_SEED;
+          const selected = resolveCharacter(selectedCharacterId);
+          createAuthority(seed);
+          initialRunSeedRef.current = null;
+          trainingClockCarryRef.current = 0;
+          setTrainingSeedDraft(String(seed));
+          setTrainingPaused(false);
+          setTrainingSpeed(1);
+          setScenario("training");
+          setModeValue("local");
+          setInWorld(true);
+          history.replaceState(null, "", withTrainingRequest(location.href, true, seed));
+          setStatus(`Training arena · ${selected.name}`);
+        } else {
+          setStatus("Choose a character to enter the world");
+        }
       })
       .catch((error) => setStatus(`Wasm failed: ${error}`));
     return () => {
@@ -756,15 +848,27 @@ function App() {
       ) {
         return;
       }
+
+      let ticks = 1;
+      if (scenario === "training") {
+        if (trainingPaused) return;
+        const scheduled = trainingTicksForFrame(trainingSpeed, trainingClockCarryRef.current);
+        trainingClockCarryRef.current = scheduled.carry;
+        ticks = scheduled.ticks;
+        if (ticks === 0) return;
+      }
+
       try {
-        gameRef.current.advanceTick();
+        for (let tick = 0; tick < ticks; tick += 1) {
+          gameRef.current.advanceTick();
+        }
         updateSnapshotFromGame();
       } catch (error) {
         setStatus(`Simulation stopped: ${error}`);
       }
     }, 1000 / 60);
     return () => clearInterval(timer);
-  }, [ready, inWorld]);
+  }, [ready, inWorld, scenario, trainingPaused, trainingSpeed]);
 
   useEffect(() => {
     if (!inWorld || !canvasRef.current) return undefined;
@@ -876,13 +980,22 @@ function App() {
   };
 
   const modeLabel =
-    mode === "local"
-      ? "Local"
-      : mode === "host"
-        ? "Peer host"
-        : mode === "guest"
-          ? "Peer guest"
-          : "Dedicated online";
+    scenario === "training"
+      ? "Training arena"
+      : mode === "local"
+        ? "Local"
+        : mode === "host"
+          ? "Peer host"
+          : mode === "guest"
+            ? "Peer guest"
+            : "Dedicated online";
+
+  const aliveMonsterCount = snapshot?.monsters.filter((monster) => monster.alive).length ?? 0;
+  const actingMonsterCount =
+    snapshot?.monsters.filter((monster) => monster.alive && monster.action).length ?? 0;
+  const playerActionLabel = player?.action
+    ? `${player.action.kind} · ${player.action.phase} · ${player.action.ticksRemaining}t`
+    : "idle";
 
   if (!inWorld) {
     return (
@@ -968,6 +1081,14 @@ function App() {
           </span>
           <button
             type="button"
+            className="training-entry-button"
+            onClick={() => enterTrainingArena(trainingSeedDraft)}
+            disabled={!ready}
+          >
+            Training Arena
+          </button>
+          <button
+            type="button"
             className="enter-world-button"
             onClick={enterWorld}
             disabled={!ready}
@@ -996,6 +1117,86 @@ function App() {
           </button>
         </div>
       </header>
+
+      {scenario === "training" && (
+        <aside className="training-panel" aria-label="Training arena controls">
+          <header>
+            <strong>Training arena</strong>
+            <span>Tick {snapshot?.tick ?? 0}</span>
+          </header>
+
+          <div className="training-actions">
+            <button type="button" onClick={() => setTrainingPaused((paused) => !paused)}>
+              {trainingPaused ? "Resume" : "Pause"}
+            </button>
+            <button type="button" onClick={stepTrainingArena} disabled={!trainingPaused}>
+              Step
+            </button>
+            <label>
+              <span>Speed</span>
+              <select
+                value={trainingSpeed}
+                onChange={(event) => setTrainingSpeed(Number(event.target.value))}
+              >
+                {TRAINING_SPEEDS.map((speed) => (
+                  <option key={speed} value={speed}>
+                    {speed}×
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+
+          <div className="training-seed">
+            <label>
+              <span>Seed</span>
+              <input
+                type="number"
+                min="0"
+                max="4294967295"
+                step="1"
+                inputMode="numeric"
+                value={trainingSeedDraft}
+                onChange={(event) => setTrainingSeedDraft(event.target.value)}
+              />
+            </label>
+            <button
+              type="button"
+              onClick={() => restartTrainingArena(trainingSeedDraft)}
+              disabled={parseRunSeed(trainingSeedDraft) === null}
+            >
+              Restart
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                const seed = freshRunSeed();
+                setTrainingSeedDraft(String(seed));
+                restartTrainingArena(seed);
+              }}
+            >
+              New seed
+            </button>
+          </div>
+
+          <dl className="training-diagnostics">
+            <div>
+              <dt>Monsters</dt>
+              <dd>
+                {aliveMonsterCount}/{snapshot?.monsters.length ?? 0}
+              </dd>
+            </div>
+            <div>
+              <dt>Enemy actions</dt>
+              <dd>{actingMonsterCount}</dd>
+            </div>
+            <div>
+              <dt>Player action</dt>
+              <dd>{playerActionLabel}</dd>
+            </div>
+          </dl>
+        </aside>
+      )}
 
       <section className="hud" aria-label="Player status">
         <div className="health">
