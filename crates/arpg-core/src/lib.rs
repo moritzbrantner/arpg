@@ -20,6 +20,12 @@ pub const WORLD_UNITS_PER_METER: i32 = 100;
 // the previous 260 units/tick (156 m/s).
 const PLAYER_SPEED: i32 = 7;
 const PLAYER_DIAGONAL_SPEED: i32 = 5;
+// Control converges on player intent over a few 60 Hz ticks instead of replacing
+// collision-resolved velocity every frame. This keeps movement responsive while
+// preserving physics-engine as the velocity authority.
+const PLAYER_ACCELERATION_PER_TICK: i32 = 3;
+const PLAYER_BRAKING_PER_TICK: i32 = 4;
+const PLAYER_REVERSAL_PER_TICK: i32 = 5;
 const PLAYER_BODY_BASE: u64 = 1_000;
 const STATIC_BODY_BASE: u64 = 10_000;
 const DOOR_BODY_BASE: u64 = 20_000;
@@ -553,16 +559,42 @@ impl ArpgGame {
         )
     }
 
-    fn movement_velocity(state: PlayerState) -> Vec3i {
-        if state.health == 0 || state.action.is_some() {
-            return Vec3i::ZERO;
-        }
+    fn movement_target_velocity(state: PlayerState) -> Vec3i {
         let x = i32::from(state.movement_x.clamp(-1, 1));
         let z = i32::from(state.movement_z.clamp(-1, 1));
         if x != 0 && z != 0 {
             Vec3i::new(x * PLAYER_DIAGONAL_SPEED, 0, z * PLAYER_DIAGONAL_SPEED)
         } else {
             Vec3i::new(x * PLAYER_SPEED, 0, z * PLAYER_SPEED)
+        }
+    }
+
+    fn controlled_movement_velocity(current: Vec3i, state: PlayerState) -> Vec3i {
+        if state.health == 0 || state.action.is_some() {
+            return Vec3i::ZERO;
+        }
+        let target = Self::movement_target_velocity(state);
+        Vec3i::new(
+            Self::approach_controlled_axis(current.x, target.x),
+            0,
+            Self::approach_controlled_axis(current.z, target.z),
+        )
+    }
+
+    fn approach_controlled_axis(current: i32, target: i32) -> i32 {
+        let maximum_delta = if target == 0 {
+            PLAYER_BRAKING_PER_TICK
+        } else if current != 0 && current.signum() != target.signum() {
+            PLAYER_REVERSAL_PER_TICK
+        } else {
+            PLAYER_ACCELERATION_PER_TICK
+        };
+        if current < target {
+            current.saturating_add(maximum_delta).min(target)
+        } else if current > target {
+            current.saturating_sub(maximum_delta).max(target)
+        } else {
+            current
         }
     }
 
@@ -1099,10 +1131,16 @@ impl AuthoritativeGame for ArpgGame {
             monster.stagger_ticks_remaining = monster.stagger_ticks_remaining.saturating_sub(1);
         }
         for (&player_id, &state) in &self.players {
+            let body_id = Self::player_body_id(player_id);
+            let current_velocity = self
+                .world
+                .body(body_id)
+                .ok_or_else(|| GameError::new("player physics body is missing"))?
+                .velocity();
             self.world
                 .set_velocity(
-                    Self::player_body_id(player_id),
-                    Self::movement_velocity(state),
+                    body_id,
+                    Self::controlled_movement_velocity(current_velocity, state),
                 )
                 .map_err(physics_error)?;
         }
@@ -1534,32 +1572,106 @@ mod tests {
         );
     }
 
+    fn movement_state(x: i8, z: i8) -> PlayerState {
+        PlayerState {
+            movement_x: x,
+            movement_z: z,
+            facing_x: if x == 0 { 1 } else { x },
+            facing_z: z,
+            action: None,
+            hurt_ticks_remaining: 0,
+            health: BASE_MAX_HEALTH,
+            experience: 0,
+            gold: 0,
+        }
+    }
+
     #[test]
     fn movement_speed_is_tuned_for_precise_room_navigation() {
-        let cardinal = ArpgGame::movement_velocity(PlayerState {
-            movement_x: 1,
-            movement_z: 0,
-            facing_x: 1,
-            facing_z: 0,
-            action: None,
-            hurt_ticks_remaining: 0,
-            health: BASE_MAX_HEALTH,
-            experience: 0,
-            gold: 0,
-        });
-        let diagonal = ArpgGame::movement_velocity(PlayerState {
-            movement_x: 1,
-            movement_z: 1,
-            facing_x: 1,
-            facing_z: 1,
-            action: None,
-            hurt_ticks_remaining: 0,
-            health: BASE_MAX_HEALTH,
-            experience: 0,
-            gold: 0,
-        });
+        let cardinal = ArpgGame::movement_target_velocity(movement_state(1, 0));
+        let diagonal = ArpgGame::movement_target_velocity(movement_state(1, 1));
         assert_eq!(cardinal, Vec3i::new(7, 0, 0));
         assert_eq!(diagonal, Vec3i::new(5, 0, 5));
+    }
+
+    #[test]
+    fn locomotion_accelerates_brakes_and_reverses_over_bounded_ticks() {
+        let forward = movement_state(1, 0);
+        let idle = movement_state(0, 0);
+        let reverse = movement_state(-1, 0);
+
+        let first = ArpgGame::controlled_movement_velocity(Vec3i::ZERO, forward);
+        let second = ArpgGame::controlled_movement_velocity(first, forward);
+        let full = ArpgGame::controlled_movement_velocity(second, forward);
+        assert_eq!(first, Vec3i::new(3, 0, 0));
+        assert_eq!(second, Vec3i::new(6, 0, 0));
+        assert_eq!(full, Vec3i::new(7, 0, 0));
+
+        let braking = ArpgGame::controlled_movement_velocity(full, idle);
+        let stopped = ArpgGame::controlled_movement_velocity(braking, idle);
+        assert_eq!(braking, Vec3i::new(3, 0, 0));
+        assert_eq!(stopped, Vec3i::ZERO);
+
+        let turning = ArpgGame::controlled_movement_velocity(full, reverse);
+        let crossed_zero = ArpgGame::controlled_movement_velocity(turning, reverse);
+        let reversed = ArpgGame::controlled_movement_velocity(crossed_zero, reverse);
+        assert_eq!(turning, Vec3i::new(2, 0, 0));
+        assert_eq!(crossed_zero, Vec3i::new(-3, 0, 0));
+        assert_eq!(reversed, Vec3i::new(-7, 0, 0));
+    }
+
+    #[test]
+    fn action_commitment_stops_controlled_movement_immediately() {
+        let mut game = ArpgGame::new_with_seed(42).unwrap();
+        game.add_player(1).unwrap();
+        game.apply_command(PlayerCommand::new(
+            1,
+            1,
+            ArpgCommand::SetMovement { x: 1, z: 0 },
+        ).unwrap())
+        .unwrap();
+        for _ in 0..3 {
+            game.advance_tick().unwrap();
+        }
+        assert_eq!(
+            game.world.body(ArpgGame::player_body_id(1)).unwrap().velocity(),
+            Vec3i::new(7, 0, 0)
+        );
+
+        game.apply_command(PlayerCommand::new(1, 2, ArpgCommand::PrimaryAttack).unwrap())
+            .unwrap();
+        game.advance_tick().unwrap();
+
+        assert_eq!(
+            game.world.body(ArpgGame::player_body_id(1)).unwrap().velocity(),
+            Vec3i::ZERO
+        );
+    }
+
+    #[test]
+    fn diagonal_control_slides_along_outer_wall() {
+        let mut game = ArpgGame::new_with_seed(42).unwrap();
+        game.add_player(1).unwrap();
+        let body_id = ArpgGame::player_body_id(1);
+        let contact_x = ARENA_HALF_WIDTH - WALL_HALF_THICKNESS - PLAYER_HALF_EXTENTS.x;
+        let start_z = -1_000;
+        game.world
+            .set_position(body_id, Vec3i::new(contact_x, PLAYER_Y, start_z))
+            .unwrap();
+        game.apply_command(PlayerCommand::new(
+            1,
+            1,
+            ArpgCommand::SetMovement { x: 1, z: 1 },
+        ).unwrap())
+        .unwrap();
+
+        for _ in 0..10 {
+            game.advance_tick().unwrap();
+        }
+
+        let position = game.world.body(body_id).unwrap().position();
+        assert_eq!(position.x, contact_x);
+        assert!(position.z > start_z + 30);
     }
 
     fn run_action(game: &mut ArpgGame, player_id: PlayerId, sequence: u32, command: ArpgCommand) {
