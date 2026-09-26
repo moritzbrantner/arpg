@@ -1614,9 +1614,11 @@ mod tests {
 
         let turning = ArpgGame::controlled_movement_velocity(full, reverse);
         let crossed_zero = ArpgGame::controlled_movement_velocity(turning, reverse);
-        let reversed = ArpgGame::controlled_movement_velocity(crossed_zero, reverse);
+        let accelerating_reverse = ArpgGame::controlled_movement_velocity(crossed_zero, reverse);
+        let reversed = ArpgGame::controlled_movement_velocity(accelerating_reverse, reverse);
         assert_eq!(turning, Vec3i::new(2, 0, 0));
         assert_eq!(crossed_zero, Vec3i::new(-3, 0, 0));
+        assert_eq!(accelerating_reverse, Vec3i::new(-6, 0, 0));
         assert_eq!(reversed, Vec3i::new(-7, 0, 0));
     }
 
