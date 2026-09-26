@@ -24,7 +24,7 @@ const PLAYER_DIAGONAL_SPEED: i32 = 5;
 // collision-resolved velocity every frame. This keeps movement responsive while
 // preserving physics-engine as the velocity authority.
 const PLAYER_ACCELERATION_PER_TICK: i32 = 3;
-const PLAYER_BRAKING_PER_TICK: i32 = 4;
+const PLAYER_BRAKING_PER_TICK: i32 = 5;
 const PLAYER_REVERSAL_PER_TICK: i32 = 5;
 const PLAYER_BODY_BASE: u64 = 1_000;
 const STATIC_BODY_BASE: u64 = 10_000;
@@ -574,14 +574,17 @@ impl ArpgGame {
             return Vec3i::ZERO;
         }
         let target = Self::movement_target_velocity(state);
+        let changing_x = current.x != target.x;
+        let changing_z = current.z != target.z;
+        let changing_two_axes = changing_x && changing_z;
         Vec3i::new(
-            Self::approach_controlled_axis(current.x, target.x),
+            Self::approach_controlled_axis(current.x, target.x, changing_two_axes),
             0,
-            Self::approach_controlled_axis(current.z, target.z),
+            Self::approach_controlled_axis(current.z, target.z, changing_two_axes),
         )
     }
 
-    fn approach_controlled_axis(current: i32, target: i32) -> i32 {
+    fn approach_controlled_axis(current: i32, target: i32, changing_two_axes: bool) -> i32 {
         let maximum_delta = if target == 0 {
             PLAYER_BRAKING_PER_TICK
         } else if current != 0 && current.signum() != target.signum() {
@@ -589,6 +592,7 @@ impl ArpgGame {
         } else {
             PLAYER_ACCELERATION_PER_TICK
         };
+        let maximum_delta = Self::normalized_axis_control_delta(maximum_delta, changing_two_axes);
         if current < target {
             current.saturating_add(maximum_delta).min(target)
         } else if current > target {
@@ -596,6 +600,18 @@ impl ArpgGame {
         } else {
             current
         }
+    }
+
+    fn normalized_axis_control_delta(maximum_delta: i32, changing_two_axes: bool) -> i32 {
+        if !changing_two_axes {
+            return maximum_delta;
+        }
+        let maximum_squared = maximum_delta * maximum_delta;
+        let mut component = maximum_delta;
+        while component > 0 && 2 * component * component > maximum_squared {
+            component -= 1;
+        }
+        component
     }
 
     fn room_at_position(&self, position: Vec3i) -> Option<RoomId> {
@@ -1609,7 +1625,7 @@ mod tests {
 
         let braking = ArpgGame::controlled_movement_velocity(full, idle);
         let stopped = ArpgGame::controlled_movement_velocity(braking, idle);
-        assert_eq!(braking, Vec3i::new(3, 0, 0));
+        assert_eq!(braking, Vec3i::new(2, 0, 0));
         assert_eq!(stopped, Vec3i::ZERO);
 
         let turning = ArpgGame::controlled_movement_velocity(full, reverse);
@@ -1620,6 +1636,35 @@ mod tests {
         assert_eq!(crossed_zero, Vec3i::new(-3, 0, 0));
         assert_eq!(accelerating_reverse, Vec3i::new(-6, 0, 0));
         assert_eq!(reversed, Vec3i::new(-7, 0, 0));
+    }
+
+    #[test]
+    fn diagonal_control_normalizes_acceleration_braking_and_reversal() {
+        let forward = movement_state(1, 1);
+        let idle = movement_state(0, 0);
+        let reverse = movement_state(-1, -1);
+
+        let first = ArpgGame::controlled_movement_velocity(Vec3i::ZERO, forward);
+        let second = ArpgGame::controlled_movement_velocity(first, forward);
+        let full = ArpgGame::controlled_movement_velocity(second, forward);
+        assert_eq!(first, Vec3i::new(2, 0, 2));
+        assert_eq!(second, Vec3i::new(4, 0, 4));
+        assert_eq!(full, Vec3i::new(5, 0, 5));
+        assert!(first.x * first.x + first.z * first.z <= PLAYER_ACCELERATION_PER_TICK.pow(2));
+
+        let braking = ArpgGame::controlled_movement_velocity(full, idle);
+        let stopped = ArpgGame::controlled_movement_velocity(braking, idle);
+        assert_eq!(braking, Vec3i::new(2, 0, 2));
+        assert_eq!(stopped, Vec3i::ZERO);
+
+        let turning = ArpgGame::controlled_movement_velocity(full, reverse);
+        let crossed_zero = ArpgGame::controlled_movement_velocity(turning, reverse);
+        let accelerating_reverse = ArpgGame::controlled_movement_velocity(crossed_zero, reverse);
+        let reversed = ArpgGame::controlled_movement_velocity(accelerating_reverse, reverse);
+        assert_eq!(turning, Vec3i::new(2, 0, 2));
+        assert_eq!(crossed_zero, Vec3i::new(-1, 0, -1));
+        assert_eq!(accelerating_reverse, Vec3i::new(-3, 0, -3));
+        assert_eq!(reversed, Vec3i::new(-5, 0, -5));
     }
 
     #[test]
