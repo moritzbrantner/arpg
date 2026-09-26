@@ -643,7 +643,7 @@ input, select { min-width: 0; max-width: 100%; padding: 0.55rem 0.65rem; width: 
   .game-header > .game-header-actions { flex-direction: row; gap: 0.4rem; }
   .game-header-actions button { min-width: auto; padding-inline: 0.65rem; }
   .training-panel {
-    top: calc(max(4.8rem, env(safe-area-inset-top) + 4rem));
+    top: max(4.8rem, calc(env(safe-area-inset-top) + 4rem));
     right: max(0.75rem, env(safe-area-inset-right));
     left: max(0.75rem, env(safe-area-inset-left));
     width: auto;
