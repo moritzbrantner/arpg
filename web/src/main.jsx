@@ -840,7 +840,6 @@ function App() {
 
   useEffect(() => {
     if (!ready || !inWorld) return undefined;
-    trainingClockCarryRef.current = 0;
     const timer = setInterval(() => {
       if (
         modeRef.current === "guest" ||
