@@ -1,499 +1,802 @@
-# ARPG Roadmap
+# ARPG — Full Game Roadmap
 
-This roadmap treats the moment-to-moment action loop as a **foundation**, not a polish pass.
+## Vision
 
-The immediate design target is the deliberate, readable mechanical feel of classic action RPGs such as Diablo II: movement has weight without feeling sluggish, attacks have commitment without stealing control, hits are legible, enemies react consistently, and the reward loop closes quickly. The implementation remains original and is built on the repository's existing deterministic authority boundaries.
+Build an isometric action RPG whose strengths are:
 
-## Guiding rule
+- responsive, weighty combat;
+- enemies that reward positioning, timing, target priority, and interruption;
+- builds that substantially alter how the game plays;
+- procedural but authored-feeling adventures;
+- strong animation, visual, audio, and impact feedback;
+- seamless solo and co-op play using the same deterministic simulation;
+- systemic mechanics that let a relatively small amount of authored content produce substantial variety.
 
-New content must be able to reuse the game loop instead of redefining it.
+The architecture remains a means to this end. New infrastructure should normally require a concrete improvement to the playable game.
 
-A new weapon, skill, monster, boss, dungeon modifier, or multiplayer mode should normally configure or compose existing mechanics. If adding content requires another private movement model, targeting rule, attack lifecycle, hit reaction path, pickup rule, or presentation timing system, the foundation is not finished yet.
+## Core experience
 
-The core loop is:
+The game needs to work at several timescales.
 
-```text
-intent
-  -> locomotion / target acquisition
-  -> action commitment
-  -> active attack / skill
-  -> authoritative hit resolution
-  -> impact / reaction
-  -> recovery / repositioning
-  -> reward / pickup
-  -> next decision
-```
+**Second-to-second:** move, aim, commit to an attack, read an enemy, dodge or interrupt, land a satisfying hit, and reposition.
 
-Simulation truth remains deterministic in `arpg-core`. Rendering, animation, camera, audio, and other presentation layers consume gameplay events and projected state; they do not become alternate gameplay authorities.
+**Minute-to-minute:** fight an interesting group, obtain loot, make a build decision, discover something, and face a new tactical situation.
+
+**Run-to-run:** enter a reproducible but varied dungeon or region, make choices that alter the run, fight elites and events, defeat a boss, and return meaningfully stronger or with new possibilities.
+
+**Character-to-character:** experiment with fundamentally different weapons, skills, equipment interactions, and play styles.
+
+Everything on this roadmap should strengthen at least one of these loops.
 
 ---
 
-## Phase 0 — Mechanical game-loop foundation
+## Stage 1 — Make fighting one monster excellent
 
-This phase comes before broad content expansion.
+This is the highest priority. The game should already be enjoyable in the combat training arena with one weapon and one enemy before broad content expansion.
 
-### 0.1 Locomotion feel
+### 1.1 Combat training arena
 
-Build one reusable ARPG locomotion model for player-controlled characters.
+Build a first-class deterministic Pages scenario for mechanical iteration.
 
-- responsive acceleration, stopping, and direction changes;
-- diagonal and analog-input normalization;
-- explicit walk/run or movement-speed semantics rather than presentation-owned speed;
-- collision sliding and corner handling through `physics-engine`;
-- deterministic movement under local, peer-hosted, dedicated, replay, and test execution;
-- movement cancellation rules for attacks and interactions;
-- controller, keyboard, and pointer intent projected into the same gameplay commands;
-- animation speed and foot presentation derived from authoritative movement rather than driving it.
-- consume pinned `3d-lab` procedural animation for two-bone leg IK, foot placement/locking, pelvis correction, and surface-normal alignment, using `physics-engine` contact/query evidence rather than renderer-owned ground truth;
-- drive foot-plant weights and other pose constraints from authored presentation metadata and authoritative movement/cue state without allowing animation contacts to change movement, attacks, hit timing, or collision truth;
-- add bounded motion warping later for attacks and interactions so visuals can converge on authoritative targets while `arpg-core` remains authoritative for displacement, action phases, targeting, and hits.
+Initial controls:
 
-Acceptance: moving around an empty room should already feel intentional and satisfying before enemies or loot are added.
+- deterministic seed display and restart;
+- pause and resume;
+- single simulation step while paused;
+- explicit simulation speed choices;
+- live tick and combat-state diagnostics.
 
-### 0.2 Action lifecycle
+Follow-up controls:
 
-Introduce a domain-shaped action state machine instead of scattered cooldown checks.
+- spawn and remove enemies;
+- enemy archetype and count;
+- invulnerable target dummy;
+- exact player movement and attack parameters;
+- collision visualization;
+- action-phase visualization;
+- target visualization;
+- combat event timeline;
+- projectile counts.
 
-Common phases should be expressible without making every action identical:
+The arena is a development and acceptance surface, not a second gameplay implementation. It runs the same `arpg-core` authority as normal local play.
+
+### 1.2 Movement
+
+Finish one reusable ARPG locomotion model:
+
+- responsive acceleration and stopping;
+- reliable direction changes;
+- diagonal and analog normalization;
+- good collision sliding and corner handling through `physics-engine`;
+- explicit movement/action cancellation rules;
+- controller, keyboard, and touch intent projected into the same gameplay commands;
+- movement skills through the same authoritative movement boundary.
+
+Integrate shared humanoid work from `3d-lab`:
+
+- proper skeleton;
+- locomotion animation;
+- procedural leg IK;
+- foot planting;
+- slope adaptation;
+- animation blending;
+- directional attack animation;
+- hit reactions;
+- death animation.
+
+Animation follows gameplay truth rather than defining it.
+
+### 1.3 Combat actions
+
+Continue the existing action lifecycle as the permanent combat foundation:
 
 1. intent accepted;
 2. wind-up / commitment;
-3. active window;
-4. authoritative effect or hit;
+3. active effect;
+4. authoritative hit or effect;
 5. recovery;
-6. cancellation or interruption where the action permits it.
+6. permitted interruption or cancellation.
 
-The foundation must support melee, projectiles, movement skills, channeled actions, interactions, and future item use without a generic scripting engine.
+Use this foundation for:
 
-Timing is gameplay truth in `arpg-core`. Animation and effects consume phase/cue information.
+- light attack;
+- heavy attack;
+- defensive action;
+- movement/dodge action;
+- targeted skill;
+- directional skill;
+- ground-targeted skill;
+- projectile;
+- channel;
+- interrupt;
+- stagger;
+- knockback;
+- block/parry;
+- status effects.
 
-### 0.3 Targeting and interaction
+Do not create a private timing model for each skill.
 
-Create one targeting/interaction boundary shared by attacks, skills, enemies, loot, doors, and future NPC interactions.
+### 1.4 Targeting and interaction
+
+Use one game-specific targeting/interaction boundary for attacks, skills, enemies, loot, doors, and later NPC interactions.
 
 It should cover:
 
 - explicit target selection where appropriate;
-- direction/ground-position actions;
+- direction and ground-position actions;
 - range validation;
-- target stickiness and loss rules;
-- optional target assistance for controller/touch without changing simulation rules;
-- interaction priority when several objects overlap;
-- deterministic fallback when a selected target becomes invalid.
+- target stickiness and loss;
+- controller/touch assistance without changing simulation rules;
+- overlap priority;
+- deterministic fallback when a target becomes invalid.
 
-Do not let React, the renderer, or input adapters invent game-specific targeting semantics.
+React, the renderer, and input adapters must not invent ARPG targeting semantics.
 
-### 0.4 Hit and impact model
+### 1.5 Impact
 
-Make a hit mechanically readable before adding many damage formulas.
+Make authoritative combat outcomes legible through presentation cues:
 
-The authoritative model should distinguish at least:
+- weapon trails;
+- contact flashes;
+- particles;
+- decals;
+- restrained presentation-only hit stop;
+- camera impulse;
+- enemy recoil;
+- knockback;
+- directional audio;
+- distinct hit, block, critical, and kill sounds;
+- damage numbers where useful;
+- clear death feedback.
 
-- attack/effect emitted;
-- contact or target resolution;
-- damage/mitigation result;
-- stagger, knockback, stun, block, or immunity result;
-- death;
-- secondary proc/status consequences.
+The presentation layer reacts to authoritative cues. It never decides whether gameplay happened.
 
-Presentation may add local-only effects such as camera shake, particles, sound, and brief visual emphasis, but it must derive them from authoritative combat cues.
+### 1.6 Enemy reaction foundation
 
-Knockback and physical displacement belong at the `arpg-core` + `physics-engine` boundary. Presentation-only hit stop must never pause or rewrite authoritative multiplayer time.
+A basic monster should already be enjoyable to fight.
 
-### 0.5 Enemy reaction foundation
-
-Enemies need reusable reaction semantics before richer AI.
-
-Start with:
+Support reusable:
 
 - approach and spacing;
 - attack commitment;
 - hurt/stagger response;
 - knockback/displacement;
 - death;
-- brief recovery/re-engagement behavior.
+- recovery and re-engagement.
 
-This should make a basic monster enjoyable to fight before introducing many monster types.
+### Stage 1 milestone — Combat game
 
-### 0.6 Reward loop and pickup feel
+A player can enter the arena and fighting is genuinely enjoyable.
 
-The basic combat loop should close with a satisfying reward interaction.
+Requires movement, animation, multiple attacks, enemy pursuit, telegraphs, hit reactions, audio/VFX, and several enemy roles.
 
-Foundation work:
+---
 
-- authoritative item/drop spawn events;
-- deterministic ownership/eligibility rules where needed;
-- readable world-drop presentation;
-- one reusable pickup interaction;
-- immediate pickup confirmation;
-- inventory admission/rejection separated from world interaction;
-- future controller/touch pickup assistance through the same targeting boundary.
+## Stage 2 — Make combat tactically interesting
 
-Do not wait for a complete itemization system before making "kill -> drop -> pick up" feel good.
+### Enemy movement and navigation
 
-### 0.7 Presentation cue boundary
+Add:
 
-Define an explicit projection from simulation events/state into presentation cues.
+- pursuit;
+- navigation around walls;
+- spacing;
+- retreat;
+- strafing;
+- preferred range maintenance;
+- obstacle avoidance;
+- formation pressure;
+- separation between monsters.
 
-Candidate cues include:
+Physical movement stays in `physics-engine`; ARPG owns tactical decisions.
 
-- action phase changed;
-- swing/release moment;
-- projectile spawned;
-- hit landed;
-- block/parry;
-- stagger/knockback;
-- death;
-- loot dropped;
-- loot picked up;
-- skill unavailable/failed with a typed reason.
+### Enemy roles
 
-`3d-lab`, audio, camera, HUD, and effects consume these cues. They may interpolate and decorate them, but may not decide whether gameplay happened.
+Build a small number of genuinely distinct roles before producing many enemy models:
 
-### 0.8 Combat training arena
+- melee pressure;
+- heavy/bruiser;
+- ranged attacker;
+- flanker;
+- shielded defender;
+- support/healer;
+- summoner;
+- artillery;
+- crowd controller.
 
-Add a small deterministic sandbox focused entirely on feel iteration.
+Mixed groups should create target-priority and positioning decisions.
 
-Controls should eventually include:
+### Telegraphs
 
-- spawn/remove enemies;
-- enemy archetype and count;
-- invulnerable target dummy;
-- player movement/attack parameters;
-- game speed;
-- pause/step simulation;
-- collision/debug visualization;
-- action-phase visualization;
-- target visualization;
-- damage/event timeline;
-- projectile counts;
-- deterministic seed display/reset.
+Share authoritative intent through reusable telegraph data:
 
-This should be a first-class Pages scenario, not a throwaway developer screen.
+- directional cones;
+- lines;
+- ground areas;
+- charges;
+- projectile trajectories;
+- interruptible wind-ups;
+- persistent hazards.
 
-### 0.9 Foundation acceptance scenarios
+### Elite modifiers
 
-Keep a small corpus of deterministic mechanical scenarios:
+Prefer behavioral modifiers to percentage inflation:
+
+- teleporting;
+- splitting;
+- reviving allies;
+- projectile interception;
+- hazard creation;
+- ally shielding;
+- retaliation;
+- summoning;
+- pursuit after being wounded;
+- death effects.
+
+Modifiers should compose with ordinary enemy archetypes.
+
+---
+
+## Stage 3 — Establish real character identity
+
+### Weapons
+
+Start with a compact mechanical vocabulary:
+
+- sword / fast melee;
+- hammer / heavy stagger;
+- spear / reach and space control;
+- bow / projectile play;
+- shield / defensive timing;
+- magical focus / skill-oriented ranged play.
+
+Weapon identity changes animation, reach, timing, positioning, and tactics—not merely DPS.
+
+### Skills
+
+Introduce a small loadout with:
+
+- basic action;
+- several active skills;
+- movement/utility skill;
+- defensive option;
+- passive/modifier choices.
+
+Support composable transformations:
+
+- multishot;
+- pierce;
+- chain;
+- bounce;
+- return;
+- orbit;
+- explosion;
+- altered geometry;
+- delayed detonation;
+- damage/status conversion.
+
+A modifier should normally transform an existing mechanic rather than fork a complete skill.
+
+### Resources
+
+Use a small resource vocabulary such as health plus one character/skill resource. Do not add multiple resource bars without a concrete gameplay reason.
+
+---
+
+## Stage 4 — Loot and buildcraft
+
+The existing kill → drop → pickup loop becomes a complete ARPG reward loop.
+
+### Inventory and equipment
+
+Add authoritative:
+
+- equipment slots;
+- inventory;
+- item comparison;
+- equipping;
+- dropping;
+- item identity;
+- item provenance.
+
+Controller and touch navigation are designed with mouse interaction, not added afterward.
+
+### Itemization
+
+Build item meaning in this order:
+
+1. base item identity;
+2. mechanically useful affixes;
+3. rarity/affix combinations;
+4. unique items;
+5. transformative items.
+
+Examples:
+
+- heavy attacks create a shockwave;
+- perfect blocks reset a skill;
+- arrows return;
+- knockback becomes bonus damage;
+- movement leaves damaging terrain;
+- projectiles split after their first hit;
+- frozen enemies shatter into damaging fragments.
+
+Avoid building hundreds of small percentage modifiers before mechanically transformative items exist.
+
+### Crafting
+
+Prefer a small set of meaningful transformations:
+
+- reroll;
+- replace;
+- extract;
+- transfer;
+- upgrade;
+- fracture;
+- corrupt or sacrifice with risk.
+
+### Stage 4 milestone — Build game
+
+A player can create substantially different play styles using weapons, skills, modifiers, equipment, loot, and crafting choices.
+
+---
+
+## Stage 5 — Build the first complete adventure
+
+Create a roughly 20–30 minute complete run containing:
+
+- entry area;
+- several connected dungeon sections;
+- ordinary packs;
+- elite encounters;
+- environmental hazards;
+- optional encounter;
+- treasure/reward room;
+- mini-boss or major event;
+- final boss;
+- meaningful loot;
+- character progression during the run;
+- return/completion state.
+
+It does not need huge content breadth. It needs a beginning, escalation, climax, and reward.
+
+### Stage 5 milestone — Complete run
+
+This is the first point where ARPG should be treated as a small game rather than primarily a technology demonstration.
+
+---
+
+## Stage 6 — Boss foundation
+
+Do not implement a separate boss engine.
+
+Compose bosses from:
+
+- the normal action lifecycle;
+- movement policies;
+- reusable abilities;
+- phases;
+- arena mechanics;
+- summons;
+- environmental hazards;
+- vulnerability windows;
+- triggered transitions.
+
+Develop several mechanically different boss patterns:
+
+- duel;
+- positioning/area-control boss;
+- summoner;
+- mobile pursuit boss;
+- multi-phase encounter.
+
+A successful boss mechanic should usually become reusable content vocabulary afterward.
+
+---
+
+## Stage 7 — Dungeon and encounter system
+
+### Dungeon pieces
+
+Support authored procedural pieces:
+
+- rooms;
+- corridors;
+- arenas;
+- elevation;
+- doors;
+- traps;
+- shrines;
+- environmental obstacles;
+- destructibles;
+- secret and optional spaces.
+
+Prefer composing authored pieces to arbitrary procedural noise.
+
+### Encounter definitions
+
+Make encounter composition reusable:
+
+- enemy groups;
+- spawn rules;
+- reinforcement triggers;
+- environmental elements;
+- objectives;
+- rewards;
+- difficulty budget.
+
+### Objectives
+
+Support reusable contracts for:
+
+- extermination;
+- boss hunt;
+- survival;
+- defense;
+- rescue;
+- portal destruction;
+- escape;
+- control point;
+- escort.
+
+Geometry, enemy composition, objectives, and modifiers should be independently composable.
+
+---
+
+## Stage 8 — Visual identity
+
+Make this a major workstream once the core mechanics are stable.
+
+Use `3d-lab` and `asset-tooling` rather than private ARPG rendering or asset pipelines.
+
+Develop:
+
+- proper humanoid characters;
+- equipped weapon rendering;
+- armor/equipment visualization where viable;
+- multiple monster silhouettes;
+- coherent dungeon kits;
+- lighting;
+- shadows;
+- environmental effects;
+- particles;
+- decals;
+- destruction;
+- spell effects;
+- polished animation transitions.
+
+Prioritize silhouette and combat readability over raw graphical detail.
+
+The camera may react to encounter scale, occlusion, boss framing, indoor/outdoor spaces, and co-op separation, but remains presentation policy.
+
+---
+
+## Stage 9 — Audio
+
+Drive audio from authoritative gameplay cues.
+
+Add layers for:
+
+- footsteps;
+- weapon movement;
+- material-sensitive impacts;
+- monster vocalization;
+- skills;
+- environment;
+- loot;
+- UI;
+- music;
+- boss transitions.
+
+Music may react to encounter state but never own encounter state.
+
+---
+
+## Stage 10 — World structure
+
+Once the dungeon loop works, give runs context.
+
+Build a compact structure with:
+
+- safe hub;
+- dungeon/region selection;
+- NPC interaction;
+- quests/objectives;
+- progression gates;
+- discovered locations;
+- roaming encounters;
+- world events.
+
+Potential events:
+
+- invasion;
+- caravan;
+- ritual;
+- roaming boss;
+- siege;
+- corrupted area;
+- rare treasure encounter.
+
+Do not build a giant empty open world merely to increase map size.
+
+---
+
+## Stage 11 — Character progression
+
+Build progression around unlocking possibilities rather than only increasing numbers.
+
+Support:
+
+- levels;
+- mechanically meaningful attributes;
+- skill unlocks;
+- skill modifications;
+- equipment progression;
+- permanent unlocks;
+- build respec;
+- multiple saved characters.
+
+The character-selection flow and versioned savestate work are natural foundations here.
+
+---
+
+## Stage 12 — Co-op as an actual game mode
+
+The networking foundation already exists. Concentrate on player experience:
+
+- simple host/join flow;
+- drop-in/drop-out;
+- reconnect;
+- party indicators;
+- multiplayer enemy behavior;
+- revive/downed mechanics if appropriate;
+- individual/shared loot policy;
+- player-to-player interaction;
+- encounter scaling;
+- bosses designed for several players.
+
+`game-server` remains runtime/session authority. Gameplay remains in the same `arpg-core` simulation.
+
+Prediction and interpolation may hide latency but may not replace authoritative results.
+
+---
+
+## Stage 13 — Replayability and endgame
+
+Do this only after one complete adventure is enjoyable.
+
+Create reusable high-level challenge generation from existing systems:
+
+- increasingly difficult seeded expeditions;
+- dungeon modifiers;
+- elite modifiers;
+- boss variants;
+- optional challenge objectives;
+- risk/reward choices;
+- rare encounters;
+- high-value crafting resources;
+- build-defining rewards.
+
+Expose deterministic challenge seeds so interesting runs can be shared and reproduced.
+
+A good endgame remixes the game's strongest systems instead of introducing a second game.
+
+---
+
+## Stage 14 — Authoring and agent-driven content production
+
+Once runtime schemas stabilize, move declarative content into MOEL where appropriate:
+
+- items;
+- skills;
+- enemies;
+- enemy modifiers;
+- encounters;
+- bosses;
+- dungeon pieces;
+- dungeon modifiers;
+- loot tables.
+
+Executable hot-path behavior remains code unless a concrete need justifies something more dynamic.
+
+Build focused editors:
+
+- skill editor;
+- item editor;
+- enemy editor;
+- encounter editor;
+- dungeon editor.
+
+Editors use exact numeric inputs, useful visualization, and direct playable previews.
+
+The long-term content advantage should be that agents can generate and validate substantial amounts of content against stable mechanics without repeatedly changing the engine.
+
+---
+
+## Stage 15 — Game UX
+
+Replace development-oriented UI with a compact game interface.
+
+Gameplay HUD:
+
+- health/resources;
+- skills and cooldowns;
+- important statuses;
+- contextual interaction;
+- current objective;
+- useful party state.
+
+Out-of-combat surfaces:
+
+- character selection;
+- inventory/equipment;
+- skills/build;
+- map;
+- quests/objectives;
+- crafting;
+- settings.
+
+Avoid generic hero copy, redundant metrics, decorative KPI cards, and explanatory panels that displace actual game actions.
+
+Keyboard/mouse, controller, and touch are first-class input modes. Mobile must not merely display a desktop hotkey UI.
+
+---
+
+## Stage 16 — Accessibility and settings
+
+Support useful control over:
+
+- key/controller/touch bindings;
+- aim/target assistance;
+- camera sensitivity;
+- screen shake;
+- hit flashes;
+- damage numbers;
+- audio channels;
+- graphics quality;
+- text size;
+- UI scale;
+- color-dependent combat indicators;
+- subtitles where appropriate.
+
+Settings remain presentation/input configuration, not gameplay truth.
+
+---
+
+## Stage 17 — Performance and scale
+
+Optimize representative gameplay scenarios rather than isolated microbenchmarks.
+
+Maintain scenarios for:
+
+- dense melee;
+- large enemy pack;
+- projectile swarm;
+- status-heavy combat;
+- destructible environment;
+- boss + adds;
+- four-player combat;
+- large dungeon;
+- loot-heavy scene.
+
+Measure simulation, physics, rendering, animation, networking, and UI separately.
+
+Use optimized shared foundations only where representative benchmarks show they help. Avoid copying optimized algorithms into ARPG.
+
+Prioritize stable frame pacing over average FPS.
+
+---
+
+## Stage 18 — Polish
+
+After the complete loop works, repeatedly play and tune:
+
+- attack timing;
+- movement responsiveness;
+- animation transitions;
+- enemy telegraphs;
+- hit feedback;
+- camera;
+- sound;
+- lighting;
+- loot presentation;
+- UI interaction;
+- onboarding;
+- difficulty curves;
+- encounter pacing.
+
+Polish is repeated play and adjustment, not a final feature dump.
+
+---
+
+## Release milestones
+
+### Milestone A — Combat game
+
+Movement, animations, multiple attacks, enemy pursuit, telegraphs, hit reactions, audio/VFX, and several enemy roles make the combat arena genuinely enjoyable.
+
+### Milestone B — Build game
+
+Weapons, skills, modifiers, inventory, equipment, loot, and crafting produce substantially different builds.
+
+### Milestone C — Complete run
+
+A satisfying 20–30 minute adventure works from entry through boss and reward.
+
+### Milestone D — Replayable game
+
+Multiple layouts, encounters, bosses, builds, modifiers, and progression make repeated runs meaningfully different.
+
+### Milestone E — Co-op game
+
+The same experience works cleanly for several players with reconnect and persistence.
+
+### Milestone F — Content platform
+
+MOEL schemas and focused editors make enemies, equipment, skills, encounters, and dungeons inexpensive to produce and validate.
+
+### Milestone G — 1.0-quality game
+
+Several polished build directions, coherent adventure structure, substantial replayability, endgame, strong controls, stable saves, co-op, good performance, and a coherent audiovisual identity.
+
+---
+
+## Architectural guardrails
+
+Keep the existing authority map:
+
+| Concern | Authority |
+| --- | --- |
+| ARPG gameplay rules and content semantics | `arpg-core` |
+| Collision, movement constraints, contacts, spatial queries | `physics-engine` |
+| Reusable rendering, camera, animation, and asset models | `3d-lab` |
+| Reproducible asset processing | `asset-tooling` |
+| Reusable binding/runtime input behavior | `input-bindings` |
+| Dedicated runtime/session machinery | `game-server` |
+| Peer rendezvous/signaling | `multiplayer-setup-service` |
+| Declarative game data where appropriate | MOEL |
+| Browser composition/HUD/settings | `web` |
+
+Do not introduce separate boss, loot, skill, multiplayer, targeting, movement, or animation authorities.
+
+Do not adopt a generic scripting engine, message bus, event-sourcing system, or generalized game framework merely because the product is becoming larger. Add abstractions after multiple real gameplay slices demonstrate the same requirement.
+
+## Cross-cutting acceptance
+
+Maintain deterministic scenarios for:
 
 - empty-room movement;
 - repeated stop/start/reverse movement;
 - attack while approaching range;
 - target dies during wind-up;
-- target leaves range before active window;
+- target leaves range before the active window;
 - repeated melee hit/recovery;
 - projectile release and impact;
 - knockback into a wall;
-- two enemies competing for target selection;
-- kill -> drop -> pickup;
+- competing target selection;
+- kill → drop → pickup;
 - interrupted action;
 - local vs dedicated execution equivalence.
 
-Correctness tests assert state/event semantics. Performance evidence measures deterministic work separately from advisory wall-clock timing.
+Correctness tests assert state/event semantics. Performance evidence measures representative deterministic work separately from advisory wall-clock timing.
 
 ---
 
-## Phase 1 — Combat vocabulary
-
-Once Phase 0 feels good, expand what the foundation can express.
-
-### Weapon identity
-
-Weapons should change mechanics, reach, rhythm, movement, and interaction rather than merely supplying different numbers.
-
-Examples:
-
-- spear: long reach and space control;
-- hammer: slower commitment and stronger stagger/impulse;
-- bow: projectile geometry and travel;
-- shield: block/parry windows;
-- fast one-handed weapons: shorter commitment/recovery and different spacing.
-
-### Skill mutation
-
-Support composable skill modifiers such as:
-
-- piercing;
-- bouncing;
-- returning;
-- orbiting;
-- multishot;
-- delayed mine;
-- area conversion;
-- chaining;
-- altered projectile shape or trajectory.
-
-Modifiers should transform domain mechanics rather than fork entire skills.
-
-### Status-effect rules
-
-Define explicit stacking/refresh/independent-instance rules, immunity, conversion, cleansing, and interactions.
-
-This becomes the basis for combinations such as burning terrain, freeze/shatter behavior, wet/lightning interactions, and future elemental systems.
-
-### Enemy combat roles
-
-Add behavior-oriented archetypes:
-
-- melee pressure;
-- ranged artillery;
-- healer/support;
-- summoner;
-- shield bearer;
-- assassin/flanker;
-- commander/buffer;
-- crowd controller.
-
-The encounter should change based on target priority, not only enemy health totals.
-
-### Behavioral monster affixes
-
-Prefer mechanics over percentage inflation:
-
-- splits on death or hit;
-- revives allies;
-- absorbs/intercepts projectiles;
-- teleports when surrounded;
-- creates walls/hazards;
-- copies or reacts to player actions;
-- protects nearby allies.
-
-### Telegraph system
-
-Create shared data/cues for:
-
-- ground areas;
-- directional attacks;
-- charge indicators;
-- interrupt windows;
-- trajectories;
-- delayed hazards.
-
-Telegraphs communicate authoritative intent; renderers choose how to draw them.
-
----
-
-## Phase 2 — Builds, loot, and character expression
-
-### Mechanically meaningful item affixes
-
-Items should alter play, for example:
-
-- returning projectiles;
-- knockback converted to damage;
-- perfect block resets a cooldown;
-- movement leaves damaging terrain;
-- status interactions change;
-- skill geometry changes.
-
-### Item provenance
-
-Track useful origin/transformation information:
-
-- source encounter/boss;
-- dungeon/run seed;
-- crafting transformations;
-- event/source identifier;
-- creator/trader where applicable.
-
-This supports debugging and later multiplayer trading without making provenance itself gameplay authority.
-
-### Crafting transformations
-
-Prefer operations over large recipe lists:
-
-- reroll;
-- replace/move an affix;
-- extract;
-- fracture;
-- corrupt with risk;
-- sacrifice one item to alter another.
-
-### Build planner
-
-Expose an interactive Pages planner using the same authoritative schemas for skills/items rather than a second handwritten model.
-
----
-
-## Phase 3 — Encounters and dungeons
-
-### Boss composition
-
-Build bosses from reusable mechanics:
-
-- phases;
-- ability sets;
-- triggers;
-- arena rules;
-- adds;
-- vulnerability windows;
-- movement/spacing policies.
-
-Do not create a separate boss engine.
-
-### Dynamic dungeons
-
-Generate reproducible dungeons from authored pieces with:
-
-- connectivity constraints;
-- doors/traversal;
-- encounters;
-- objectives;
-- hazards;
-- deterministic seeds.
-
-### Dungeon modifiers
-
-Composable rule modifiers can alter runs without special-case forks:
-
-- darkness;
-- exploding corpses;
-- scarce healing;
-- regenerating enemies;
-- unstable terrain;
-- altered projectile rules;
-- stronger environmental hazards.
-
-### Alternative objectives
-
-Add reusable objective contracts for:
-
-- boss hunt;
-- survival;
-- defense;
-- escort;
-- rescue;
-- portal destruction;
-- control points;
-- escape from an advancing hazard.
-
-### Destructible environment
-
-Support bounded, deterministic destruction of meaningful objects such as barrels, barricades, doors, traps, pillars, and cover through the existing physics boundary.
-
----
-
-## Phase 4 — World systems
-
-### World events
-
-Examples:
-
-- invasions;
-- caravans;
-- ritual sites;
-- roaming bosses;
-- sieges;
-- temporary corrupted regions;
-- rare treasure encounters.
-
-Events should compose existing encounter/objective mechanics.
-
-### Faction simulation
-
-Factions may occupy regions, conflict, and react to player actions while remaining a supporting world system rather than turning the ARPG into a strategy simulation.
-
----
-
-## Phase 5 — Multiplayer depth
-
-The same combat foundation must work unchanged in local, peer-hosted, and dedicated modes.
-
-Potential additions:
-
-- drop-in/drop-out co-op;
-- multiplayer encounter scaling expressed through game rules, not server infrastructure;
-- player separation/camera presentation;
-- shared/individual loot policies;
-- trading using authoritative item identity/provenance;
-- reconnect-safe encounter state;
-- deterministic replay/divergence tooling.
-
-`game-server` remains runtime/session authority. `multiplayer-setup-service` remains rendezvous/signaling authority.
-
----
-
-## Phase 6 — Authoring and mod-friendly content
-
-### Declarative game data
-
-Use MOEL for schema-validated content where it fits:
-
-- skills;
-- items;
-- enemies;
-- encounters;
-- dungeon pieces;
-- modifiers.
-
-Executable hot-path simulation behavior remains code unless a real need justifies something more dynamic.
-
-### Editors
-
-Grow shared authoring surfaces only after the corresponding runtime model is stable:
-
-- encounter editor;
-- dungeon editor;
-- loot/item editor;
-- skill editor.
-
-Prefer reusable editor foundations rather than separate bespoke React applications.
-
----
-
-## Cross-cutting foundations
-
-These run through every phase.
-
-### Input
-
-Use `input-bindings` for keyboard/controller binding semantics and context switching. Combat, inventory, map, dialogue, and debug modes should not each invent binding infrastructure.
-
-### Rendering and assets
-
-Use `3d-lab` for renderer primitives and asset models. ARPG owns scene composition and presentation policy. Use `asset-tooling` for reproducible asset generation/acquisition/processing.
-
-### Physics
-
-Use `physics-engine` for physical truth. ARPG owns the semantic request: movement intent, projectile intent, knockback intent, collision layers, and gameplay consequences.
-
-### Replay and debugging
-
-Preserve ordered gameplay inputs plus deterministic seed/version evidence so mechanical regressions can be reproduced. Add combat replay after the Phase 0 event/action boundaries are stable.
-
-### Performance
-
-Keep deterministic scenario benchmarks for representative workloads:
-
-- dense melee;
-- projectile swarm;
-- large knockback chain;
-- four-player combat;
-- boss + adds;
-- status/proc-heavy encounter.
-
-Correctness remains separate from performance evidence, and brittle wall-clock thresholds should not become gameplay gates.
-
-### Controller-first usability
-
-The mechanical foundation must remain fully usable without a mouse. Target selection, radial/skill UI, inventory navigation, pickup, and interaction should all have explicit controller semantics.
-
-### Camera
-
-Camera behavior may react to encounter scale, indoor/outdoor constraints, boss framing, and multiplayer player separation, but it remains presentation policy and never simulation authority.
-
----
-
-## Immediate implementation order
-
-The next implementation work should stay deliberately narrow:
-
-1. formalize the action lifecycle and combat/presentation event vocabulary;
-2. improve locomotion until the empty-room movement scenario feels good;
-3. rebuild the primary attack on the action lifecycle instead of simple proximity/cooldown behavior;
-4. add explicit hit/stagger/knockback/death reactions;
-5. unify combat and pickup targeting/interaction rules;
-6. add the kill -> drop -> pickup loop;
-7. add the deterministic combat training arena and debug timeline;
-8. iterate on feel using those scenarios before expanding skills, loot tables, or enemy variety.
-
-The purpose of this order is to make every later content slice cheaper: content should mostly provide data, policies, assets, and combinations while the mechanical loop stays coherent.
+## Immediate implementation sequence
+
+Work toward **Milestone A** before broad systems expansion:
+
+1. Finish the combat training arena and debugging controls.
+2. Finish player locomotion and collision feel.
+3. Integrate proper humanoid skeleton and locomotion animation from `3d-lab`.
+4. Add enemy pursuit/navigation through the existing physics boundary.
+5. Finish hit/stagger/knockback/death presentation.
+6. Add combat audio, particles, and restrained camera feedback.
+7. Introduce three mechanically distinct weapons.
+8. Introduce dodge/defense and the first non-basic skills.
+9. Add three to five enemy combat roles using the shared action system.
+10. Build the first proper boss from those primitives.
+11. Playtest and tune this small combat corpus repeatedly.
+12. Then move aggressively into inventory, equipment, itemization, and the first complete dungeon run.
+
+Progress should be judged primarily by how much better the next five minutes of play become, not by the number of architectural capabilities added.
