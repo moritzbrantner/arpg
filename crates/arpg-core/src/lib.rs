@@ -7,6 +7,11 @@ use std::fmt;
 use physics_engine::{BodyId, RigidBody, Vec3i, World, WorldConfig};
 use serde::{Deserialize, Serialize};
 
+#[cfg(test)]
+mod physics_work;
+#[cfg(test)]
+mod physics_workloads;
+
 pub type DoorId = u64;
 pub type GroundLootId = u64;
 pub type PlayerId = u32;
@@ -1106,7 +1111,13 @@ impl AuthoritativeGame for ArpgGame {
                 )
                 .map_err(physics_error)?;
         }
-        self.world.step(1).map_err(physics_error)?;
+        {
+            #[cfg(test)]
+            let measurement = physics_workloads::start_physics();
+            let _report = self.world.step(1).map_err(physics_error)?;
+            #[cfg(test)]
+            physics_workloads::finish_physics(measurement, &_report);
+        }
         self.reconcile_encounters()?;
         self.advance_actions()?;
         self.advance_monster_actions()?;
