@@ -12,7 +12,7 @@
     "test:physics-wasm": "bun ../scripts/test-physics-wasm.mjs src/wasm/arpg_web_wasm.js"
   },
   "dependencies": {
-    "@moritzbrantner/three-d-renderer": "github:moritzbrantner/3d-lab#7889a0066df928b101d42fb16f32353bd26c0696",
+    "@moritzbrantner/three-d-renderer": "github:moritzbrantner/3d-lab#f484db8a3d2a7a555fa463eddf9c28790b240ce0",
     "react": "19.1.1",
     "react-dom": "19.1.1",
     "three": "0.185.1"
