@@ -45,5 +45,8 @@ jobs:
       - name: Build browser MVP
         working-directory: web
         run: bun run build
+      - name: Execute compiled WASM gameplay controls
+        working-directory: web
+        run: bun run test:physics-wasm
       - name: Verify build kept lockfiles unchanged
         run: git diff --exit-code -- Cargo.lock web/bun.lock
