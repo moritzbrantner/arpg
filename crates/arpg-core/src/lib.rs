@@ -1024,7 +1024,7 @@ impl ArpgGame {
             if self.doors[index].locked == desired_locked {
                 continue;
             }
-            let door = self.doors[index].clone();
+            let door = &self.doors[index];
             if desired_locked {
                 self.world
                     .add_body(RigidBody::fixed(
