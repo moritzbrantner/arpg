@@ -17,7 +17,7 @@ the returned `sourceRevision` when reporting reproducibility evidence; do not
 pin or copy shared policy into this repository.
 
 The repository currently combines a Rust workspace with a JavaScript/React
-browser shell, Vite, and Bun. Resolve the stack again when that changes rather
+browser shell, Vite, Bun, and Playwright. Resolve the stack again when that changes rather
 than treating this description as a fixed policy selection.
 
 ## Domain ownership
@@ -49,14 +49,24 @@ cargo fmt --all -- --check
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 cargo test --locked --workspace --all-features
 cd web
+bun run format:check
+bun run lint
 bun run test
+bun run setup
 bun run build
 bun run test:physics-wasm
+bun run test:browser
 ```
 
-`bun run build` currently acquires pinned browser foundation sources before
-building WASM and Vite output, so it requires network access. The ordinary
+`bun run setup` acquires pinned browser foundation sources and generates WASM,
+so cold setup requires network access. `bun run build` and `bun run dev` use
+prepared inputs without acquiring dependencies. Run `bun run wasm` after Rust
+changes. The ordinary
 browser tests do not require vendored foundations or a running service.
+Install Chromium with `bunx playwright install chromium` before browser workflow
+tests. CI also installs its system dependencies with `--with-deps`. Workflow
+tests own disposable servers and ports and retain failures under ignored
+`web/test-results/`; they do not require public services.
 Generated `web/src/vendor`, `web/src/wasm`, `web/dist`, and `target` are disposable
 and uncommitted. Dependency verification must preserve `Cargo.lock` and
 `web/bun.lock`.

@@ -125,6 +125,21 @@ async function flushMicrotasks() {
 }
 
 describe("game-server WebTransport framing", () => {
+  test("rejects an oversized welcome before buffering arbitrary stream data", async () => {
+    const transport = new FakeTransport(new Uint8Array(47));
+    transport.incomingUnidirectionalStreams = readableChunk(new ReadableStream({ start(controller) { controller.enqueue(new Uint8Array(47)); } }));
+    const session = new DedicatedGameSession({ endpoint: "https://example.test/arpg", transportFactory: () => transport });
+    await expect(session.connect()).rejects.toThrow("Welcome stream exceeds");
+    expect(transport.closedFlag).toBe(true);
+  }, 100);
+
+  test("bounds a handshake that never becomes ready", async () => {
+    const transport = new FakeTransport(welcomeFrame(), { ready: false });
+    const session = new DedicatedGameSession({ endpoint: "https://example.test/arpg", transportFactory: () => transport, connectTimeoutMs: 5 });
+    await expect(session.connect()).rejects.toThrow("timed out");
+    expect(transport.closedFlag).toBe(true);
+  }, 100);
+
   test("encodes commands with the pinned game-server protocol header", () => {
     expect([...encodeGameServerCommand(7, new Uint8Array([1, 2, 3]))]).toEqual([
       3,
@@ -373,7 +388,7 @@ describe("dedicated reconnect contract", () => {
     expect(states).toHaveLength(stateCountAfterResume);
     expect(states.at(-1)).toBe("connected");
 
-    first.datagramController.close();
+    expect(first.closedFlag).toBe(true);
     session.close();
   });
 

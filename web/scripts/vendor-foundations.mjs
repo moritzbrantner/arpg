@@ -1,13 +1,13 @@
-import { createHash } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
+import { lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const INPUT_REV = "b3b7204faa47d3b0af56eebc55cdfd4ced127ddc";
-const SETUP_REV = "556f1aa2ac889acffd5b2b27163fca10f1901793";
+const SETUP_REV = "a8064298182c71267a453071f923d9e0640afdcf";
 
-const files = [
+export const FOUNDATION_FILES = [
   ["moritzbrantner/input-bindings", INPUT_REV, "packages/input-bindings/src/index.ts", "14b7e1c361d920d9d6367b9c72ab835ba931d573", "src/vendor/input-bindings/packages/input-bindings/src/index.ts"],
   ["moritzbrantner/input-bindings", INPUT_REV, "packages/input-bindings/src/public.ts", "d5a1a8956116ee4b938d680cbee81bbc10a2ee7f", "src/vendor/input-bindings/packages/input-bindings/src/public.ts"],
   ["moritzbrantner/input-bindings", INPUT_REV, "packages/input-bindings/src/registry.ts", "e228b665b7304b7cec6775669010783dfa755fc9", "src/vendor/input-bindings/packages/input-bindings/src/registry.ts"],
@@ -17,7 +17,7 @@ const files = [
   ["moritzbrantner/input-bindings", INPUT_REV, "packages/input-bindings-react/src/keyboard.ts", "cd13da916f954cdd67a758b34983e570feb65076", "src/vendor/input-bindings/packages/input-bindings-react/src/keyboard.ts"],
   ["moritzbrantner/input-bindings", INPUT_REV, "packages/input-bindings-react/src/model.ts", "e15efa03596e56eee8b0d5f03978e6e108fae66f", "src/vendor/input-bindings/packages/input-bindings-react/src/model.ts"],
   ["moritzbrantner/input-bindings", INPUT_REV, "packages/input-bindings-react/src/styles.css", "c0cbe97eb5fdac6a6029ee389aea51e10a9b67a1", "src/vendor/input-bindings/packages/input-bindings-react/src/styles.css"],
-  ["moritzbrantner/multiplayer-setup-service", SETUP_REV, "web/resilient-lobby-session.js", "2a047238640bc82cfa3a9fd7108a5893e31567ef", "src/vendor/multiplayer-setup-service/resilient-lobby-session.js"],
+  ["moritzbrantner/multiplayer-setup-service", SETUP_REV, "web/resilient-lobby-session.ts", "eadc267a846ff8cdff721de503bcf259b796889e", "src/vendor/multiplayer-setup-service/resilient-lobby-session.ts"],
 ];
 
 function gitBlobSha(bytes) {
@@ -25,18 +25,67 @@ function gitBlobSha(bytes) {
   return createHash("sha1").update(header).update(bytes).digest("hex");
 }
 
-for (const [repository, revision, source, expectedSha, destination] of files) {
-  const url = `https://raw.githubusercontent.com/${repository}/${revision}/${source}`;
-  const response = await fetch(url, { redirect: "error" });
-  if (!response.ok) throw new Error(`Could not vendor ${source}: ${response.status}`);
-  const bytes = Buffer.from(await response.arrayBuffer());
-  const actualSha = gitBlobSha(bytes);
-  if (actualSha !== expectedSha) {
-    throw new Error(`Pinned blob mismatch for ${source}: expected ${expectedSha}, got ${actualSha}`);
+export async function vendorFoundations({
+  outputRoot = root,
+  files = FOUNDATION_FILES,
+  fetchSource = fetch,
+  timeoutMs = 15_000,
+} = {}) {
+  const changes = [];
+  for (const [repository, revision, source, expectedSha, destination] of files) {
+    const target = resolve(outputRoot, destination);
+    const targetRelative = relative(outputRoot, target);
+    if (!targetRelative || isAbsolute(targetRelative) || targetRelative.startsWith("..")) {
+      throw new Error(`Foundation destination escapes output root: ${destination}`);
+    }
+    let inspected = resolve(outputRoot);
+    for (const fragment of ["", ...targetRelative.split(sep)]) {
+      inspected = resolve(inspected, fragment);
+      try {
+        if ((await lstat(inspected)).isSymbolicLink()) throw new Error(`Foundation destination crosses a symlink: ${destination}`);
+      } catch (error) {
+        if (error.code === "ENOENT") break;
+        throw error;
+      }
+    }
+    let previous = null;
+    try {
+      previous = await readFile(target);
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+    if (previous && gitBlobSha(previous) === expectedSha) {
+      changes.push({ destination, status: "unchanged" });
+      continue;
+    }
+    const url = `https://raw.githubusercontent.com/${repository}/${revision}/${source}`;
+    const response = await fetchSource(url, {
+      redirect: "error",
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!response.ok) throw new Error(`Could not vendor ${source}: ${response.status}`);
+    const bytes = Buffer.from(await response.arrayBuffer());
+    const actualSha = gitBlobSha(bytes);
+    if (actualSha !== expectedSha) {
+      throw new Error(`Pinned blob mismatch for ${source}: expected ${expectedSha}, got ${actualSha}`);
+    }
+    await mkdir(dirname(target), { recursive: true });
+    const temporary = `${target}.${randomUUID()}.tmp`;
+    try {
+      await writeFile(temporary, bytes, { flag: "wx" });
+      await rename(temporary, target);
+    } finally {
+      await rm(temporary, { force: true });
+    }
+    changes.push({ destination, status: previous ? "changed" : "created" });
   }
-  const target = resolve(root, destination);
-  await mkdir(dirname(target), { recursive: true });
-  await writeFile(target, bytes);
+  return changes;
 }
 
-console.log(`Vendored input-bindings ${INPUT_REV} and multiplayer-setup-service ${SETUP_REV}`);
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const files = await vendorFoundations();
+  console.log(JSON.stringify({
+    status: files.every((file) => file.status === "unchanged") ? "unchanged" : "changed",
+    files,
+  }));
+}

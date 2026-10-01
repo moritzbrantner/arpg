@@ -1,14 +1,21 @@
-import { StrictMode, useEffect, useMemo, useRef, useState } from "react";
+import { StrictMode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import * as THREE from "three";
 import { createThreeSceneRenderer } from "@moritzbrantner/three-d-renderer";
+import { validateRegistry } from "@moritzbrantner/input-bindings";
+import { decodeSnapshot, encodeCommand } from "./wire-protocol.js";
+import { createSnapshotStore } from "./snapshot-store.js";
+import { PlayerHud, CombatActions, TrainingDiagnostics, TrainingTick, GameSummary } from "./snapshot-views.jsx";
+import { SettingsDialog } from "./settings-dialog.jsx";
+import { PROFILE_KEY, SETUP_URL_KEY, DEDICATED_URL_KEY, GRAPHICS_KEY, loadProfile, loadGraphics, readStoredValue, persistStoredValue } from "./preferences.js";
 import { InputRuntimeController } from "@moritzbrantner/input-bindings-runtime";
 import { attachKeyboardRuntime } from "@moritzbrantner/input-bindings-web";
 import { KeybindingEditor } from "@moritzbrantner/input-bindings-react";
 import "@moritzbrantner/input-bindings-react/styles.css";
 import initWasm, { WasmGame } from "./wasm/arpg_web_wasm.js";
+import { attachPeerGameSession } from "./peer-session.js";
 import { DedicatedGameSession } from "./dedicated-session.js";
-import { ResilientLobbySession } from "./vendor/multiplayer-setup-service/resilient-lobby-session.js";
+import { ResilientLobbySession } from "./vendor/multiplayer-setup-service/resilient-lobby-session.ts";
 import { sampleVirtualStick } from "./virtual-stick.js";
 import {
   CHARACTER_PRESETS,
@@ -26,11 +33,7 @@ import {
 } from "./training-arena.js";
 import "./styles.css";
 
-const PROFILE_KEY = "arpg-input-profile-v1";
-const SETUP_URL_KEY = "arpg-setup-service-url-v1";
-const DEDICATED_URL_KEY = "arpg-dedicated-url-v1";
-const GRAPHICS_KEY = "arpg-graphics-v1";
-const PROTOCOL_VERSION = 6;
+
 const gameplayContext = { op: "context", id: "gameplay" };
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
@@ -75,32 +78,6 @@ const inputRegistry = {
     ]),
 };
 
-function loadProfile() {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(PROFILE_KEY) ?? "null");
-    if (parsed && typeof parsed.id === "string" && Array.isArray(parsed.patches)) return parsed;
-  } catch {
-    // Invalid local profile state falls back to authoritative defaults.
-  }
-  return { id: "arpg-player", patches: [] };
-}
-
-function loadGraphics() {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(GRAPHICS_KEY) ?? "null");
-    if (
-      parsed &&
-      typeof parsed.shadows === "boolean" &&
-      Number.isFinite(parsed.pixelRatioLimit)
-    ) {
-      return parsed;
-    }
-  } catch {
-    // Invalid local presentation settings fall back to known-safe defaults.
-  }
-  return { shadows: true, pixelRatioLimit: 2 };
-}
-
 function freshRunSeed() {
   const values = new Uint32Array(1);
   globalThis.crypto.getRandomValues(values);
@@ -109,18 +86,6 @@ function freshRunSeed() {
 
 function requestedRunSeed() {
   return parseRunSeed(new URLSearchParams(location.search).get("seed"));
-}
-
-function encodeCommand(payload) {
-  return JSON.stringify({ protocolVersion: PROTOCOL_VERSION, payload });
-}
-
-function decodeSnapshot(encoded) {
-  const envelope = JSON.parse(encoded);
-  if (envelope?.protocolVersion !== PROTOCOL_VERSION || !envelope.payload) {
-    throw new Error("Unsupported or malformed ARPG snapshot");
-  }
-  return envelope.payload;
 }
 
 function segmentIntersectsRect(startX, startZ, endX, endZ, minX, maxX, minZ, maxZ) {
@@ -358,21 +323,22 @@ function buildFrame(snapshot, focusPlayerId, width, height, focusPlayerAccent = 
 
 function App() {
   const canvasRef = useRef(null);
-  const rendererRef = useRef(null);
+  const settingsTriggerRef = useRef(null);
   const gameRef = useRef(null);
   const modeRef = useRef("local");
   const sessionRef = useRef(null);
   const dedicatedSessionRef = useRef(null);
-  const peerPlayersRef = useRef(new Map());
+  const peerDetachRef = useRef(null);
   const sequenceRef = useRef(0);
   const touchStickRef = useRef(null);
   const touchKnobRef = useRef(null);
   const touchPointerIdRef = useRef(null);
-  const initialTrainingRef = useRef(readTrainingRequest(location.search));
-  const initialRunSeedRef = useRef(
-    requestedRunSeed() ??
-      (initialTrainingRef.current.requested ? initialTrainingRef.current.seed : freshRunSeed()),
-  );
+  const [initialRequest] = useState(() => {
+    const training = readTrainingRequest(location.search);
+    return { training, seed: requestedRunSeed() ?? (training.requested ? training.seed : freshRunSeed()) };
+  });
+  const initialTrainingRef = useRef(initialRequest.training);
+  const initialRunSeedRef = useRef(initialRequest.seed);
   const trainingClockCarryRef = useRef(0);
   const movementRef = useRef({
     forward: false,
@@ -384,31 +350,34 @@ function App() {
     lastX: 0,
     lastZ: 0,
   });
+  const [authorityGeneration, setAuthorityGeneration] = useState(0);
   const [ready, setReady] = useState(false);
   const [mode, setMode] = useState("local");
-  const [snapshot, setSnapshot] = useState(null);
+  const [snapshotStore] = useState(createSnapshotStore);
+  const setSnapshot = snapshotStore.publish;
+  const currentPlayer = () => snapshotStore.getSnapshot()?.players.find((player) => player.id === playerId) ?? null;
   const [playerId, setPlayerId] = useState(1);
-  const [status, setStatus] = useState("Loading Rust simulation…");
+  const [status, setStatus] = useState("Loading game…");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [inWorld, setInWorld] = useState(false);
   const [scenario, setScenario] = useState(
-    initialTrainingRef.current.requested ? "training" : "adventure",
+    initialRequest.training.requested ? "training" : "adventure",
   );
   const [trainingPaused, setTrainingPaused] = useState(false);
   const [trainingSpeed, setTrainingSpeed] = useState(1);
   const [trainingSeedDraft, setTrainingSeedDraft] = useState(
-    String(initialTrainingRef.current.seed),
+    String(initialRequest.training.seed),
   );
   const [selectedCharacterId, setSelectedCharacterId] = useState(() =>
-    loadSelectedCharacterId(localStorage),
+    loadSelectedCharacterId(),
   );
-  const [profile, setProfile] = useState(loadProfile);
+  const [profile, setProfile] = useState(() => loadProfile((profile) => validateRegistry(inputRegistry, profile).valid));
   const [graphics, setGraphics] = useState(loadGraphics);
   const [setupUrl, setSetupUrl] = useState(
-    () => localStorage.getItem(SETUP_URL_KEY) ?? "http://127.0.0.1:8787",
+    () => readStoredValue(SETUP_URL_KEY, "http://127.0.0.1:8787"),
   );
   const [dedicatedUrl, setDedicatedUrl] = useState(
-    () => localStorage.getItem(DEDICATED_URL_KEY) ?? "https://127.0.0.1:4433/arpg",
+    () => readStoredValue(DEDICATED_URL_KEY, "https://127.0.0.1:4433/arpg"),
   );
   const [lobbyCode, setLobbyCode] = useState("");
   const [joinCode, setJoinCode] = useState(
@@ -419,20 +388,12 @@ function App() {
     () => resolveCharacter(selectedCharacterId),
     [selectedCharacterId],
   );
-  const player = useMemo(
-    () => snapshot?.players.find((candidate) => candidate.id === playerId) ?? null,
-    [snapshot, playerId],
-  );
-  const healthPercent = player?.maxHealth
-    ? Math.max(0, Math.min(100, (player.health / player.maxHealth) * 100))
-    : 0;
-
   const setModeValue = (next) => {
     modeRef.current = next;
     setMode(next);
   };
 
-  const resetMovement = () => {
+  const resetMovement = useCallback(() => {
     touchPointerIdRef.current = null;
     if (touchKnobRef.current) {
       touchKnobRef.current.style.transform = "translate3d(0px, 0px, 0)";
@@ -447,39 +408,42 @@ function App() {
       lastX: 0,
       lastZ: 0,
     };
-  };
+  }, []);
 
-  const updateSnapshotFromGame = () => {
+  const updateSnapshotFromGame = useCallback(() => {
     if (!gameRef.current) return;
     const encoded = gameRef.current.snapshotJson();
     setSnapshot(decodeSnapshot(encoded));
     if (modeRef.current === "host") {
       sessionRef.current?.broadcastRealtime({ kind: "snapshot", encoded });
     }
-  };
+  }, [setSnapshot]);
 
-  const createAuthority = (runSeed = freshRunSeed()) => {
+  const createAuthority = useCallback((runSeed = freshRunSeed()) => {
     gameRef.current?.free?.();
     const game = new WasmGame(runSeed);
     game.addPlayer(1);
     gameRef.current = game;
+    setAuthorityGeneration((generation) => generation + 1);
     sequenceRef.current = 0;
-    peerPlayersRef.current.clear();
     resetMovement();
     setPlayerId(1);
     updateSnapshotFromGame();
-  };
+  }, [resetMovement, updateSnapshotFromGame, setPlayerId, setAuthorityGeneration]);
 
-  const closeSession = () => {
-    sessionRef.current?.close();
+  const closeSession = useCallback(() => {
+    peerDetachRef.current?.();
+    peerDetachRef.current = null;
+    const peer = sessionRef.current;
+    const dedicated = dedicatedSessionRef.current;
     sessionRef.current = null;
-    dedicatedSessionRef.current?.close();
     dedicatedSessionRef.current = null;
-    peerPlayersRef.current.clear();
+    peer?.close();
+    dedicated?.close();
     setLobbyCode("");
-  };
+  }, []);
 
-  const dispatchCommand = (command) => {
+  const dispatchCommand = useCallback((command) => {
     const sequence = ++sequenceRef.current;
     const encoded = encodeCommand(command);
     try {
@@ -503,9 +467,9 @@ function App() {
     } catch (error) {
       setStatus(String(error));
     }
-  };
+  }, [playerId]);
 
-  const flushMovement = () => {
+  const flushMovement = useCallback(() => {
     const movement = movementRef.current;
     const keyboardX = Number(movement.right) - Number(movement.left);
     const keyboardZ = Number(movement.backward) - Number(movement.forward);
@@ -515,9 +479,9 @@ function App() {
     movement.lastX = x;
     movement.lastZ = z;
     dispatchCommand({ type: "setMovement", x, z });
-  };
+  }, [dispatchCommand]);
 
-  const resetTouchStick = () => {
+  const resetTouchStick = useCallback(() => {
     touchPointerIdRef.current = null;
     if (touchKnobRef.current) {
       touchKnobRef.current.style.transform = "translate3d(0px, 0px, 0)";
@@ -527,7 +491,7 @@ function App() {
     movement.touchX = 0;
     movement.touchZ = 0;
     flushMovement();
-  };
+  }, [flushMovement]);
 
   const updateTouchStick = (event) => {
     if (touchPointerIdRef.current !== event.pointerId) return;
@@ -544,7 +508,7 @@ function App() {
   };
 
   const beginTouchStick = (event) => {
-    if (!playerId || !player?.alive || touchPointerIdRef.current !== null) return;
+    if (!playerId || !currentPlayer()?.alive || touchPointerIdRef.current !== null) return;
     event.preventDefault();
     touchPointerIdRef.current = event.pointerId;
     event.currentTarget.setPointerCapture?.(event.pointerId);
@@ -561,69 +525,19 @@ function App() {
   };
 
   const triggerCombatAction = (type) => {
-    if (!playerId || !player?.alive) return;
+    if (!playerId || !currentPlayer()?.alive) return;
     dispatchCommand({ type });
   };
 
   const configureSession = (session, role) => {
-    session.addEventListener("peer-ready", (event) => {
-      const peerId = event.detail.peerId;
-      if (role !== "host") {
-        setStatus("Connected to host; waiting for player assignment…");
-        return;
-      }
-      let assigned = peerPlayersRef.current.get(peerId);
-      if (!assigned) {
-        const used = new Set(peerPlayersRef.current.values());
-        assigned = [2, 3, 4].find((candidate) => !used.has(candidate));
-        if (!assigned) {
-          setStatus("Lobby is full");
-          return;
-        }
-        gameRef.current.addPlayer(assigned);
-        peerPlayersRef.current.set(peerId, assigned);
-      }
-      session.sendReliable(peerId, {
-        kind: "welcome",
-        playerId: assigned,
-        encodedSnapshot: gameRef.current.snapshotJson(),
-      });
-      setStatus(`Peer connected as player ${assigned}`);
-    });
-
-    session.addEventListener("reliable", (event) => {
-      const { peerId, data } = event.detail;
-      if (role === "host" && data?.kind === "command") {
-        const assigned = peerPlayersRef.current.get(peerId);
-        if (!assigned) return;
-        try {
-          gameRef.current.applyCommand(assigned, data.sequence, data.encoded);
-        } catch (error) {
-          setStatus(`Rejected peer command: ${error}`);
-        }
-      } else if (role === "guest" && data?.kind === "welcome") {
-        setPlayerId(data.playerId);
-        setSnapshot(decodeSnapshot(data.encodedSnapshot));
-        setStatus(`Connected as player ${data.playerId}`);
-      }
-    });
-
-    session.addEventListener("realtime", (event) => {
-      if (role !== "guest" || event.detail.data?.kind !== "snapshot") return;
-      setSnapshot(decodeSnapshot(event.detail.data.encoded));
-    });
-
-    session.addEventListener("participant-disconnected", (event) => {
-      if (role !== "host") return;
-      const assigned = peerPlayersRef.current.get(event.detail.participantId);
-      if (!assigned) return;
-      peerPlayersRef.current.delete(event.detail.participantId);
-      gameRef.current?.removePlayer(assigned);
-      setStatus(`Player ${assigned} disconnected`);
-    });
-
-    session.addEventListener("statechange", (event) => {
-      if (event.detail?.state) setStatus(`Network: ${event.detail.state}`);
+    peerDetachRef.current = attachPeerGameSession({
+      session,
+      role,
+      isCurrent: () => sessionRef.current === session,
+      getGame: () => gameRef.current,
+      onPlayer: setPlayerId,
+      onSnapshot: setSnapshot,
+      onStatus: setStatus,
     });
   };
 
@@ -640,7 +554,7 @@ function App() {
       setStatus("Training seed must be an unsigned 32-bit integer");
       return;
     }
-    const selectedId = persistSelectedCharacterId(localStorage, selectedCharacterId);
+    const selectedId = persistSelectedCharacterId(undefined, selectedCharacterId);
     const selected = resolveCharacter(selectedId);
     closeSession();
     createAuthority(seed);
@@ -681,7 +595,7 @@ function App() {
 
   const enterWorld = () => {
     if (!ready) return;
-    const selectedId = persistSelectedCharacterId(localStorage, selectedCharacterId);
+    const selectedId = persistSelectedCharacterId(undefined, selectedCharacterId);
     const selected = resolveCharacter(selectedId);
     closeSession();
     createAuthority(initialRunSeedRef.current ?? freshRunSeed());
@@ -689,7 +603,7 @@ function App() {
     leaveTrainingScenario();
     setModeValue("local");
     setInWorld(true);
-    setStatus(`Local Rust/Wasm authority · ${selected.name}`);
+    setStatus(`Local game · ${selected.name}`);
   };
 
   const returnToCharacters = () => {
@@ -703,7 +617,7 @@ function App() {
     setSettingsOpen(false);
     setInWorld(false);
     leaveTrainingScenario();
-    setStatus("Choose a character to enter the world");
+    setStatus("Select a character");
   };
 
   const startLocal = () => {
@@ -711,7 +625,7 @@ function App() {
     createAuthority();
     leaveTrainingScenario();
     setModeValue("local");
-    setStatus(`Local Rust/Wasm authority · ${selectedCharacter.name}`);
+    setStatus(`Local game · ${selectedCharacter.name}`);
   };
 
   const startDedicated = async () => {
@@ -734,12 +648,14 @@ function App() {
     try {
       await session.connect({
         onWelcome: (welcome) => {
+          if (dedicatedSessionRef.current !== session) return;
           setPlayerId(welcome.playerId);
           setStatus(
             `Dedicated authority · player ${welcome.playerId} · ${welcome.tickHz} Hz`,
           );
         },
         onSnapshot: (frame) => {
+          if (dedicatedSessionRef.current !== session) return;
           try {
             setSnapshot(decodeSnapshot(textDecoder.decode(frame.payload)));
           } catch (error) {
@@ -748,41 +664,51 @@ function App() {
           }
         },
         onStateChange: (state) => {
+          if (dedicatedSessionRef.current !== session) return;
           if (state === "connecting") setStatus("Connecting to dedicated authority…");
           if (state === "disconnected") {
             setPlayerId(null);
             setStatus("Dedicated authority disconnected");
           }
         },
-        onError: (error) => setStatus(`Dedicated transport error: ${error}`),
+        onError: (error) => {
+          if (dedicatedSessionRef.current === session) setStatus(`Dedicated transport error: ${error}`);
+        },
       });
     } catch (error) {
-      if (dedicatedSessionRef.current === session) dedicatedSessionRef.current = null;
+      if (dedicatedSessionRef.current !== session) return;
+      dedicatedSessionRef.current = null;
       setStatus(`Could not connect dedicated server: ${error}`);
     }
   };
 
   const hostPeerGame = async () => {
+    let session;
     try {
       closeSession();
       createAuthority();
       leaveTrainingScenario();
-      const session = new ResilientLobbySession({
+      session = new ResilientLobbySession({
         apiBase: setupUrl,
         topology: "host",
       });
       configureSession(session, "host");
       sessionRef.current = session;
       const lobby = await session.host(4);
+      if (sessionRef.current !== session) return;
       setModeValue("host");
       setLobbyCode(lobby.displayCode);
       setStatus(`Hosting lobby ${lobby.displayCode}`);
     } catch (error) {
+      if (sessionRef.current !== session) return;
+      closeSession();
+      setModeValue("local");
       setStatus(`Could not host: ${error}`);
     }
   };
 
   const joinPeerGame = async () => {
+    let session;
     try {
       closeSession();
       gameRef.current?.free?.();
@@ -792,16 +718,20 @@ function App() {
       setSnapshot(null);
       setPlayerId(null);
       leaveTrainingScenario();
-      const session = new ResilientLobbySession({
+      session = new ResilientLobbySession({
         apiBase: setupUrl,
         topology: "host",
       });
       configureSession(session, "guest");
       sessionRef.current = session;
+      setModeValue("guest");
       await session.join(joinCode);
+      if (sessionRef.current !== session) return;
       setModeValue("guest");
       setStatus(`Joined lobby ${joinCode}; establishing host channel…`);
     } catch (error) {
+      if (sessionRef.current !== session) return;
+      closeSession();
       setStatus(`Could not join: ${error}`);
     }
   };
@@ -814,7 +744,6 @@ function App() {
         setReady(true);
         if (initialTrainingRef.current.requested) {
           const seed = initialRunSeedRef.current ?? DEFAULT_TRAINING_SEED;
-          const selected = resolveCharacter(selectedCharacterId);
           createAuthority(seed);
           initialRunSeedRef.current = null;
           trainingClockCarryRef.current = 0;
@@ -825,21 +754,22 @@ function App() {
           setModeValue("local");
           setInWorld(true);
           history.replaceState(null, "", withTrainingRequest(location.href, true, seed));
-          setStatus(`Training arena · ${selected.name}`);
+          setStatus("Training arena");
         } else {
-          setStatus("Choose a character to enter the world");
+          setStatus("Select a character");
         }
       })
-      .catch((error) => setStatus(`Wasm failed: ${error}`));
+      .catch((error) => { if (!cancelled) setStatus(`Wasm failed: ${error}`); });
     return () => {
       cancelled = true;
       closeSession();
       gameRef.current?.free?.();
+      gameRef.current = null;
     };
-  }, []);
+  }, [closeSession, createAuthority]);
 
   useEffect(() => {
-    if (!ready || !inWorld) return undefined;
+    if (!ready || !inWorld || mode === "guest" || mode === "dedicated") return undefined;
     const timer = setInterval(() => {
       if (
         modeRef.current === "guest" ||
@@ -864,11 +794,12 @@ function App() {
         }
         updateSnapshotFromGame();
       } catch (error) {
+        clearInterval(timer);
         setStatus(`Simulation stopped: ${error}`);
       }
     }, 1000 / 60);
     return () => clearInterval(timer);
-  }, [ready, inWorld, scenario, trainingPaused, trainingSpeed]);
+  }, [ready, inWorld, scenario, trainingPaused, trainingSpeed, updateSnapshotFromGame, authorityGeneration, mode]);
 
   useEffect(() => {
     if (!inWorld || !canvasRef.current) return undefined;
@@ -877,35 +808,32 @@ function App() {
       shadows: graphics.shadows,
       pixelRatioLimit: graphics.pixelRatioLimit,
     });
-    rendererRef.current = renderer;
+    const render = () => {
+      const canvas = canvasRef.current;
+      const snapshot = snapshotStore.getSnapshot();
+      if (!canvas || !snapshot) return;
+      const rect = canvas.getBoundingClientRect();
+      renderer.render(buildFrame(snapshot, playerId, rect.width, rect.height, selectedCharacter.accent));
+    };
     const resize = () => {
       const rect = canvasRef.current.getBoundingClientRect();
       renderer.setSize(rect.width, rect.height, devicePixelRatio);
-      if (snapshot) {
-        renderer.render(buildFrame(snapshot, playerId, rect.width, rect.height, selectedCharacter.accent));
-      }
+      render();
     };
+    const unsubscribe = snapshotStore.subscribe(render);
     const observer = new ResizeObserver(resize);
     observer.observe(canvasRef.current);
     resize();
     return () => {
+      unsubscribe();
       observer.disconnect();
       renderer.dispose();
-      rendererRef.current = null;
     };
-  }, [graphics.shadows, graphics.pixelRatioLimit, inWorld, selectedCharacter.accent]);
-
-  useEffect(() => {
-    const renderer = rendererRef.current;
-    const canvas = canvasRef.current;
-    if (!renderer || !canvas || !snapshot) return;
-    const rect = canvas.getBoundingClientRect();
-    renderer.render(buildFrame(snapshot, playerId, rect.width, rect.height, selectedCharacter.accent));
-  }, [snapshot, playerId, selectedCharacter.accent]);
+  }, [graphics.shadows, graphics.pixelRatioLimit, inWorld, selectedCharacter.accent, playerId, snapshotStore]);
 
   useEffect(() => {
     if (settingsOpen) resetTouchStick();
-  }, [settingsOpen]);
+  }, [settingsOpen, resetTouchStick]);
 
   useEffect(() => {
     if (!ready || !inWorld) return undefined;
@@ -946,37 +874,41 @@ function App() {
       stopPropagation: true,
     });
     return detach;
-  }, [ready, inWorld, profile, settingsOpen, mode, playerId]);
+  }, [ready, inWorld, profile, settingsOpen, mode, playerId, dispatchCommand, flushMovement]);
 
   const updateProfile = (next) => {
-    localStorage.setItem(PROFILE_KEY, JSON.stringify(next));
+    if (!persistStoredValue(PROFILE_KEY, JSON.stringify(next))) setStatus("Controls updated for this session; browser storage is unavailable");
     setProfile(next);
   };
 
   const updateGraphics = (next) => {
-    localStorage.setItem(GRAPHICS_KEY, JSON.stringify(next));
+    if (!persistStoredValue(GRAPHICS_KEY, JSON.stringify(next))) setStatus("Graphics updated for this session; browser storage is unavailable");
     setGraphics(next);
   };
 
   const updateSetupUrl = (value) => {
     setSetupUrl(value);
-    localStorage.setItem(SETUP_URL_KEY, value);
+    if (!persistStoredValue(SETUP_URL_KEY, value)) setStatus("Endpoint updated for this session; browser storage is unavailable");
   };
 
   const updateDedicatedUrl = (value) => {
     setDedicatedUrl(value);
-    localStorage.setItem(DEDICATED_URL_KEY, value);
+    if (!persistStoredValue(DEDICATED_URL_KEY, value)) setStatus("Endpoint updated for this session; browser storage is unavailable");
   };
 
   const selectCharacter = (characterId) => {
-    setSelectedCharacterId(persistSelectedCharacterId(localStorage, characterId));
+    setSelectedCharacterId(persistSelectedCharacterId(undefined, characterId));
   };
 
   const copyInvite = async () => {
     const url = new URL(location.pathname, location.origin);
     url.searchParams.set("join", lobbyCode);
-    await navigator.clipboard.writeText(url.toString());
-    setStatus("Invite URL copied with public lobby code only");
+    try {
+      await navigator.clipboard.writeText(url.toString());
+      setStatus("Invite URL copied");
+    } catch (error) {
+      setStatus(`Could not copy invite: ${error}`);
+    }
   };
 
   const modeLabel =
@@ -990,13 +922,6 @@ function App() {
             ? "Peer guest"
             : "Dedicated online";
 
-  const aliveMonsterCount = snapshot?.monsters.filter((monster) => monster.alive).length ?? 0;
-  const actingMonsterCount =
-    snapshot?.monsters.filter((monster) => monster.alive && monster.action).length ?? 0;
-  const playerActionLabel = player?.action
-    ? `${player.action.kind} · ${player.action.phase} · ${player.action.ticksRemaining}t`
-    : "idle";
-
   if (!inWorld) {
     return (
       <main className="character-select-shell" aria-label="Character selection">
@@ -1004,13 +929,9 @@ function App() {
         <header className="character-select-header">
           <div>
             <span className="character-select-eyebrow">ARPG</span>
-            <h1>Choose your character</h1>
-            <p>Select an adventurer, then enter the world.</p>
+            <h1 className="visually-hidden">Character selection</h1>
           </div>
-          <div className="realm-chip" aria-label="Current realm">
-            <span>Realm</span>
-            <strong>Local Realm</strong>
-          </div>
+
         </header>
 
         <div className="character-select-layout">
@@ -1077,7 +998,7 @@ function App() {
 
         <footer className="character-select-footer">
           <span className="character-select-status">
-            {ready ? "World runtime ready" : status}
+            {ready ? "Ready" : status}
           </span>
           <button
             type="button"
@@ -1105,14 +1026,14 @@ function App() {
       <canvas ref={canvasRef} className="game-canvas" aria-label="ARPG game world" />
       <header className="game-header">
         <div>
-          <strong>ARPG foundation MVP</strong>
+          <strong>ARPG</strong>
           <span>{modeLabel}</span>
         </div>
         <div className="game-header-actions">
           <button type="button" onClick={returnToCharacters}>
             Characters
           </button>
-          <button type="button" onClick={() => setSettingsOpen(true)}>
+          <button ref={settingsTriggerRef} type="button" onClick={() => setSettingsOpen(true)}>
             Settings
           </button>
         </div>
@@ -1122,7 +1043,7 @@ function App() {
         <aside className="training-panel" aria-label="Training arena controls">
           <header>
             <strong>Training arena</strong>
-            <span>Tick {snapshot?.tick ?? 0}</span>
+            <TrainingTick store={snapshotStore} />
           </header>
 
           <div className="training-actions">
@@ -1179,58 +1100,11 @@ function App() {
             </button>
           </div>
 
-          <dl className="training-diagnostics">
-            <div>
-              <dt>Monsters</dt>
-              <dd>
-                {aliveMonsterCount}/{snapshot?.monsters.length ?? 0}
-              </dd>
-            </div>
-            <div>
-              <dt>Enemy actions</dt>
-              <dd>{actingMonsterCount}</dd>
-            </div>
-            <div>
-              <dt>Player action</dt>
-              <dd>{playerActionLabel}</dd>
-            </div>
-          </dl>
+          <TrainingDiagnostics store={snapshotStore} playerId={playerId} />
         </aside>
       )}
 
-      <section className="hud" aria-label="Player status">
-        <div className="health">
-          <span style={{ width: `${healthPercent}%` }} />
-        </div>
-        {player && (
-          <div className="progression" aria-label="Character progression">
-            <strong>Level {player.level}</strong>
-            <span>
-              XP {player.experienceIntoLevel}/{player.experienceForNextLevel}
-            </span>
-            <span>Damage {player.attackDamage}</span>
-            <span>Gold {player.gold}</span>
-          </div>
-        )}
-        <p>{status}</p>
-        {player && !player.alive && <p className="defeated-status">Defeated</p>}
-        {player?.action && (
-          <p className="action-status">
-            {player.action.kind === "secondaryAttack"
-              ? "Heavy"
-              : player.action.kind === "interact"
-                ? "Interact"
-                : "Primary"}{" "}
-            · {player.action.phase} · {player.action.ticksRemaining}t
-          </p>
-        )}
-        <p className="desktop-controls-hint">
-          WASD move · Space primary · Q heavy · E interact · Esc settings
-        </p>
-        <p className="mobile-controls-hint">
-          Left stick to move · Attack / Heavy / Interact on the right
-        </p>
-      </section>
+      <PlayerHud store={snapshotStore} playerId={playerId} status={status} />
 
       {ready && !settingsOpen && (
         <section className="mobile-controls" aria-label="Touch controls">
@@ -1239,7 +1113,7 @@ function App() {
             className="virtual-stick"
             role="group"
             aria-label="Movement joystick"
-            aria-disabled={!playerId || !player?.alive}
+            aria-disabled={!playerId}
             onPointerDown={beginTouchStick}
             onPointerMove={updateTouchStick}
             onPointerUp={endTouchStick}
@@ -1253,86 +1127,23 @@ function App() {
       )}
 
       {ready && !settingsOpen && (
-        <section className="combat-actions" aria-label="Combat actions">
-          <button
-            type="button"
-            className={`combat-action combat-action-primary ${
-              player?.action?.kind === "primaryAttack" ? "is-committed" : ""
-            }`}
-            data-phase={player?.action?.kind === "primaryAttack" ? player.action.phase : undefined}
-            aria-label="Primary attack"
-            disabled={!playerId || !player?.alive || Boolean(player?.action)}
-            onPointerDown={(event) => {
-              event.preventDefault();
-              triggerCombatAction("primaryAttack");
-            }}
-          >
-            <strong>Attack</strong>
-            <span>Space</span>
-          </button>
-          <button
-            type="button"
-            className={`combat-action combat-action-secondary ${
-              player?.action?.kind === "secondaryAttack" ? "is-committed" : ""
-            }`}
-            data-phase={player?.action?.kind === "secondaryAttack" ? player.action.phase : undefined}
-            aria-label="Heavy attack"
-            disabled={!playerId || !player?.alive || Boolean(player?.action)}
-            onPointerDown={(event) => {
-              event.preventDefault();
-              triggerCombatAction("secondaryAttack");
-            }}
-          >
-            <strong>Heavy</strong>
-            <span>Q</span>
-          </button>
-          <button
-            type="button"
-            className={`combat-action combat-action-interact ${
-              player?.action?.kind === "interact" ? "is-committed" : ""
-            }`}
-            data-phase={player?.action?.kind === "interact" ? player.action.phase : undefined}
-            aria-label="Interact or pick up"
-            disabled={!playerId || !player?.alive || Boolean(player?.action)}
-            onPointerDown={(event) => {
-              event.preventDefault();
-              triggerCombatAction("interact");
-            }}
-          >
-            <strong>Interact</strong>
-            <span>E</span>
-          </button>
-        </section>
+        <CombatActions store={snapshotStore} playerId={playerId} triggerCombatAction={triggerCombatAction} />
       )}
 
       {settingsOpen && (
-        <div
-          className="settings-backdrop"
-          role="presentation"
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget) setSettingsOpen(false);
-          }}
-        >
-          <aside className="settings-panel" aria-label="Settings menu">
+        <SettingsDialog onClose={() => setSettingsOpen(false)} returnFocusTo={settingsTriggerRef}>
             <header>
               <div>
-                <h1>Settings</h1>
-                <p>
-                  Shared foundations are configured here rather than in the renderer or simulation.
-                </p>
+                <h1 id="settings-heading">Settings</h1>
               </div>
-              <button type="button" onClick={() => setSettingsOpen(false)}>
+              <button type="button" autoFocus onClick={() => setSettingsOpen(false)}>
                 Close
               </button>
             </header>
 
             <section>
               <h2>Game</h2>
-              <p>
-                Current mode: <strong>{mode}</strong>
-                {playerId ? ` · player ${playerId}` : ""}
-                {snapshot ? ` · run seed ${snapshot.runSeed}` : ""}
-              </p>
+              <GameSummary store={snapshotStore} mode={mode} playerId={playerId} />
               <button type="button" onClick={startLocal}>
                 Start local game
               </button>
@@ -1355,11 +1166,7 @@ function App() {
               >
                 Connect dedicated server
               </button>
-              <p className="settings-note">
-                The shared game-server owns admission, ticks, reconnect identity, recovery, and
-                snapshot framing. The browser only submits versioned ARPG commands and renders
-                verified authoritative snapshots.
-              </p>
+
             </section>
 
             <section>
@@ -1388,10 +1195,7 @@ function App() {
               <button type="button" onClick={joinPeerGame} disabled={!joinCode.trim()}>
                 Join host
               </button>
-              <p className="settings-note">
-                The setup service handles rendezvous only. Gameplay commands and snapshots use direct
-                WebRTC data channels.
-              </p>
+
             </section>
 
             <section>
@@ -1432,8 +1236,7 @@ function App() {
                 onProfileChange={updateProfile}
               />
             </section>
-          </aside>
-        </div>
+        </SettingsDialog>
       )}
     </main>
   );

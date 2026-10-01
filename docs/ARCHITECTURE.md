@@ -14,6 +14,11 @@
 
 Neither renderer nor network transport may become an alternate source of gameplay truth.
 
+The browser's presentation snapshot boundary and React update ownership are
+documented in [ADR 0001](adr/0001-browser-snapshot-projection.md). Tick-dependent
+views and rendering consume one session-owned snapshot store; menus and shell
+configuration do not subscribe to simulation ticks.
+
 ## Mechanical game-loop foundation
 
 The moment-to-moment ARPG loop is a game-specific foundation, not a late presentation/polish layer.
@@ -77,7 +82,7 @@ Snapshots are typed core values first and encoded only at the protocol boundary.
 
 ## Multiplayer setup service boundary
 
-Browser peer setup should consume the upstream resilient lobby client rather than forking its signaling/reconnect/ICE logic. The accepted initial setup-service revision is `556f1aa2ac889acffd5b2b27163fca10f1901793`.
+Browser peer setup should consume the upstream resilient lobby client rather than forking its signaling/reconnect/ICE logic. The accepted initial setup-service revision is `a8064298182c71267a453071f923d9e0640afdcf`.
 
 When the web shell is introduced, vendor the exact accepted upstream browser source under `web/vendor/multiplayer-setup-service/` with deterministic pin checks, following the same pattern already proven by other game consumers. Use `LobbySession`/`ResilientLobbySession` with `topology: "host"`.
 
