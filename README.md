@@ -58,8 +58,8 @@ Rust validation:
 
 ```sh
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-features
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+cargo test --locked --workspace --all-features
 ```
 
 Browser shell:
@@ -67,7 +67,7 @@ Browser shell:
 ```sh
 cargo install wasm-pack --locked --version 0.13.1
 cd web
-bun install
+bun install --frozen-lockfile
 bun run dev
 ```
 
@@ -83,7 +83,11 @@ ARPG_SERVER_KEY_PEM=key.pem \
 cargo run -p arpg-game-server --bin server
 ```
 
-The dedicated host defaults to UDP port `4433` and session path `/arpg`. Optional configuration is available through `ARPG_SERVER_PORT`, `ARPG_SERVER_SESSION_PATH`, `ARPG_SERVER_RECOVERY_PATH`, and `ARPG_SERVER_DRAIN_GRACE_MS`. A fresh run seed is generated once when the process starts and logged for replay evidence; set `ARPG_RUN_SEED=<u32>` to reproduce a known run exactly. In a browser with WebTransport support, enter the resulting HTTPS endpoint (for example `https://127.0.0.1:4433/arpg`) under **Settings → Dedicated online**. The certificate must be trusted by the browser.
+The dedicated host defaults to UDP port `4433` and session path `/arpg`. Optional configuration is available through `ARPG_SERVER_PORT`, `ARPG_SERVER_SESSION_PATH`, `ARPG_SERVER_RECOVERY_PATH`, and `ARPG_SERVER_DRAIN_GRACE_MS`. See [`.env.example`](.env.example) for the environment contract; export these variables into the server process because the native server does not load dotenv files. Keep local configuration, certificates, private keys, and recovery data uncommitted. A fresh run seed is generated once when the process starts and logged for replay evidence; set `ARPG_RUN_SEED=<u32>` to reproduce a known run exactly. In a browser with WebTransport support, enter the resulting HTTPS endpoint (for example `https://127.0.0.1:4433/arpg`) under **Settings → Dedicated online**. The certificate must be trusted by the browser.
+
+## Repository development policy
+
+[`AGENTS.md`](AGENTS.md) describes how to resolve the live shared coding-agent conventions, the domain ownership boundaries, and the checks used by this repository. Shared policy remains in the central checkout rather than being copied or pinned here.
 
 ## Pinned foundations
 
