@@ -20,7 +20,7 @@
     "@moritzbrantner/three-d-renderer": "github:moritzbrantner/3d-lab#f484db8a3d2a7a555fa463eddf9c28790b240ce0",
     "react": "19.1.1",
     "react-dom": "19.1.1",
-    "three": "0.185.1"
+    "three": "0.186.1"
   },
   "devDependencies": {
     "@playwright/test": "1.63.0",
