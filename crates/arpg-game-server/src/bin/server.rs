@@ -9,35 +9,41 @@ use std::process;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 
+#[path = "server/config.rs"]
+mod config;
+
 const DEFAULT_PORT: u16 = 4433;
 const DEFAULT_DRAIN_GRACE_MS: u64 = 500;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let port = env::var("ARPG_SERVER_PORT")
-        .ok()
-        .and_then(|value| value.parse::<u16>().ok())
-        .unwrap_or(DEFAULT_PORT);
-    let certificate_pem =
-        PathBuf::from(env::var("ARPG_SERVER_CERT_PEM").unwrap_or_else(|_| "cert.pem".to_owned()));
-    let private_key_pem =
-        PathBuf::from(env::var("ARPG_SERVER_KEY_PEM").unwrap_or_else(|_| "key.pem".to_owned()));
-    let session_path = env::var("ARPG_SERVER_SESSION_PATH").unwrap_or_else(|_| "/arpg".to_owned());
-    let recovery_path = env::var("ARPG_SERVER_RECOVERY_PATH")
-        .ok()
-        .map(PathBuf::from);
-    let drain_grace_ms = env::var("ARPG_SERVER_DRAIN_GRACE_MS")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(DEFAULT_DRAIN_GRACE_MS);
+    let port = config::configured_number(
+        "ARPG_SERVER_PORT",
+        environment_value("ARPG_SERVER_PORT")?.as_deref(),
+        DEFAULT_PORT,
+    )?;
+    let certificate_pem = PathBuf::from(
+        environment_value("ARPG_SERVER_CERT_PEM")?.unwrap_or_else(|| "cert.pem".to_owned()),
+    );
+    let private_key_pem = PathBuf::from(
+        environment_value("ARPG_SERVER_KEY_PEM")?.unwrap_or_else(|| "key.pem".to_owned()),
+    );
+    let session_path =
+        environment_value("ARPG_SERVER_SESSION_PATH")?.unwrap_or_else(|| "/arpg".to_owned());
+    let recovery_path = environment_value("ARPG_SERVER_RECOVERY_PATH")?.map(PathBuf::from);
+    let drain_grace_ms = config::configured_number(
+        "ARPG_SERVER_DRAIN_GRACE_MS",
+        environment_value("ARPG_SERVER_DRAIN_GRACE_MS")?.as_deref(),
+        DEFAULT_DRAIN_GRACE_MS,
+    )?;
     let run_seed = selected_run_seed()?;
 
-    eprintln!("ARPG run seed: {run_seed}");
+    eprintln!("event=arpg_server_start run_seed={run_seed}");
     let simulation = GameServerAdapter::new(ArpgGame::new_with_seed(run_seed)?, JsonProtocol);
     let (shutdown_sender, shutdown_receiver) = mpsc::channel(1);
-    install_shutdown_forwarder(shutdown_sender)?;
+    let shutdown_forwarder = install_shutdown_forwarder(shutdown_sender)?;
 
-    serve_with_shutdown(
+    let result = serve_with_shutdown(
         simulation,
         DEFAULT_RECONNECT_GRACE_TICKS,
         WebTransportConfig {
@@ -50,12 +56,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
         },
         shutdown_receiver,
     )
-    .await?;
+    .await;
+    shutdown_forwarder.abort();
+    if let Err(error) = shutdown_forwarder.await
+        && !error.is_cancelled()
+    {
+        return Err(error.into());
+    }
+    result?;
     Ok(())
 }
 
 fn selected_run_seed() -> Result<u32, Box<dyn Error>> {
-    if let Ok(value) = env::var("ARPG_RUN_SEED") {
+    if let Some(value) = environment_value("ARPG_RUN_SEED")? {
         return Ok(value.parse()?);
     }
 
@@ -63,29 +76,54 @@ fn selected_run_seed() -> Result<u32, Box<dyn Error>> {
     Ok((nanos as u32) ^ ((nanos >> 32) as u32) ^ ((nanos >> 64) as u32) ^ process::id())
 }
 
+fn environment_value(name: &str) -> Result<Option<String>, env::VarError> {
+    match env::var(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 #[cfg(unix)]
-fn install_shutdown_forwarder(sender: mpsc::Sender<()>) -> Result<(), Box<dyn Error>> {
+fn install_shutdown_forwarder(
+    sender: mpsc::Sender<()>,
+) -> Result<tokio::task::JoinHandle<()>, Box<dyn Error>> {
     use tokio::signal::unix::{SignalKind, signal};
 
     let mut terminate = signal(SignalKind::terminate())?;
-    tokio::spawn(async move {
+    Ok(tokio::spawn(async move {
         let signal_received = tokio::select! {
-            result = tokio::signal::ctrl_c() => result.is_ok(),
+            result = tokio::signal::ctrl_c() => match result {
+                Ok(()) => true,
+                Err(error) => {
+                    eprintln!("event=shutdown_signal_error error={error:?}");
+                    false
+                }
+            },
             received = terminate.recv() => received.is_some(),
         };
         if signal_received {
-            let _ = sender.send(()).await;
+            // Receiver closure means the serving lifecycle already ended.
+            if sender.send(()).await.is_err() {
+                eprintln!("event=shutdown_receiver_closed");
+            }
         }
-    });
-    Ok(())
+    }))
 }
 
 #[cfg(not(unix))]
-fn install_shutdown_forwarder(sender: mpsc::Sender<()>) -> Result<(), Box<dyn Error>> {
-    tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            let _ = sender.send(()).await;
+fn install_shutdown_forwarder(
+    sender: mpsc::Sender<()>,
+) -> Result<tokio::task::JoinHandle<()>, Box<dyn Error>> {
+    Ok(tokio::spawn(async move {
+        match tokio::signal::ctrl_c().await {
+            Ok(()) => {
+                // Receiver closure means the serving lifecycle already ended.
+                if sender.send(()).await.is_err() {
+                    eprintln!("event=shutdown_receiver_closed");
+                }
+            }
+            Err(error) => eprintln!("event=shutdown_signal_error error={error:?}"),
         }
-    });
-    Ok(())
+    }))
 }
