@@ -129,3 +129,6 @@ arpg-game-server --> game-server --> arpg-core --+ dedicated
 5. Add reconnect/divergence acceptance before treating multiplayer as a product feature.
 
 Do not add event sourcing, distributed read models, a message bus, or a generic game-engine framework merely because multiplayer exists. The simulation hot path stays direct and domain-shaped.
+
+The [application adoption record](conventions-adoption.md) records the audit scope,
+verification evidence, and remaining advisories.
