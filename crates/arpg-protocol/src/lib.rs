@@ -69,10 +69,10 @@ impl WireProtocol<ArpgCommand, ArpgSnapshot> for JsonProtocol {
     }
 }
 
-fn encode<T: Serialize + Clone>(payload: &T) -> Result<Vec<u8>, ProtocolError> {
+fn encode<T: Serialize>(payload: &T) -> Result<Vec<u8>, ProtocolError> {
     serde_json::to_vec(&VersionedPayload {
         protocol_version: PROTOCOL_VERSION,
-        payload: payload.clone(),
+        payload,
     })
     .map_err(|error| ProtocolError::new(format!("encode failed: {error}")))
 }
