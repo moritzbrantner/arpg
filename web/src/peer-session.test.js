@@ -9,15 +9,53 @@ function sessionFixture(role = "guest") {
   const statuses = [];
   const commands = [];
   let current = true;
-  const detach = attachPeerGameSession({ session, role, isCurrent: () => current, getGame: () => ({ addPlayer() {}, snapshotJson: () => "{}", applyCommand: (...args) => commands.push(args) }), onPlayer() {}, onSnapshot: (value) => snapshots.push(value), onStatus: (value) => statuses.push(value) });
-  return { snapshots, statuses, commands, detach, replace() { current = false; }, emit(name, detail) { session.dispatchEvent(new CustomEvent(name, { detail })); } };
+  const detach = attachPeerGameSession({
+    session,
+    role,
+    isCurrent: () => current,
+    getGame: () => ({
+      addPlayer() {},
+      snapshotJson: () => "{}",
+      applyCommand: (...args) => commands.push(args),
+    }),
+    onPlayer() {},
+    onSnapshot: (value) => snapshots.push(value),
+    onStatus: (value) => statuses.push(value),
+  });
+  return {
+    snapshots,
+    statuses,
+    commands,
+    detach,
+    replace() {
+      current = false;
+    },
+    emit(name, detail) {
+      session.dispatchEvent(new CustomEvent(name, { detail }));
+    },
+  };
 }
 
-const snapshot = JSON.stringify({ protocolVersion: 6, payload: { tick: 1, runSeed: 42, worldUnitsPerMeter: 100, players: [], monsters: [], rooms: [], staticColliders: [], groundLoot: [] } });
+const snapshot = JSON.stringify({
+  protocolVersion: 6,
+  payload: {
+    tick: 1,
+    runSeed: 42,
+    worldUnitsPerMeter: 100,
+    players: [],
+    monsters: [],
+    rooms: [],
+    staticColliders: [],
+    groundLoot: [],
+  },
+});
 
 test("guests accept presentation snapshots only from the current host", () => {
   const fixture = sessionFixture();
-  fixture.emit("realtime", { peerId: "other-guest", data: { kind: "snapshot", encoded: snapshot } });
+  fixture.emit("realtime", {
+    peerId: "other-guest",
+    data: { kind: "snapshot", encoded: snapshot },
+  });
   expect(fixture.snapshots).toHaveLength(0);
   fixture.emit("realtime", { peerId: "host", data: { kind: "snapshot", encoded: snapshot } });
   expect(fixture.snapshots).toHaveLength(1);
@@ -39,8 +77,14 @@ test("malformed packets produce a bounded rejection and detached listeners canno
 test("hosts use their own player assignment and validate command envelopes before WASM coercion", () => {
   const fixture = sessionFixture("host");
   fixture.emit("peer-ready", { peerId: "guest" });
-  fixture.emit("reliable", { peerId: "guest", data: { kind: "command", sequence: 1.5, encoded: "{}" } });
+  fixture.emit("reliable", {
+    peerId: "guest",
+    data: { kind: "command", sequence: 1.5, encoded: "{}" },
+  });
   expect(fixture.commands).toHaveLength(0);
-  fixture.emit("reliable", { peerId: "guest", data: { kind: "command", playerId: 4, sequence: 1, encoded: "{}" } });
+  fixture.emit("reliable", {
+    peerId: "guest",
+    data: { kind: "command", playerId: 4, sequence: 1, encoded: "{}" },
+  });
   expect(fixture.commands).toEqual([[2, 1, "{}"]]);
 });

@@ -25,7 +25,11 @@ export function persistStoredValue(key, value, storage) {
 export function loadGraphics(storage) {
   try {
     const parsed = JSON.parse(readStoredValue(GRAPHICS_KEY, "null", storage));
-    if (parsed && typeof parsed.shadows === "boolean" && [1, 1.5, 2].includes(parsed.pixelRatioLimit)) {
+    if (
+      parsed &&
+      typeof parsed.shadows === "boolean" &&
+      [1, 1.5, 2].includes(parsed.pixelRatioLimit)
+    ) {
       return { shadows: parsed.shadows, pixelRatioLimit: parsed.pixelRatioLimit };
     }
   } catch {
@@ -37,7 +41,13 @@ export function loadGraphics(storage) {
 export function loadProfile(validate, storage) {
   try {
     const parsed = JSON.parse(readStoredValue(PROFILE_KEY, "null", storage));
-    if (parsed && typeof parsed.id === "string" && Array.isArray(parsed.patches) && validate(parsed)) return parsed;
+    if (
+      parsed &&
+      typeof parsed.id === "string" &&
+      Array.isArray(parsed.patches) &&
+      validate(parsed)
+    )
+      return parsed;
   } catch {
     // Invalid local profiles fall back to the registry defaults.
   }

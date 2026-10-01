@@ -32,8 +32,7 @@ export const CHARACTER_PRESETS = Object.freeze([
 
 export function resolveCharacter(characterId) {
   return (
-    CHARACTER_PRESETS.find((character) => character.id === characterId) ??
-    CHARACTER_PRESETS[0]
+    CHARACTER_PRESETS.find((character) => character.id === characterId) ?? CHARACTER_PRESETS[0]
   );
 }
 

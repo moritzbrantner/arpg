@@ -5,9 +5,24 @@ import { createThreeSceneRenderer } from "@moritzbrantner/three-d-renderer";
 import { validateRegistry } from "@moritzbrantner/input-bindings";
 import { decodeSnapshot, encodeCommand } from "./wire-protocol.js";
 import { createSnapshotStore } from "./snapshot-store.js";
-import { PlayerHud, CombatActions, TrainingDiagnostics, TrainingTick, GameSummary } from "./snapshot-views.jsx";
+import {
+  PlayerHud,
+  CombatActions,
+  TrainingDiagnostics,
+  TrainingTick,
+  GameSummary,
+} from "./snapshot-views.jsx";
 import { SettingsDialog } from "./settings-dialog.jsx";
-import { PROFILE_KEY, SETUP_URL_KEY, DEDICATED_URL_KEY, GRAPHICS_KEY, loadProfile, loadGraphics, readStoredValue, persistStoredValue } from "./preferences.js";
+import {
+  PROFILE_KEY,
+  SETUP_URL_KEY,
+  DEDICATED_URL_KEY,
+  GRAPHICS_KEY,
+  loadProfile,
+  loadGraphics,
+  readStoredValue,
+  persistStoredValue,
+} from "./preferences.js";
 import { InputRuntimeController } from "@moritzbrantner/input-bindings-runtime";
 import { attachKeyboardRuntime } from "@moritzbrantner/input-bindings-web";
 import { KeybindingEditor } from "@moritzbrantner/input-bindings-react";
@@ -32,7 +47,6 @@ import {
   withTrainingRequest,
 } from "./training-arena.js";
 import "./styles.css";
-
 
 const gameplayContext = { op: "context", id: "gameplay" };
 const textEncoder = new TextEncoder();
@@ -149,9 +163,7 @@ function buildFrame(snapshot, focusPlayerId, width, height, focusPlayerAccent = 
   const scale = snapshot.worldUnitsPerMeter;
   const focus =
     snapshot.players.find((player) => player.id === focusPlayerId) ?? snapshot.players[0];
-  const target = focus
-    ? [focus.position[0] / scale, 0, focus.position[2] / scale]
-    : [0, 0, 0];
+  const target = focus ? [focus.position[0] / scale, 0, focus.position[2] / scale] : [0, 0, 0];
   const aspect = Math.max(1, width) / Math.max(1, height);
   const near = 0.1;
   const far = 100;
@@ -218,7 +230,7 @@ function buildFrame(snapshot, focusPlayerId, width, height, focusPlayerAccent = 
         ? "#45413d"
         : player.reaction?.kind === "hurt"
           ? "#e05a4f"
-          : actionColor ?? (player.id === focusPlayerId ? focusPlayerAccent : "#6f91b6");
+          : (actionColor ?? (player.id === focusPlayerId ? focusPlayerAccent : "#6f91b6"));
       return [
         {
           id: `player-${player.id}`,
@@ -335,7 +347,10 @@ function App() {
   const touchPointerIdRef = useRef(null);
   const [initialRequest] = useState(() => {
     const training = readTrainingRequest(location.search);
-    return { training, seed: requestedRunSeed() ?? (training.requested ? training.seed : freshRunSeed()) };
+    return {
+      training,
+      seed: requestedRunSeed() ?? (training.requested ? training.seed : freshRunSeed()),
+    };
   });
   const initialTrainingRef = useRef(initialRequest.training);
   const initialRunSeedRef = useRef(initialRequest.seed);
@@ -355,7 +370,8 @@ function App() {
   const [mode, setMode] = useState("local");
   const [snapshotStore] = useState(createSnapshotStore);
   const setSnapshot = snapshotStore.publish;
-  const currentPlayer = () => snapshotStore.getSnapshot()?.players.find((player) => player.id === playerId) ?? null;
+  const currentPlayer = () =>
+    snapshotStore.getSnapshot()?.players.find((player) => player.id === playerId) ?? null;
   const [playerId, setPlayerId] = useState(1);
   const [status, setStatus] = useState("Loading game…");
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -365,19 +381,17 @@ function App() {
   );
   const [trainingPaused, setTrainingPaused] = useState(false);
   const [trainingSpeed, setTrainingSpeed] = useState(1);
-  const [trainingSeedDraft, setTrainingSeedDraft] = useState(
-    String(initialRequest.training.seed),
+  const [trainingSeedDraft, setTrainingSeedDraft] = useState(String(initialRequest.training.seed));
+  const [selectedCharacterId, setSelectedCharacterId] = useState(() => loadSelectedCharacterId());
+  const [profile, setProfile] = useState(() =>
+    loadProfile((profile) => validateRegistry(inputRegistry, profile).valid),
   );
-  const [selectedCharacterId, setSelectedCharacterId] = useState(() =>
-    loadSelectedCharacterId(),
-  );
-  const [profile, setProfile] = useState(() => loadProfile((profile) => validateRegistry(inputRegistry, profile).valid));
   const [graphics, setGraphics] = useState(loadGraphics);
-  const [setupUrl, setSetupUrl] = useState(
-    () => readStoredValue(SETUP_URL_KEY, "http://127.0.0.1:8787"),
+  const [setupUrl, setSetupUrl] = useState(() =>
+    readStoredValue(SETUP_URL_KEY, "http://127.0.0.1:8787"),
   );
-  const [dedicatedUrl, setDedicatedUrl] = useState(
-    () => readStoredValue(DEDICATED_URL_KEY, "https://127.0.0.1:4433/arpg"),
+  const [dedicatedUrl, setDedicatedUrl] = useState(() =>
+    readStoredValue(DEDICATED_URL_KEY, "https://127.0.0.1:4433/arpg"),
   );
   const [lobbyCode, setLobbyCode] = useState("");
   const [joinCode, setJoinCode] = useState(
@@ -419,17 +433,20 @@ function App() {
     }
   }, [setSnapshot]);
 
-  const createAuthority = useCallback((runSeed = freshRunSeed()) => {
-    gameRef.current?.free?.();
-    const game = new WasmGame(runSeed);
-    game.addPlayer(1);
-    gameRef.current = game;
-    setAuthorityGeneration((generation) => generation + 1);
-    sequenceRef.current = 0;
-    resetMovement();
-    setPlayerId(1);
-    updateSnapshotFromGame();
-  }, [resetMovement, updateSnapshotFromGame, setPlayerId, setAuthorityGeneration]);
+  const createAuthority = useCallback(
+    (runSeed = freshRunSeed()) => {
+      gameRef.current?.free?.();
+      const game = new WasmGame(runSeed);
+      game.addPlayer(1);
+      gameRef.current = game;
+      setAuthorityGeneration((generation) => generation + 1);
+      sequenceRef.current = 0;
+      resetMovement();
+      setPlayerId(1);
+      updateSnapshotFromGame();
+    },
+    [resetMovement, updateSnapshotFromGame, setPlayerId, setAuthorityGeneration],
+  );
 
   const closeSession = useCallback(() => {
     peerDetachRef.current?.();
@@ -443,31 +460,34 @@ function App() {
     setLobbyCode("");
   }, []);
 
-  const dispatchCommand = useCallback((command) => {
-    const sequence = ++sequenceRef.current;
-    const encoded = encodeCommand(command);
-    try {
-      if (modeRef.current === "guest") {
-        const session = sessionRef.current;
-        if (!session || !playerId || !session.hostParticipantId) return;
-        session.sendReliable(session.hostParticipantId, {
-          kind: "command",
-          sequence,
-          encoded,
-        });
-      } else if (modeRef.current === "dedicated") {
-        const session = dedicatedSessionRef.current;
-        if (!session || !playerId) return;
-        void session
-          .sendCommand(sequence, textEncoder.encode(encoded))
-          .catch((error) => setStatus(`Dedicated command failed: ${error}`));
-      } else {
-        gameRef.current?.applyCommand(playerId, sequence, encoded);
+  const dispatchCommand = useCallback(
+    (command) => {
+      const sequence = ++sequenceRef.current;
+      const encoded = encodeCommand(command);
+      try {
+        if (modeRef.current === "guest") {
+          const session = sessionRef.current;
+          if (!session || !playerId || !session.hostParticipantId) return;
+          session.sendReliable(session.hostParticipantId, {
+            kind: "command",
+            sequence,
+            encoded,
+          });
+        } else if (modeRef.current === "dedicated") {
+          const session = dedicatedSessionRef.current;
+          if (!session || !playerId) return;
+          void session
+            .sendCommand(sequence, textEncoder.encode(encoded))
+            .catch((error) => setStatus(`Dedicated command failed: ${error}`));
+        } else {
+          gameRef.current?.applyCommand(playerId, sequence, encoded);
+        }
+      } catch (error) {
+        setStatus(String(error));
       }
-    } catch (error) {
-      setStatus(String(error));
-    }
-  }, [playerId]);
+    },
+    [playerId],
+  );
 
   const flushMovement = useCallback(() => {
     const movement = movementRef.current;
@@ -650,9 +670,7 @@ function App() {
         onWelcome: (welcome) => {
           if (dedicatedSessionRef.current !== session) return;
           setPlayerId(welcome.playerId);
-          setStatus(
-            `Dedicated authority · player ${welcome.playerId} · ${welcome.tickHz} Hz`,
-          );
+          setStatus(`Dedicated authority · player ${welcome.playerId} · ${welcome.tickHz} Hz`);
         },
         onSnapshot: (frame) => {
           if (dedicatedSessionRef.current !== session) return;
@@ -672,7 +690,8 @@ function App() {
           }
         },
         onError: (error) => {
-          if (dedicatedSessionRef.current === session) setStatus(`Dedicated transport error: ${error}`);
+          if (dedicatedSessionRef.current === session)
+            setStatus(`Dedicated transport error: ${error}`);
         },
       });
     } catch (error) {
@@ -759,7 +778,9 @@ function App() {
           setStatus("Select a character");
         }
       })
-      .catch((error) => { if (!cancelled) setStatus(`Wasm failed: ${error}`); });
+      .catch((error) => {
+        if (!cancelled) setStatus(`Wasm failed: ${error}`);
+      });
     return () => {
       cancelled = true;
       closeSession();
@@ -771,11 +792,7 @@ function App() {
   useEffect(() => {
     if (!ready || !inWorld || mode === "guest" || mode === "dedicated") return undefined;
     const timer = setInterval(() => {
-      if (
-        modeRef.current === "guest" ||
-        modeRef.current === "dedicated" ||
-        !gameRef.current
-      ) {
+      if (modeRef.current === "guest" || modeRef.current === "dedicated" || !gameRef.current) {
         return;
       }
 
@@ -799,7 +816,16 @@ function App() {
       }
     }, 1000 / 60);
     return () => clearInterval(timer);
-  }, [ready, inWorld, scenario, trainingPaused, trainingSpeed, updateSnapshotFromGame, authorityGeneration, mode]);
+  }, [
+    ready,
+    inWorld,
+    scenario,
+    trainingPaused,
+    trainingSpeed,
+    updateSnapshotFromGame,
+    authorityGeneration,
+    mode,
+  ]);
 
   useEffect(() => {
     if (!inWorld || !canvasRef.current) return undefined;
@@ -813,7 +839,9 @@ function App() {
       const snapshot = snapshotStore.getSnapshot();
       if (!canvas || !snapshot) return;
       const rect = canvas.getBoundingClientRect();
-      renderer.render(buildFrame(snapshot, playerId, rect.width, rect.height, selectedCharacter.accent));
+      renderer.render(
+        buildFrame(snapshot, playerId, rect.width, rect.height, selectedCharacter.accent),
+      );
     };
     const resize = () => {
       const rect = canvasRef.current.getBoundingClientRect();
@@ -829,7 +857,14 @@ function App() {
       observer.disconnect();
       renderer.dispose();
     };
-  }, [graphics.shadows, graphics.pixelRatioLimit, inWorld, selectedCharacter.accent, playerId, snapshotStore]);
+  }, [
+    graphics.shadows,
+    graphics.pixelRatioLimit,
+    inWorld,
+    selectedCharacter.accent,
+    playerId,
+    snapshotStore,
+  ]);
 
   useEffect(() => {
     if (settingsOpen) resetTouchStick();
@@ -877,23 +912,27 @@ function App() {
   }, [ready, inWorld, profile, settingsOpen, mode, playerId, dispatchCommand, flushMovement]);
 
   const updateProfile = (next) => {
-    if (!persistStoredValue(PROFILE_KEY, JSON.stringify(next))) setStatus("Controls updated for this session; browser storage is unavailable");
+    if (!persistStoredValue(PROFILE_KEY, JSON.stringify(next)))
+      setStatus("Controls updated for this session; browser storage is unavailable");
     setProfile(next);
   };
 
   const updateGraphics = (next) => {
-    if (!persistStoredValue(GRAPHICS_KEY, JSON.stringify(next))) setStatus("Graphics updated for this session; browser storage is unavailable");
+    if (!persistStoredValue(GRAPHICS_KEY, JSON.stringify(next)))
+      setStatus("Graphics updated for this session; browser storage is unavailable");
     setGraphics(next);
   };
 
   const updateSetupUrl = (value) => {
     setSetupUrl(value);
-    if (!persistStoredValue(SETUP_URL_KEY, value)) setStatus("Endpoint updated for this session; browser storage is unavailable");
+    if (!persistStoredValue(SETUP_URL_KEY, value))
+      setStatus("Endpoint updated for this session; browser storage is unavailable");
   };
 
   const updateDedicatedUrl = (value) => {
     setDedicatedUrl(value);
-    if (!persistStoredValue(DEDICATED_URL_KEY, value)) setStatus("Endpoint updated for this session; browser storage is unavailable");
+    if (!persistStoredValue(DEDICATED_URL_KEY, value))
+      setStatus("Endpoint updated for this session; browser storage is unavailable");
   };
 
   const selectCharacter = (characterId) => {
@@ -931,7 +970,6 @@ function App() {
             <span className="character-select-eyebrow">ARPG</span>
             <h1 className="visually-hidden">Character selection</h1>
           </div>
-
         </header>
 
         <div className="character-select-layout">
@@ -997,9 +1035,7 @@ function App() {
         </div>
 
         <footer className="character-select-footer">
-          <span className="character-select-status">
-            {ready ? "Ready" : status}
-          </span>
+          <span className="character-select-status">{ready ? "Ready" : status}</span>
           <button
             type="button"
             className="training-entry-button"
@@ -1127,115 +1163,112 @@ function App() {
       )}
 
       {ready && !settingsOpen && (
-        <CombatActions store={snapshotStore} playerId={playerId} triggerCombatAction={triggerCombatAction} />
+        <CombatActions
+          store={snapshotStore}
+          playerId={playerId}
+          triggerCombatAction={triggerCombatAction}
+        />
       )}
 
       {settingsOpen && (
         <SettingsDialog onClose={() => setSettingsOpen(false)} returnFocusTo={settingsTriggerRef}>
-            <header>
-              <div>
-                <h1 id="settings-heading">Settings</h1>
-              </div>
-              <button type="button" autoFocus onClick={() => setSettingsOpen(false)}>
-                Close
-              </button>
-            </header>
+          <header>
+            <div>
+              <h1 id="settings-heading">Settings</h1>
+            </div>
+            <button type="button" autoFocus onClick={() => setSettingsOpen(false)}>
+              Close
+            </button>
+          </header>
 
-            <section>
-              <h2>Game</h2>
-              <GameSummary store={snapshotStore} mode={mode} playerId={playerId} />
-              <button type="button" onClick={startLocal}>
-                Start local game
-              </button>
-            </section>
+          <section>
+            <h2>Game</h2>
+            <GameSummary store={snapshotStore} mode={mode} playerId={playerId} />
+            <button type="button" onClick={startLocal}>
+              Start local game
+            </button>
+          </section>
 
-            <section>
-              <h2>Dedicated online</h2>
-              <label>
-                WebTransport endpoint
-                <input
-                  value={dedicatedUrl}
-                  onChange={(event) => updateDedicatedUrl(event.target.value)}
-                  placeholder="https://127.0.0.1:4433/arpg"
-                />
-              </label>
-              <button
-                type="button"
-                onClick={startDedicated}
-                disabled={!ready || !dedicatedUrl.trim()}
-              >
-                Connect dedicated server
-              </button>
-
-            </section>
-
-            <section>
-              <h2>Peer co-op</h2>
-              <label>
-                Setup service URL
-                <input
-                  value={setupUrl}
-                  onChange={(event) => updateSetupUrl(event.target.value)}
-                />
-              </label>
-              <div className="settings-actions">
-                <button type="button" onClick={hostPeerGame} disabled={!ready}>
-                  Host co-op
-                </button>
-                {lobbyCode && (
-                  <button type="button" onClick={copyInvite}>
-                    Copy invite {lobbyCode}
-                  </button>
-                )}
-              </div>
-              <label>
-                Lobby code
-                <input value={joinCode} onChange={(event) => setJoinCode(event.target.value)} />
-              </label>
-              <button type="button" onClick={joinPeerGame} disabled={!joinCode.trim()}>
-                Join host
-              </button>
-
-            </section>
-
-            <section>
-              <h2>Graphics</h2>
-              <label className="checkbox-row">
-                <input
-                  type="checkbox"
-                  checked={graphics.shadows}
-                  onChange={(event) =>
-                    updateGraphics({ ...graphics, shadows: event.target.checked })
-                  }
-                />
-                Enable shadows
-              </label>
-              <label>
-                Pixel ratio limit
-                <select
-                  value={graphics.pixelRatioLimit}
-                  onChange={(event) =>
-                    updateGraphics({
-                      ...graphics,
-                      pixelRatioLimit: Number(event.target.value),
-                    })
-                  }
-                >
-                  <option value="1">1×</option>
-                  <option value="1.5">1.5×</option>
-                  <option value="2">2×</option>
-                </select>
-              </label>
-            </section>
-
-            <section className="keybindings-section">
-              <h2>Controls</h2>
-              <KeybindingEditor
-                registry={inputRegistry}
-                profile={profile}
-                onProfileChange={updateProfile}
+          <section>
+            <h2>Dedicated online</h2>
+            <label>
+              WebTransport endpoint
+              <input
+                value={dedicatedUrl}
+                onChange={(event) => updateDedicatedUrl(event.target.value)}
+                placeholder="https://127.0.0.1:4433/arpg"
               />
-            </section>
+            </label>
+            <button
+              type="button"
+              onClick={startDedicated}
+              disabled={!ready || !dedicatedUrl.trim()}
+            >
+              Connect dedicated server
+            </button>
+          </section>
+
+          <section>
+            <h2>Peer co-op</h2>
+            <label>
+              Setup service URL
+              <input value={setupUrl} onChange={(event) => updateSetupUrl(event.target.value)} />
+            </label>
+            <div className="settings-actions">
+              <button type="button" onClick={hostPeerGame} disabled={!ready}>
+                Host co-op
+              </button>
+              {lobbyCode && (
+                <button type="button" onClick={copyInvite}>
+                  Copy invite {lobbyCode}
+                </button>
+              )}
+            </div>
+            <label>
+              Lobby code
+              <input value={joinCode} onChange={(event) => setJoinCode(event.target.value)} />
+            </label>
+            <button type="button" onClick={joinPeerGame} disabled={!joinCode.trim()}>
+              Join host
+            </button>
+          </section>
+
+          <section>
+            <h2>Graphics</h2>
+            <label className="checkbox-row">
+              <input
+                type="checkbox"
+                checked={graphics.shadows}
+                onChange={(event) => updateGraphics({ ...graphics, shadows: event.target.checked })}
+              />
+              Enable shadows
+            </label>
+            <label>
+              Pixel ratio limit
+              <select
+                value={graphics.pixelRatioLimit}
+                onChange={(event) =>
+                  updateGraphics({
+                    ...graphics,
+                    pixelRatioLimit: Number(event.target.value),
+                  })
+                }
+              >
+                <option value="1">1×</option>
+                <option value="1.5">1.5×</option>
+                <option value="2">2×</option>
+              </select>
+            </label>
+          </section>
+
+          <section className="keybindings-section">
+            <h2>Controls</h2>
+            <KeybindingEditor
+              registry={inputRegistry}
+              profile={profile}
+              onProfileChange={updateProfile}
+            />
+          </section>
         </SettingsDialog>
       )}
     </main>

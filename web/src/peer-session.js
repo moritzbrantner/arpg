@@ -2,7 +2,15 @@ import { decodeSnapshot } from "./wire-protocol.js";
 
 // ARPG admission and projection boundary. The foundation continues to own
 // signaling, connection recovery, and WebRTC lifecycle.
-export function attachPeerGameSession({ session, role, isCurrent, getGame, onPlayer, onSnapshot, onStatus }) {
+export function attachPeerGameSession({
+  session,
+  role,
+  isCurrent,
+  getGame,
+  onPlayer,
+  onSnapshot,
+  onStatus,
+}) {
   const players = new Map();
   const detach = [];
   const listen = (name, handler) => {
@@ -34,7 +42,11 @@ export function attachPeerGameSession({ session, role, isCurrent, getGame, onPla
       getGame().addPlayer(assigned);
       players.set(peerId, assigned);
     }
-    session.sendReliable(peerId, { kind: "welcome", playerId: assigned, encodedSnapshot: getGame().snapshotJson() });
+    session.sendReliable(peerId, {
+      kind: "welcome",
+      playerId: assigned,
+      encodedSnapshot: getGame().snapshotJson(),
+    });
     onStatus(`Peer connected as player ${assigned}`);
   });
 
@@ -42,11 +54,28 @@ export function attachPeerGameSession({ session, role, isCurrent, getGame, onPla
     if (role === "host" && data?.kind === "command") {
       const assigned = players.get(peerId);
       if (!assigned) return;
-      if (!Number.isInteger(data.sequence) || data.sequence <= 0 || data.sequence > 0xffff_ffff || typeof data.encoded !== "string" || data.encoded.length > 1024) throw new Error("Invalid peer command envelope");
+      if (
+        !Number.isInteger(data.sequence) ||
+        data.sequence <= 0 ||
+        data.sequence > 0xffff_ffff ||
+        typeof data.encoded !== "string" ||
+        data.encoded.length > 1024
+      )
+        throw new Error("Invalid peer command envelope");
       getGame().applyCommand(assigned, data.sequence, data.encoded);
-    } else if (role === "guest" && peerId === session.hostParticipantId && data?.kind === "welcome") {
+    } else if (
+      role === "guest" &&
+      peerId === session.hostParticipantId &&
+      data?.kind === "welcome"
+    ) {
       const snapshot = decodeSnapshot(data.encodedSnapshot);
-      if (!Number.isInteger(data.playerId) || data.playerId < 2 || data.playerId > 4 || !snapshot.players.some((player) => player.id === data.playerId)) throw new Error("Invalid host player assignment");
+      if (
+        !Number.isInteger(data.playerId) ||
+        data.playerId < 2 ||
+        data.playerId > 4 ||
+        !snapshot.players.some((player) => player.id === data.playerId)
+      )
+        throw new Error("Invalid host player assignment");
       onPlayer(data.playerId);
       onSnapshot(snapshot);
       onStatus(`Connected as player ${data.playerId}`);
@@ -54,7 +83,8 @@ export function attachPeerGameSession({ session, role, isCurrent, getGame, onPla
   });
 
   listen("realtime", ({ peerId, data }) => {
-    if (role !== "guest" || peerId !== session.hostParticipantId || data?.kind !== "snapshot") return;
+    if (role !== "guest" || peerId !== session.hostParticipantId || data?.kind !== "snapshot")
+      return;
     onSnapshot(decodeSnapshot(data.encoded));
   });
 

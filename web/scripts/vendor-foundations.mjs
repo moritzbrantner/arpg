@@ -8,16 +8,76 @@ const INPUT_REV = "b3b7204faa47d3b0af56eebc55cdfd4ced127ddc";
 const SETUP_REV = "a8064298182c71267a453071f923d9e0640afdcf";
 
 export const FOUNDATION_FILES = [
-  ["moritzbrantner/input-bindings", INPUT_REV, "packages/input-bindings/src/index.ts", "14b7e1c361d920d9d6367b9c72ab835ba931d573", "src/vendor/input-bindings/packages/input-bindings/src/index.ts"],
-  ["moritzbrantner/input-bindings", INPUT_REV, "packages/input-bindings/src/public.ts", "d5a1a8956116ee4b938d680cbee81bbc10a2ee7f", "src/vendor/input-bindings/packages/input-bindings/src/public.ts"],
-  ["moritzbrantner/input-bindings", INPUT_REV, "packages/input-bindings/src/registry.ts", "e228b665b7304b7cec6775669010783dfa755fc9", "src/vendor/input-bindings/packages/input-bindings/src/registry.ts"],
-  ["moritzbrantner/input-bindings", INPUT_REV, "packages/input-bindings-runtime/src/index.ts", "8532830d87470623d41c7c72ec5bd8dea2ef29da", "src/vendor/input-bindings/packages/input-bindings-runtime/src/index.ts"],
-  ["moritzbrantner/input-bindings", INPUT_REV, "packages/input-bindings-web/src/index.ts", "bcc52b12f8945d871f7d3d727aa82865393741e4", "src/vendor/input-bindings/packages/input-bindings-web/src/index.ts"],
-  ["moritzbrantner/input-bindings", INPUT_REV, "packages/input-bindings-react/src/index.tsx", "7f1a20d6fd9b4bec4326d46f7da44d1522a8cd65", "src/vendor/input-bindings/packages/input-bindings-react/src/index.tsx"],
-  ["moritzbrantner/input-bindings", INPUT_REV, "packages/input-bindings-react/src/keyboard.ts", "cd13da916f954cdd67a758b34983e570feb65076", "src/vendor/input-bindings/packages/input-bindings-react/src/keyboard.ts"],
-  ["moritzbrantner/input-bindings", INPUT_REV, "packages/input-bindings-react/src/model.ts", "e15efa03596e56eee8b0d5f03978e6e108fae66f", "src/vendor/input-bindings/packages/input-bindings-react/src/model.ts"],
-  ["moritzbrantner/input-bindings", INPUT_REV, "packages/input-bindings-react/src/styles.css", "c0cbe97eb5fdac6a6029ee389aea51e10a9b67a1", "src/vendor/input-bindings/packages/input-bindings-react/src/styles.css"],
-  ["moritzbrantner/multiplayer-setup-service", SETUP_REV, "web/resilient-lobby-session.ts", "eadc267a846ff8cdff721de503bcf259b796889e", "src/vendor/multiplayer-setup-service/resilient-lobby-session.ts"],
+  [
+    "moritzbrantner/input-bindings",
+    INPUT_REV,
+    "packages/input-bindings/src/index.ts",
+    "14b7e1c361d920d9d6367b9c72ab835ba931d573",
+    "src/vendor/input-bindings/packages/input-bindings/src/index.ts",
+  ],
+  [
+    "moritzbrantner/input-bindings",
+    INPUT_REV,
+    "packages/input-bindings/src/public.ts",
+    "d5a1a8956116ee4b938d680cbee81bbc10a2ee7f",
+    "src/vendor/input-bindings/packages/input-bindings/src/public.ts",
+  ],
+  [
+    "moritzbrantner/input-bindings",
+    INPUT_REV,
+    "packages/input-bindings/src/registry.ts",
+    "e228b665b7304b7cec6775669010783dfa755fc9",
+    "src/vendor/input-bindings/packages/input-bindings/src/registry.ts",
+  ],
+  [
+    "moritzbrantner/input-bindings",
+    INPUT_REV,
+    "packages/input-bindings-runtime/src/index.ts",
+    "8532830d87470623d41c7c72ec5bd8dea2ef29da",
+    "src/vendor/input-bindings/packages/input-bindings-runtime/src/index.ts",
+  ],
+  [
+    "moritzbrantner/input-bindings",
+    INPUT_REV,
+    "packages/input-bindings-web/src/index.ts",
+    "bcc52b12f8945d871f7d3d727aa82865393741e4",
+    "src/vendor/input-bindings/packages/input-bindings-web/src/index.ts",
+  ],
+  [
+    "moritzbrantner/input-bindings",
+    INPUT_REV,
+    "packages/input-bindings-react/src/index.tsx",
+    "7f1a20d6fd9b4bec4326d46f7da44d1522a8cd65",
+    "src/vendor/input-bindings/packages/input-bindings-react/src/index.tsx",
+  ],
+  [
+    "moritzbrantner/input-bindings",
+    INPUT_REV,
+    "packages/input-bindings-react/src/keyboard.ts",
+    "cd13da916f954cdd67a758b34983e570feb65076",
+    "src/vendor/input-bindings/packages/input-bindings-react/src/keyboard.ts",
+  ],
+  [
+    "moritzbrantner/input-bindings",
+    INPUT_REV,
+    "packages/input-bindings-react/src/model.ts",
+    "e15efa03596e56eee8b0d5f03978e6e108fae66f",
+    "src/vendor/input-bindings/packages/input-bindings-react/src/model.ts",
+  ],
+  [
+    "moritzbrantner/input-bindings",
+    INPUT_REV,
+    "packages/input-bindings-react/src/styles.css",
+    "c0cbe97eb5fdac6a6029ee389aea51e10a9b67a1",
+    "src/vendor/input-bindings/packages/input-bindings-react/src/styles.css",
+  ],
+  [
+    "moritzbrantner/multiplayer-setup-service",
+    SETUP_REV,
+    "web/resilient-lobby-session.ts",
+    "eadc267a846ff8cdff721de503bcf259b796889e",
+    "src/vendor/multiplayer-setup-service/resilient-lobby-session.ts",
+  ],
 ];
 
 function gitBlobSha(bytes) {
@@ -42,7 +102,8 @@ export async function vendorFoundations({
     for (const fragment of ["", ...targetRelative.split(sep)]) {
       inspected = resolve(inspected, fragment);
       try {
-        if ((await lstat(inspected)).isSymbolicLink()) throw new Error(`Foundation destination crosses a symlink: ${destination}`);
+        if ((await lstat(inspected)).isSymbolicLink())
+          throw new Error(`Foundation destination crosses a symlink: ${destination}`);
       } catch (error) {
         if (error.code === "ENOENT") break;
         throw error;
@@ -67,7 +128,9 @@ export async function vendorFoundations({
     const bytes = Buffer.from(await response.arrayBuffer());
     const actualSha = gitBlobSha(bytes);
     if (actualSha !== expectedSha) {
-      throw new Error(`Pinned blob mismatch for ${source}: expected ${expectedSha}, got ${actualSha}`);
+      throw new Error(
+        `Pinned blob mismatch for ${source}: expected ${expectedSha}, got ${actualSha}`,
+      );
     }
     await mkdir(dirname(target), { recursive: true });
     const temporary = `${target}.${randomUUID()}.tmp`;
@@ -84,8 +147,10 @@ export async function vendorFoundations({
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const files = await vendorFoundations();
-  console.log(JSON.stringify({
-    status: files.every((file) => file.status === "unchanged") ? "unchanged" : "changed",
-    files,
-  }));
+  console.log(
+    JSON.stringify({
+      status: files.every((file) => file.status === "unchanged") ? "unchanged" : "changed",
+      files,
+    }),
+  );
 }

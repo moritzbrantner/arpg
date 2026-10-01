@@ -197,7 +197,8 @@ export class DedicatedGameSession {
     this.endpoint = endpoint;
     this.transportFactory = transportFactory;
     this.reconnectDelayMs = Math.max(1, reconnectDelayMs);
-    if (!Number.isFinite(connectTimeoutMs) || connectTimeoutMs <= 0) throw new Error("Connection timeout must be positive and finite");
+    if (!Number.isFinite(connectTimeoutMs) || connectTimeoutMs <= 0)
+      throw new Error("Connection timeout must be positive and finite");
     this.connectTimeoutMs = connectTimeoutMs;
     this.connectionAbort = null;
     this.sleep = sleep;
@@ -258,7 +259,10 @@ export class DedicatedGameSession {
     const generation = ++this.connectionGeneration;
     const abort = new AbortController();
     this.connectionAbort = abort;
-    const timeout = setTimeout(() => abort.abort(new Error("Dedicated handshake timed out")), timeoutMs);
+    const timeout = setTimeout(
+      () => abort.abort(new Error("Dedicated handshake timed out")),
+      timeoutMs,
+    );
     let transport = null;
     try {
       transport = this.transportFactory(endpoint);
@@ -380,7 +384,11 @@ export class DedicatedGameSession {
       const token = this.welcome.reconnectToken;
       const attemptedToken = reconnectTokenHex(token);
       try {
-        await this.openTransport(reconnectEndpoint(this.endpoint, token), true, Math.max(1, Math.min(this.connectTimeoutMs, deadline - this.now())));
+        await this.openTransport(
+          reconnectEndpoint(this.endpoint, token),
+          true,
+          Math.max(1, Math.min(this.connectTimeoutMs, deadline - this.now())),
+        );
         return;
       } catch (error) {
         lastError = error;
@@ -431,10 +439,10 @@ export class DedicatedGameSession {
     const transport = this.transport;
     const generation = this.connectionGeneration;
     try {
-      await boundedWait(this.datagramWriter.write(frame), AbortSignal.any([
-        this.connectionAbort.signal,
-        AbortSignal.timeout(this.connectTimeoutMs),
-      ]));
+      await boundedWait(
+        this.datagramWriter.write(frame),
+        AbortSignal.any([this.connectionAbort.signal, AbortSignal.timeout(this.connectTimeoutMs)]),
+      );
     } catch (error) {
       if (this.isCurrentTransport(transport, generation)) {
         this.enqueueCommand(frame);

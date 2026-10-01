@@ -33,7 +33,12 @@ test("reuses verified foundations without fetching or rewriting, and repairs cor
 });
 
 test("refuses destinations outside the declared output root", async () => {
-  await expect(vendorFoundations({ outputRoot: "/tmp/arpg-vendor-boundary", files: [[...files[0].slice(0, 4), "../escape.js"]] })).rejects.toThrow("escapes output root");
+  await expect(
+    vendorFoundations({
+      outputRoot: "/tmp/arpg-vendor-boundary",
+      files: [[...files[0].slice(0, 4), "../escape.js"]],
+    }),
+  ).rejects.toThrow("escapes output root");
 });
 
 test("does not follow symlinks when reusing or replacing foundations", async () => {
@@ -52,14 +57,17 @@ test("does not follow symlinks when reusing or replacing foundations", async () 
 test("bounds downloads with cancellation", async () => {
   const outputRoot = await mkdtemp(join(tmpdir(), "arpg-foundations-"));
   try {
-    await expect(vendorFoundations({
-      outputRoot,
-      files,
-      timeoutMs: 5,
-      fetchSource: (_url, { signal }) => new Promise((_resolve, reject) => {
-        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+    await expect(
+      vendorFoundations({
+        outputRoot,
+        files,
+        timeoutMs: 5,
+        fetchSource: (_url, { signal }) =>
+          new Promise((_resolve, reject) => {
+            signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+          }),
       }),
-    })).rejects.toThrow();
+    ).rejects.toThrow();
   } finally {
     await rm(outputRoot, { recursive: true });
   }
@@ -70,7 +78,13 @@ test("a corrupt download preserves existing output", async () => {
   const target = join(outputRoot, "foundation.js");
   try {
     await writeFile(target, "previous output");
-    await expect(vendorFoundations({ outputRoot, files, fetchSource: async () => new Response("wrong bytes") })).rejects.toThrow("Pinned blob mismatch");
+    await expect(
+      vendorFoundations({
+        outputRoot,
+        files,
+        fetchSource: async () => new Response("wrong bytes"),
+      }),
+    ).rejects.toThrow("Pinned blob mismatch");
     expect(await readFile(target, "utf8")).toBe("previous output");
   } finally {
     await rm(outputRoot, { recursive: true });
