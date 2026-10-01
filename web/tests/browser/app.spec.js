@@ -11,8 +11,9 @@ const test = base.extend({
   },
   appUrl: [
     async ({ browserName }, use, workerInfo) => {
+      const http = createHttpServer();
       const server = await createServer({
-        server: { middlewareMode: true },
+        server: { middlewareMode: true, hmr: { server: http } },
         appType: "spa",
         cacheDir: `.cache/browser-tests/${browserName}-${workerInfo.workerIndex}`,
         optimizeDeps: {
@@ -25,7 +26,7 @@ const test = base.extend({
           ],
         },
       });
-      const http = createHttpServer(server.middlewares);
+      http.on("request", server.middlewares);
       await new Promise((resolve, reject) => {
         http.once("error", reject);
         http.listen(0, "127.0.0.1", resolve);
