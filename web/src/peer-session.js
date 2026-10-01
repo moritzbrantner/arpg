@@ -1,0 +1,108 @@
+import { decodeSnapshot } from "./wire-protocol.js";
+
+// ARPG admission and projection boundary. The foundation continues to own
+// signaling, connection recovery, and WebRTC lifecycle.
+export function attachPeerGameSession({
+  session,
+  role,
+  isCurrent,
+  getGame,
+  onPlayer,
+  onSnapshot,
+  onStatus,
+}) {
+  const players = new Map();
+  const detach = [];
+  const listen = (name, handler) => {
+    const listener = (event) => {
+      if (!isCurrent()) return;
+      try {
+        handler(event.detail);
+      } catch (error) {
+        onStatus(`Rejected peer message: ${error}`);
+      }
+    };
+    session.addEventListener(name, listener);
+    detach.push(() => session.removeEventListener(name, listener));
+  };
+
+  listen("peer-ready", ({ peerId }) => {
+    if (role !== "host") {
+      onStatus("Connected to host; waiting for player assignment…");
+      return;
+    }
+    let assigned = players.get(peerId);
+    if (!assigned) {
+      const used = new Set(players.values());
+      assigned = [2, 3, 4].find((candidate) => !used.has(candidate));
+      if (!assigned) {
+        onStatus("Lobby is full");
+        return;
+      }
+      getGame().addPlayer(assigned);
+      players.set(peerId, assigned);
+    }
+    session.sendReliable(peerId, {
+      kind: "welcome",
+      playerId: assigned,
+      encodedSnapshot: getGame().snapshotJson(),
+    });
+    onStatus(`Peer connected as player ${assigned}`);
+  });
+
+  listen("reliable", ({ peerId, data }) => {
+    if (role === "host" && data?.kind === "command") {
+      const assigned = players.get(peerId);
+      if (!assigned) return;
+      if (
+        !Number.isInteger(data.sequence) ||
+        data.sequence <= 0 ||
+        data.sequence > 0xffff_ffff ||
+        typeof data.encoded !== "string" ||
+        data.encoded.length > 1024
+      )
+        throw new Error("Invalid peer command envelope");
+      getGame().applyCommand(assigned, data.sequence, data.encoded);
+    } else if (
+      role === "guest" &&
+      peerId === session.hostParticipantId &&
+      data?.kind === "welcome"
+    ) {
+      const snapshot = decodeSnapshot(data.encodedSnapshot);
+      if (
+        !Number.isInteger(data.playerId) ||
+        data.playerId < 2 ||
+        data.playerId > 4 ||
+        !snapshot.players.some((player) => player.id === data.playerId)
+      )
+        throw new Error("Invalid host player assignment");
+      onPlayer(data.playerId);
+      onSnapshot(snapshot);
+      onStatus(`Connected as player ${data.playerId}`);
+    }
+  });
+
+  listen("realtime", ({ peerId, data }) => {
+    if (role !== "guest" || peerId !== session.hostParticipantId || data?.kind !== "snapshot")
+      return;
+    onSnapshot(decodeSnapshot(data.encoded));
+  });
+
+  listen("participant-disconnected", ({ participantId }) => {
+    if (role !== "host") return;
+    const assigned = players.get(participantId);
+    if (!assigned) return;
+    players.delete(participantId);
+    getGame()?.removePlayer(assigned);
+    onStatus(`Player ${assigned} disconnected`);
+  });
+
+  listen("statechange", (detail) => {
+    if (detail?.state) onStatus(`Network: ${detail.state}`);
+  });
+
+  return () => {
+    for (const remove of detach) remove();
+    players.clear();
+  };
+}

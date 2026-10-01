@@ -32,14 +32,13 @@ export const CHARACTER_PRESETS = Object.freeze([
 
 export function resolveCharacter(characterId) {
   return (
-    CHARACTER_PRESETS.find((character) => character.id === characterId) ??
-    CHARACTER_PRESETS[0]
+    CHARACTER_PRESETS.find((character) => character.id === characterId) ?? CHARACTER_PRESETS[0]
   );
 }
 
 export function loadSelectedCharacterId(storage) {
   try {
-    const stored = storage?.getItem?.(CHARACTER_SELECTION_KEY);
+    const stored = (storage ?? globalThis.localStorage)?.getItem?.(CHARACTER_SELECTION_KEY);
     return resolveCharacter(stored).id;
   } catch {
     return CHARACTER_PRESETS[0].id;
@@ -49,7 +48,7 @@ export function loadSelectedCharacterId(storage) {
 export function persistSelectedCharacterId(storage, characterId) {
   const character = resolveCharacter(characterId);
   try {
-    storage?.setItem?.(CHARACTER_SELECTION_KEY, character.id);
+    (storage ?? globalThis.localStorage)?.setItem?.(CHARACTER_SELECTION_KEY, character.id);
   } catch {
     // Character selection remains usable when storage is unavailable.
   }

@@ -39,14 +39,26 @@ jobs:
       - name: Install web dependencies
         working-directory: web
         run: bun install --frozen-lockfile
-      - name: Test browser input helpers
+      - name: Check browser formatting and lint
+        working-directory: web
+        run: bun run format:check && bun run lint
+      - name: Test browser contracts
         working-directory: web
         run: bun run test
+      - name: Install browser test runtime
+        working-directory: web
+        run: bunx playwright install --with-deps chromium
       - name: Build browser MVP
+        working-directory: web
+        run: bun run setup
+      - name: Bundle browser MVP
         working-directory: web
         run: bun run build
       - name: Execute compiled WASM gameplay controls
         working-directory: web
         run: bun run test:physics-wasm
+      - name: Verify browser workflows
+        working-directory: web
+        run: bun run test:browser
       - name: Verify build kept lockfiles unchanged
         run: git diff --exit-code -- Cargo.lock web/bun.lock

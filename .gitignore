@@ -6,3 +6,4 @@
 /.local/
 /cert.pem
 /key.pem
+/test-results/

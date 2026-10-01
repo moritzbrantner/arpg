@@ -2,3 +2,6 @@ node_modules/
 dist/
 src/wasm/
 src/vendor/
+test-results/
+playwright-report/
+.cache/

@@ -89,6 +89,7 @@ ARPG_PHYSICS_TRACE_DIR=/tmp/arpg-current-traces cargo test --release --locked \
   -p arpg-core physics_workloads::seeded_physics_workload_matrix -- --ignored --nocapture
 cd web
 bun install --frozen-lockfile
+bun run setup
 bun run build
 bun run test:physics-wasm
 ```
