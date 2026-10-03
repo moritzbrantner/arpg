@@ -2,12 +2,21 @@ const GAME_SERVER_PROTOCOL_VERSION = 3;
 const COMMAND_KIND = 1;
 const SNAPSHOT_KIND = 2;
 const WELCOME_KIND = 3;
+const SNAPSHOT_FRAGMENT_KIND = 4;
+const SNAPSHOT_FRAGMENT_HEADER_BYTES = 14;
+const MAX_SNAPSHOT_FRAGMENTS = 64;
 const COMMAND_HEADER_BYTES = 8;
 const SNAPSHOT_HEADER_BYTES = 20;
 const WELCOME_BYTES = 46;
 const RECONNECT_TOKEN_BYTES = 16;
 const MAX_COMMAND_PAYLOAD_BYTES = 1024;
 const MAX_SNAPSHOT_PAYLOAD_BYTES = 0xffff;
+const MAX_SNAPSHOT_FRAME_BYTES = SNAPSHOT_HEADER_BYTES + MAX_SNAPSHOT_PAYLOAD_BYTES;
+// Reassembly bounds mirror game-server's SnapshotReassembler.
+const SNAPSHOT_REASSEMBLY_MAX_PENDING = 4;
+const SNAPSHOT_REASSEMBLY_MAX_BUFFERED_BYTES = 2 * MAX_SNAPSHOT_FRAME_BYTES;
+const SNAPSHOT_REASSEMBLY_MAX_IDLE_DATAGRAMS =
+  SNAPSHOT_REASSEMBLY_MAX_PENDING * MAX_SNAPSHOT_FRAGMENTS;
 const MAX_PENDING_COMMANDS = 256;
 const DEFAULT_RECONNECT_DELAY_MS = 250;
 const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
@@ -100,6 +109,145 @@ export function decodeGameServerSnapshot(frame) {
     throw new Error("Snapshot state hash does not match payload");
   }
   return { tick, stateHash, payload };
+}
+
+export function decodeGameServerSnapshotFragment(datagram) {
+  const bytes = asBytes(datagram);
+  if (bytes.byteLength < SNAPSHOT_FRAGMENT_HEADER_BYTES) {
+    throw new Error(`Snapshot fragment is shorter than ${SNAPSHOT_FRAGMENT_HEADER_BYTES} bytes`);
+  }
+  requireHeader(bytes, SNAPSHOT_FRAGMENT_KIND);
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const tick = view.getBigUint64(2, false);
+  const index = bytes[10];
+  const count = bytes[11];
+  if (count === 0 || count > MAX_SNAPSHOT_FRAGMENTS) {
+    throw new Error(`Snapshot fragment count ${count} is outside 1..=${MAX_SNAPSHOT_FRAGMENTS}`);
+  }
+  if (index >= count) {
+    throw new Error(`Snapshot fragment index ${index} is outside fragment count ${count}`);
+  }
+  const chunkLength = view.getUint16(12, false);
+  if (chunkLength === 0) throw new Error("Snapshot fragment carries no bytes");
+  if (bytes.byteLength !== SNAPSHOT_FRAGMENT_HEADER_BYTES + chunkLength) {
+    throw new Error("Snapshot fragment length does not match its declared chunk length");
+  }
+  return { tick, index, count, chunk: bytes.slice(SNAPSHOT_FRAGMENT_HEADER_BYTES) };
+}
+
+/**
+ * Bounded reassembly of game-server snapshot datagrams, which arrive either
+ * whole or as fragments when a frame exceeds the path's datagram budget.
+ * Delivered ticks strictly increase; stale, duplicate and evicted data is
+ * ignored, and malformed or inconsistent data throws.
+ */
+export class SnapshotReassembler {
+  constructor() {
+    this.pending = new Map();
+    this.bufferedBytes = 0;
+    this.newestTick = null;
+    this.datagrams = 0;
+  }
+
+  accept(datagram) {
+    this.datagrams += 1;
+    this.expireIdle();
+    const bytes = asBytes(datagram);
+    if (bytes[1] === SNAPSHOT_FRAGMENT_KIND) {
+      return this.acceptFragment(decodeGameServerSnapshotFragment(bytes));
+    }
+    const snapshot = decodeGameServerSnapshot(bytes);
+    return this.isStale(snapshot.tick) ? null : this.deliver(snapshot);
+  }
+
+  acceptFragment({ tick, index, count, chunk }) {
+    if (this.isStale(tick)) return null;
+    const existing = this.pending.get(tick);
+    if (existing) {
+      if (existing.chunks.length !== count) {
+        throw new Error(`Snapshot fragments for tick ${tick} are inconsistent`);
+      }
+      if (existing.chunks[index]) return null;
+      if (existing.bytes + chunk.byteLength > MAX_SNAPSHOT_FRAME_BYTES) {
+        this.removePending(tick);
+        throw new Error("Reassembled snapshot exceeds the protocol frame limit");
+      }
+    } else if (
+      this.pending.size >= SNAPSHOT_REASSEMBLY_MAX_PENDING &&
+      !this.evictOldestBefore(tick)
+    ) {
+      return null;
+    }
+    while (this.bufferedBytes + chunk.byteLength > SNAPSHOT_REASSEMBLY_MAX_BUFFERED_BYTES) {
+      if (!this.evictOldestBefore(tick)) {
+        this.removePending(tick);
+        return null;
+      }
+    }
+
+    let pending = this.pending.get(tick);
+    if (!pending) {
+      pending = { chunks: new Array(count).fill(null), received: 0, bytes: 0, lastStoredAt: 0 };
+      this.pending.set(tick, pending);
+    }
+    pending.chunks[index] = chunk;
+    pending.received += 1;
+    pending.bytes += chunk.byteLength;
+    pending.lastStoredAt = this.datagrams;
+    this.bufferedBytes += chunk.byteLength;
+    if (pending.received < count) return null;
+
+    this.removePending(tick);
+    const frame = new Uint8Array(pending.bytes);
+    let offset = 0;
+    for (const part of pending.chunks) {
+      frame.set(part, offset);
+      offset += part.byteLength;
+    }
+    const snapshot = decodeGameServerSnapshot(frame);
+    if (snapshot.tick !== tick) {
+      throw new Error(`Snapshot fragments for tick ${tick} are inconsistent`);
+    }
+    return this.deliver(snapshot);
+  }
+
+  isStale(tick) {
+    return this.newestTick !== null && tick <= this.newestTick;
+  }
+
+  deliver(snapshot) {
+    for (const tick of [...this.pending.keys()]) {
+      if (tick <= snapshot.tick) this.removePending(tick);
+    }
+    this.newestTick = snapshot.tick;
+    return snapshot;
+  }
+
+  removePending(tick) {
+    const pending = this.pending.get(tick);
+    if (!pending) return null;
+    this.pending.delete(tick);
+    this.bufferedBytes -= pending.bytes;
+    return pending;
+  }
+
+  evictOldestBefore(tick) {
+    let oldest = null;
+    for (const candidate of this.pending.keys()) {
+      if (candidate < tick && (oldest === null || candidate < oldest)) oldest = candidate;
+    }
+    if (oldest === null) return false;
+    this.removePending(oldest);
+    return true;
+  }
+
+  expireIdle() {
+    for (const [tick, pending] of [...this.pending]) {
+      if (this.datagrams - pending.lastStoredAt > SNAPSHOT_REASSEMBLY_MAX_IDLE_DATAGRAMS) {
+        this.removePending(tick);
+      }
+    }
+  }
 }
 
 export function decodeGameServerWelcome(frame) {
@@ -309,11 +457,13 @@ export class DedicatedGameSession {
     let reader;
     try {
       reader = transport.datagrams.readable.getReader();
+      const reassembler = new SnapshotReassembler();
       while (this.isCurrentTransport(transport, generation)) {
         const { value, done } = await reader.read();
         if (!this.isCurrentTransport(transport, generation)) return;
         if (done) return;
-        this.callbacks.onSnapshot?.(decodeGameServerSnapshot(value));
+        const snapshot = reassembler.accept(value);
+        if (snapshot) this.callbacks.onSnapshot?.(snapshot);
       }
     } catch (error) {
       this.handleTransportFailure(transport, generation, error);
