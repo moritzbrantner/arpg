@@ -13,9 +13,9 @@ pub struct WasmGame {
 #[wasm_bindgen]
 impl WasmGame {
     #[wasm_bindgen(constructor)]
-    pub fn new() -> Result<WasmGame, JsValue> {
+    pub fn new(run_seed: u32) -> Result<WasmGame, JsValue> {
         Ok(Self {
-            game: ArpgGame::new().map_err(js_error)?,
+            game: ArpgGame::new_with_seed(run_seed).map_err(js_error)?,
             protocol: JsonProtocol,
         })
     }

@@ -14,6 +14,34 @@
 
 Neither renderer nor network transport may become an alternate source of gameplay truth.
 
+The browser's presentation snapshot boundary and React update ownership are
+documented in [ADR 0001](adr/0001-browser-snapshot-projection.md). Tick-dependent
+views and rendering consume one session-owned snapshot store; menus and shell
+configuration do not subscribe to simulation ticks.
+
+## Mechanical game-loop foundation
+
+The moment-to-moment ARPG loop is a game-specific foundation, not a late presentation/polish layer.
+
+`arpg-core` must expose coherent domain contracts for:
+
+- locomotion and movement/action cancellation;
+- action phases (intent, commitment/wind-up, active effect, recovery, interruption);
+- targeting and interaction resolution;
+- authoritative hit/damage/reaction outcomes;
+- stagger, knockback, block, immunity, death, and related combat consequences;
+- item/drop spawn and pickup interaction;
+- typed gameplay events/cues that presentation layers can consume.
+
+This layer sits **above** reusable foundations such as `physics-engine`, `input-bindings`, and `3d-lab`. It should not be generalized into those repositories merely because multiple ARPG features use it. Weapons, skills, monsters, bosses, loot, and dungeon rules should compose the ARPG game-loop contracts rather than each introducing private movement, timing, targeting, hit-reaction, or pickup systems.
+
+The presentation boundary is intentionally one-way: animation, rendering, camera, audio, HUD, particles, and local visual emphasis may react to authoritative state/events, interpolate them, and decorate them. They may not decide that an attack hit, a target was valid, an action completed, a character was displaced, or an item was picked up.
+
+Likewise, animation timing must not silently become gameplay authority. Gameplay timings live in deterministic core state; animation consumes phase/cue timing and visually represents it.
+
+The first acceptance environment for this foundation is a deterministic combat training arena with reproducible movement, attack, impact, interruption, targeting, projectile, knockback, death, and pickup scenarios. See [ROADMAP.md](ROADMAP.md).
+
+
 ## Execution modes
 
 All modes execute the same `arpg-core` rules and use the same game-specific command/snapshot protocol.
@@ -54,7 +82,7 @@ Snapshots are typed core values first and encoded only at the protocol boundary.
 
 ## Multiplayer setup service boundary
 
-Browser peer setup should consume the upstream resilient lobby client rather than forking its signaling/reconnect/ICE logic. The accepted initial setup-service revision is `556f1aa2ac889acffd5b2b27163fca10f1901793`.
+Browser peer setup should consume the upstream resilient lobby client rather than forking its signaling/reconnect/ICE logic. The accepted initial setup-service revision is `a8064298182c71267a453071f923d9e0640afdcf`.
 
 When the web shell is introduced, vendor the exact accepted upstream browser source under `web/vendor/multiplayer-setup-service/` with deterministic pin checks, following the same pattern already proven by other game consumers. Use `LobbySession`/`ResilientLobbySession` with `topology: "host"`.
 
@@ -101,3 +129,6 @@ arpg-game-server --> game-server --> arpg-core --+ dedicated
 5. Add reconnect/divergence acceptance before treating multiplayer as a product feature.
 
 Do not add event sourcing, distributed read models, a message bus, or a generic game-engine framework merely because multiplayer exists. The simulation hot path stays direct and domain-shaped.
+
+The [application adoption record](conventions-adoption.md) records the audit scope,
+verification evidence, and remaining advisories.
