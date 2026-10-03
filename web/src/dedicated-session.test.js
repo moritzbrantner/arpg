@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import {
   DedicatedGameSession,
+  SnapshotReassembler,
   decodeGameServerSnapshot,
   decodeGameServerWelcome,
   encodeGameServerCommand,
@@ -125,19 +126,37 @@ async function flushMicrotasks() {
 }
 
 describe("game-server WebTransport framing", () => {
+  test("rejects an oversized welcome before buffering arbitrary stream data", async () => {
+    const transport = new FakeTransport(new Uint8Array(47));
+    transport.incomingUnidirectionalStreams = readableChunk(
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(new Uint8Array(47));
+        },
+      }),
+    );
+    const session = new DedicatedGameSession({
+      endpoint: "https://example.test/arpg",
+      transportFactory: () => transport,
+    });
+    await expect(session.connect()).rejects.toThrow("Welcome stream exceeds");
+    expect(transport.closedFlag).toBe(true);
+  }, 100);
+
+  test("bounds a handshake that never becomes ready", async () => {
+    const transport = new FakeTransport(welcomeFrame(), { ready: false });
+    const session = new DedicatedGameSession({
+      endpoint: "https://example.test/arpg",
+      transportFactory: () => transport,
+      connectTimeoutMs: 5,
+    });
+    await expect(session.connect()).rejects.toThrow("timed out");
+    expect(transport.closedFlag).toBe(true);
+  }, 100);
+
   test("encodes commands with the pinned game-server protocol header", () => {
     expect([...encodeGameServerCommand(7, new Uint8Array([1, 2, 3]))]).toEqual([
-      3,
-      1,
-      0,
-      0,
-      0,
-      7,
-      0,
-      3,
-      1,
-      2,
-      3,
+      3, 1, 0, 0, 0, 7, 0, 3, 1, 2, 3,
     ]);
   });
 
@@ -166,7 +185,7 @@ describe("game-server WebTransport framing", () => {
   });
 
   test("verifies snapshot length and state hash before exposing ARPG payload", () => {
-    const payload = new TextEncoder().encode('{"protocolVersion":2,"payload":{"tick":9}}');
+    const payload = new TextEncoder().encode('{"protocolVersion":6,"payload":{"tick":9}}');
     const frame = new Uint8Array(20 + payload.byteLength);
     const view = new DataView(frame.buffer);
     frame[0] = 3;
@@ -179,7 +198,7 @@ describe("game-server WebTransport framing", () => {
     const decoded = decodeGameServerSnapshot(frame);
     expect(decoded.tick).toBe(9n);
     expect(new TextDecoder().decode(decoded.payload)).toBe(
-      '{"protocolVersion":2,"payload":{"tick":9}}',
+      '{"protocolVersion":6,"payload":{"tick":9}}',
     );
 
     frame[20] ^= 1;
@@ -373,7 +392,7 @@ describe("dedicated reconnect contract", () => {
     expect(states).toHaveLength(stateCountAfterResume);
     expect(states.at(-1)).toBe("connected");
 
-    first.datagramController.close();
+    expect(first.closedFlag).toBe(true);
     session.close();
   });
 
@@ -387,8 +406,7 @@ describe("dedicated reconnect contract", () => {
 
     const session = new DedicatedGameSession({
       endpoint: "https://game.example/arpg",
-      transportFactory: (url) =>
-        url.includes("/reconnect/") ? blockedReconnect : first,
+      transportFactory: (url) => (url.includes("/reconnect/") ? blockedReconnect : first),
       reconnectDelayMs: 1,
       sleep: async () => {},
     });
@@ -449,10 +467,81 @@ describe("dedicated reconnect contract", () => {
     await disconnected.promise;
 
     expect(reconnectAttempts).toBe(2);
-    await expect(session.sendCommand(2, new Uint8Array([1]))).rejects.toThrow(
-      "not connected",
-    );
+    await expect(session.sendCommand(2, new Uint8Array([1]))).rejects.toThrow("not connected");
 
     session.close();
+  });
+});
+
+function snapshotFrame(tick, payload) {
+  const frame = new Uint8Array(20 + payload.byteLength);
+  const view = new DataView(frame.buffer);
+  frame[0] = 3;
+  frame[1] = 2;
+  view.setBigUint64(2, BigInt(tick), false);
+  view.setBigUint64(10, snapshotHash(BigInt(tick), payload), false);
+  view.setUint16(18, payload.byteLength, false);
+  frame.set(payload, 20);
+  return frame;
+}
+
+function fragments(frame, chunkCapacity) {
+  const tick = new DataView(frame.buffer).getBigUint64(2, false);
+  const count = Math.ceil(frame.byteLength / chunkCapacity);
+  return Array.from({ length: count }, (_, index) => {
+    const chunk = frame.slice(index * chunkCapacity, (index + 1) * chunkCapacity);
+    const datagram = new Uint8Array(14 + chunk.byteLength);
+    const view = new DataView(datagram.buffer);
+    datagram[0] = 3;
+    datagram[1] = 4;
+    view.setBigUint64(2, tick, false);
+    datagram[10] = index;
+    datagram[11] = count;
+    view.setUint16(12, chunk.byteLength, false);
+    datagram.set(chunk, 14);
+    return datagram;
+  });
+}
+
+describe("snapshot datagram reassembly", () => {
+  const payload = new TextEncoder().encode("x".repeat(3000));
+
+  test("reassembles out-of-order fragments into a verified snapshot", () => {
+    const reassembler = new SnapshotReassembler();
+    const parts = fragments(snapshotFrame(5, payload), 1000);
+    expect(parts.length).toBe(4);
+    expect(reassembler.accept(parts[2])).toBeNull();
+    expect(reassembler.accept(parts[0])).toBeNull();
+    expect(reassembler.accept(parts[0])).toBeNull();
+    expect(reassembler.accept(parts[3])).toBeNull();
+    const snapshot = reassembler.accept(parts[1]);
+    expect(snapshot.tick).toBe(5n);
+    expect(new TextDecoder().decode(snapshot.payload)).toBe("x".repeat(3000));
+    expect(reassembler.pending.size).toBe(0);
+    expect(reassembler.bufferedBytes).toBe(0);
+  });
+
+  test("delivers whole snapshots and drops stale ticks and superseded fragments", () => {
+    const reassembler = new SnapshotReassembler();
+    const older = fragments(snapshotFrame(6, payload), 1000);
+    expect(reassembler.accept(older[0])).toBeNull();
+    expect(reassembler.accept(snapshotFrame(7, payload)).tick).toBe(7n);
+    expect(reassembler.pending.size).toBe(0);
+    expect(reassembler.accept(older[1])).toBeNull();
+    expect(reassembler.accept(snapshotFrame(7, payload))).toBeNull();
+  });
+
+  test("rejects inconsistent and corrupted fragments", () => {
+    const reassembler = new SnapshotReassembler();
+    const parts = fragments(snapshotFrame(9, payload), 1000);
+    reassembler.accept(parts[0]);
+    const inconsistent = parts[1].slice();
+    inconsistent[11] = 5;
+    expect(() => reassembler.accept(inconsistent)).toThrow("inconsistent");
+
+    const corrupted = fragments(snapshotFrame(10, payload), 1000);
+    corrupted[3][20] ^= 0xff;
+    for (const part of corrupted.slice(0, 3)) reassembler.accept(part);
+    expect(() => reassembler.accept(corrupted[3])).toThrow("hash");
   });
 });

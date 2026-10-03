@@ -1,24 +1,32 @@
 {
   "name": "arpg-web",
-  "private": true,
   "version": "0.1.0",
+  "private": true,
   "type": "module",
   "scripts": {
-    "vendor": "node scripts/vendor-foundations.mjs",
+    "lint": "oxlint --deny-warnings src scripts tests vite.config.js playwright.config.js",
+    "format:check": "oxfmt --check src scripts tests vite.config.js playwright.config.js package.json .oxlintrc.json .oxfmtrc.json",
+    "format": "oxfmt --write src scripts tests vite.config.js playwright.config.js package.json .oxlintrc.json .oxfmtrc.json",
+    "vendor": "bun scripts/vendor-foundations.mjs",
     "wasm": "wasm-pack build ../crates/arpg-web-wasm --target web --out-dir ../../web/src/wasm --out-name arpg_web_wasm -- --locked",
-    "test": "bun test src/virtual-stick.test.js src/dedicated-session.test.js",
-    "test:wasm": "wasm-pack build ../crates/arpg-web-wasm --target nodejs --out-dir ../../web/.wasm-test --out-name arpg_web_wasm -- --locked && node scripts/wasm-contract.mjs && rm -rf .wasm-test",
-    "test:e2e": "playwright test",
-    "build": "bun run vendor && bun run wasm && vite build",
-    "dev": "bun run vendor && bun run wasm && vite"
+    "test": "bun test src scripts",
+    "test:browser": "playwright test",
+    "setup": "bun run vendor && bun run wasm",
+    "build": "vite build",
+    "dev": "vite",
+    "test:physics-wasm": "bun ../scripts/test-physics-wasm.mjs src/wasm/arpg_web_wasm.js"
   },
   "dependencies": {
-    "@moritzbrantner/three-d-renderer": "github:moritzbrantner/3d-lab#2af3ef54bb515c8f5611d4f7d39d484202a42784",
+    "@moritzbrantner/three-d-renderer": "github:moritzbrantner/3d-lab#f484db8a3d2a7a555fa463eddf9c28790b240ce0",
     "react": "19.1.1",
     "react-dom": "19.1.1",
-    "three": "0.185.1"
+    "three": "0.186.1"
   },
   "devDependencies": {
-    "vite": "7.1.5"
-  }
+    "@playwright/test": "1.63.0",
+    "oxfmt": "0.71.0",
+    "oxlint": "1.86.0",
+    "vite": "7.3.6"
+  },
+  "packageManager": "bun@1.4.2"
 }

@@ -6,7 +6,7 @@ use std::fmt;
 use arpg_core::{ArpgCommand, ArpgSnapshot};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 6;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProtocolError {
@@ -69,10 +69,10 @@ impl WireProtocol<ArpgCommand, ArpgSnapshot> for JsonProtocol {
     }
 }
 
-fn encode<T: Serialize + Clone>(payload: &T) -> Result<Vec<u8>, ProtocolError> {
+fn encode<T: Serialize>(payload: &T) -> Result<Vec<u8>, ProtocolError> {
     serde_json::to_vec(&VersionedPayload {
         protocol_version: PROTOCOL_VERSION,
-        payload: payload.clone(),
+        payload,
     })
     .map_err(|error| ProtocolError::new(format!("encode failed: {error}")))
 }
@@ -100,7 +100,7 @@ mod tests {
         let command = ArpgCommand::SetMovement { x: -1, z: 1 };
         let bytes = protocol.encode_command(&command).unwrap();
         let encoded = String::from_utf8(bytes.clone()).unwrap();
-        assert!(encoded.contains("\"protocolVersion\":2"));
+        assert!(encoded.contains("\"protocolVersion\":6"));
         assert_eq!(protocol.decode_command(&bytes).unwrap(), command);
     }
 
@@ -114,6 +114,6 @@ mod tests {
         let decoded = protocol.decode_snapshot(&bytes).unwrap();
         assert_eq!(decoded, snapshot);
         assert_eq!(decoded.run_seed, 0xCAFE_BABE);
-        assert_eq!(decoded.schema_version, 5);
+        assert_eq!(decoded.schema_version, 8);
     }
 }
