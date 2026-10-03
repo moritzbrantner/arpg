@@ -737,6 +737,11 @@ impl ArpgGame {
             if let Some(action) = player.action {
                 Self::validate_action_snapshot(action)?;
             }
+            if !game.dungeon_contains(player.position) {
+                return Err(GameError::new(
+                    "saved player position is outside the dungeon",
+                ));
+            }
         }
 
         if save.monsters.len() != game.monsters.len() {
@@ -780,6 +785,14 @@ impl ArpgGame {
                     "saved monster room does not match generated dungeon",
                 ));
             }
+            let room_contains_monster = game.rooms.iter().any(|room| {
+                room.id == saved.room_id
+                    && saved.position[1] == PLAYER_Y
+                    && room.contains_xz_with_margin(array_to_vec(saved.position), 0)
+            });
+            if !room_contains_monster {
+                return Err(GameError::new("saved monster position is outside its room"));
+            }
             monster.position = array_to_vec(saved.position);
             monster.health = saved.health;
             monster.action = saved.action.map(|action| MonsterActionState {
@@ -797,6 +810,7 @@ impl ArpgGame {
         let mut ground_loot = Vec::with_capacity(save.ground_loot.len());
         for loot in save.ground_loot {
             if loot.id < GROUND_LOOT_ID_BASE
+                || !game.dungeon_contains(loot.position)
                 || loot.amount != GROUND_LOOT_GOLD_AMOUNT
                 || !loot_ids.insert(loot.id)
                 || loot.id >= save.next_ground_loot_id
@@ -849,7 +863,10 @@ impl ArpgGame {
             };
             game.last_sequences.insert(player.id, player.last_sequence);
             let [velocity_x, velocity_y, velocity_z] = player.velocity;
-            if velocity_y != 0 || velocity_x.abs() > PLAYER_SPEED || velocity_z.abs() > PLAYER_SPEED
+            let speed_range = -PLAYER_SPEED..=PLAYER_SPEED;
+            if velocity_y != 0
+                || !speed_range.contains(&velocity_x)
+                || !speed_range.contains(&velocity_z)
             {
                 return Err(GameError::new("saved player velocity is out of range"));
             }
@@ -861,6 +878,37 @@ impl ArpgGame {
 
         game.sync_door_locks()?;
         Ok(game)
+    }
+
+    /// Whether a saved entity position lies on the gameplay plane inside the
+    /// generated dungeon's room extents.
+    fn dungeon_contains(&self, position: [i32; 3]) -> bool {
+        let [x, y, z] = position;
+        y == PLAYER_Y
+            && self
+                .rooms
+                .iter()
+                .map(|room| room.min_x)
+                .min()
+                .is_some_and(|min| x >= min)
+            && self
+                .rooms
+                .iter()
+                .map(|room| room.max_x)
+                .max()
+                .is_some_and(|max| x <= max)
+            && self
+                .rooms
+                .iter()
+                .map(|room| room.min_z)
+                .min()
+                .is_some_and(|min| z >= min)
+            && self
+                .rooms
+                .iter()
+                .map(|room| room.max_z)
+                .max()
+                .is_some_and(|max| z <= max)
     }
 
     fn validate_axis(axis: [i8; 2], label: &str) -> Result<(), GameError> {
@@ -2994,6 +3042,46 @@ mod tests {
         assert_eq!(
             ArpgGame::from_save_state(tampered).unwrap_err().message(),
             "saved player velocity is out of range"
+        );
+        let mut minimum = game.save_state().unwrap();
+        minimum.players[0].velocity = [i32::MIN, 0, 0];
+        assert_eq!(
+            ArpgGame::from_save_state(minimum).unwrap_err().message(),
+            "saved player velocity is out of range"
+        );
+    }
+
+    #[test]
+    fn save_state_rejects_positions_outside_the_generated_dungeon() {
+        let mut game = ArpgGame::new_with_seed(0x51A7_E123).unwrap();
+        game.add_player(1).unwrap();
+        let save = game.save_state().unwrap();
+
+        let mut player = save.clone();
+        player.players[0].position = [i32::MAX, PLAYER_Y, 0];
+        assert_eq!(
+            ArpgGame::from_save_state(player).unwrap_err().message(),
+            "saved player position is outside the dungeon"
+        );
+
+        let mut monster = save.clone();
+        monster.monsters[0].position = [i32::MIN, PLAYER_Y, i32::MIN];
+        assert_eq!(
+            ArpgGame::from_save_state(monster).unwrap_err().message(),
+            "saved monster position is outside its room"
+        );
+
+        let mut loot = save;
+        loot.next_ground_loot_id = GROUND_LOOT_ID_BASE + 1;
+        loot.ground_loot.push(GroundLootSnapshot {
+            id: GROUND_LOOT_ID_BASE,
+            position: [0, i32::MAX, 0],
+            kind: LootKind::Gold,
+            amount: GROUND_LOOT_GOLD_AMOUNT,
+        });
+        assert_eq!(
+            ArpgGame::from_save_state(loot).unwrap_err().message(),
+            "save contains invalid ground loot"
         );
     }
 
