@@ -57,8 +57,43 @@ jobs:
       - name: Execute compiled WASM gameplay controls
         working-directory: web
         run: bun run test:physics-wasm
+      - name: Build dedicated acceptance server
+        run: cargo build --locked -p arpg-game-server --bin server
       - name: Verify browser workflows
         working-directory: web
         run: bun run test:browser
       - name: Verify build kept lockfiles unchanged
         run: git diff --exit-code -- Cargo.lock web/bun.lock
+
+  performance-evidence:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - name: Collect deterministic product evidence
+        run: python scripts/collect_performance_evidence.py
+      - name: Check out canonical Performance Evidence contract
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: moritzbrantner/performance-evidence
+          ref: c137f34e627451817d46343eabd5cc04580db474
+          path: .performance-evidence-contract
+      - name: Install canonical contract validator
+        run: python -m pip install -r .performance-evidence-contract/requirements-dev.txt
+      - name: Validate canonical performance evidence
+        run: |
+          cp .artifacts/performance-evidence/arpg-product-composition.json \
+            .performance-evidence-contract/fixtures/valid/arpg-product-composition.json
+          python .performance-evidence-contract/scripts/validate_schema.py
+      - name: Upload performance evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: arpg-performance-evidence
+          include-hidden-files: true
+          path: .artifacts/performance-evidence/*.json
+          if-no-files-found: error
+          retention-days: 14
