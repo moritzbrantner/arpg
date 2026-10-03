@@ -740,7 +740,12 @@ impl ArpgGame {
             if let Some(action) = player.action {
                 Self::validate_action_snapshot(action)?;
             }
-            if !game.dungeon_contains(player.position) {
+            if player.last_sequence == u32::MAX {
+                return Err(GameError::new(
+                    "saved command sequence leaves no valid next command",
+                ));
+            }
+            if !game.dungeon_contains(player.position, PLAYER_HALF_EXTENTS) {
                 return Err(GameError::new(
                     "saved player position is outside the dungeon",
                 ));
@@ -813,7 +818,7 @@ impl ArpgGame {
         let mut ground_loot = Vec::with_capacity(save.ground_loot.len());
         for loot in save.ground_loot {
             if loot.id < GROUND_LOOT_ID_BASE
-                || !game.dungeon_contains(loot.position)
+                || !game.dungeon_contains(loot.position, Vec3i::ZERO)
                 || loot.amount != GROUND_LOOT_GOLD_AMOUNT
                 || !loot_ids.insert(loot.id)
                 || loot.id >= save.next_ground_loot_id
@@ -879,15 +884,28 @@ impl ArpgGame {
                 .map_err(physics_error)?;
         }
 
+        for room in &game.rooms {
+            let living_monster = game
+                .monsters
+                .iter()
+                .any(|monster| monster.room_id == room.id && monster.health > 0);
+            if room.encounter_state == RoomEncounterState::Cleared && living_monster {
+                return Err(GameError::new(
+                    "saved cleared room still contains a living monster",
+                ));
+            }
+        }
+
         game.sync_door_locks()?;
         Ok(game)
     }
 
-    /// Whether a saved entity position lies on the gameplay plane inside the
-    /// generated dungeon's room extents.
-    fn dungeon_contains(&self, position: [i32; 3]) -> bool {
+    /// Whether a saved entity with `half_extents` lies on the gameplay plane
+    /// inside the generated dungeon without overlapping its walls or pillars.
+    /// Touching fixed geometry is allowed; penetrating it is not.
+    fn dungeon_contains(&self, position: [i32; 3], half_extents: Vec3i) -> bool {
         let [x, y, z] = position;
-        y == PLAYER_Y
+        let inside_extents = y == PLAYER_Y
             && self
                 .rooms
                 .iter()
@@ -911,7 +929,18 @@ impl ArpgGame {
                 .iter()
                 .map(|room| room.max_z)
                 .max()
-                .is_some_and(|max| z <= max)
+                .is_some_and(|max| z <= max);
+        let half_extents = vec_to_array(half_extents);
+        inside_extents
+            && !self.static_colliders.iter().any(|collider| {
+                collider.kind != StaticColliderKind::Door
+                    && (0..3).all(|axis| {
+                        let reach =
+                            i64::from(collider.half_extents[axis]) + i64::from(half_extents[axis]);
+                        (i64::from(position[axis]) - i64::from(collider.position[axis])).abs()
+                            < reach
+                    })
+            })
     }
 
     fn validate_axis(axis: [i8; 2], label: &str) -> Result<(), GameError> {
@@ -3098,6 +3127,41 @@ mod tests {
         assert_eq!(
             ArpgGame::from_save_state(monster).unwrap_err().message(),
             "saved monster position is outside its room"
+        );
+
+        let wall = game
+            .static_colliders
+            .iter()
+            .find(|collider| collider.kind == StaticColliderKind::Wall)
+            .unwrap()
+            .position;
+        let mut inside_wall = save.clone();
+        inside_wall.players[0].position = [wall[0], PLAYER_Y, wall[2]];
+        assert_eq!(
+            ArpgGame::from_save_state(inside_wall)
+                .unwrap_err()
+                .message(),
+            "saved player position is outside the dungeon"
+        );
+
+        let mut exhausted = save.clone();
+        exhausted.players[0].last_sequence = u32::MAX;
+        assert_eq!(
+            ArpgGame::from_save_state(exhausted).unwrap_err().message(),
+            "saved command sequence leaves no valid next command"
+        );
+
+        let mut cleared = save.clone();
+        let monster_room = cleared.monsters[0].room_id;
+        cleared
+            .rooms
+            .iter_mut()
+            .find(|room| room.id == monster_room)
+            .unwrap()
+            .encounter_state = RoomEncounterState::Cleared;
+        assert_eq!(
+            ArpgGame::from_save_state(cleared).unwrap_err().message(),
+            "saved cleared room still contains a living monster"
         );
 
         let mut loot = save;
