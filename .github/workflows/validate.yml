@@ -62,3 +62,15 @@ jobs:
         run: bun run test:browser
       - name: Verify build kept lockfiles unchanged
         run: git diff --exit-code -- Cargo.lock web/bun.lock
+
+  performance-smoke:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - name: Enforce the blocking performance budget
+        run: cargo run --locked --release -p arpg-core --example performance_smoke
