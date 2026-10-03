@@ -10,6 +10,7 @@ const MAX_COMMAND_PAYLOAD_BYTES = 1024;
 const MAX_SNAPSHOT_PAYLOAD_BYTES = 0xffff;
 const MAX_PENDING_COMMANDS = 256;
 const DEFAULT_RECONNECT_DELAY_MS = 250;
+const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
 const MAX_RECONNECT_DELAY_MS = 1000;
 const FNV_OFFSET_BASIS = 0xcbf29ce484222325n;
 const FNV_PRIME = 0x100000001b3n;
@@ -145,17 +146,32 @@ export function reconnectGraceMilliseconds(welcome) {
   return Number(milliseconds > maximum ? maximum : milliseconds);
 }
 
-async function readAll(stream) {
+async function boundedWait(promise, signal) {
+  signal.throwIfAborted();
+  let rejectOnAbort;
+  const aborted = new Promise((_resolve, reject) => {
+    rejectOnAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", rejectOnAbort, { once: true });
+  });
+  try {
+    return await Promise.race([promise, aborted]);
+  } finally {
+    signal.removeEventListener("abort", rejectOnAbort);
+  }
+}
+
+async function readAll(stream, signal) {
   const reader = stream.getReader();
   const chunks = [];
   let total = 0;
   try {
     while (true) {
-      const { value, done } = await reader.read();
+      const { value, done } = await boundedWait(reader.read(), signal);
       if (done) break;
       const bytes = asBytes(value);
-      chunks.push(bytes);
       total += bytes.byteLength;
+      if (total > WELCOME_BYTES) throw new Error(`Welcome stream exceeds ${WELCOME_BYTES} bytes`);
+      chunks.push(bytes);
     }
   } finally {
     reader.releaseLock();
@@ -174,12 +190,17 @@ export class DedicatedGameSession {
     endpoint,
     transportFactory = (url) => new WebTransport(url),
     reconnectDelayMs = DEFAULT_RECONNECT_DELAY_MS,
+    connectTimeoutMs = DEFAULT_CONNECT_TIMEOUT_MS,
     sleep = delay,
     now = () => Date.now(),
   }) {
     this.endpoint = endpoint;
     this.transportFactory = transportFactory;
     this.reconnectDelayMs = Math.max(1, reconnectDelayMs);
+    if (!Number.isFinite(connectTimeoutMs) || connectTimeoutMs <= 0)
+      throw new Error("Connection timeout must be positive and finite");
+    this.connectTimeoutMs = connectTimeoutMs;
+    this.connectionAbort = null;
     this.sleep = sleep;
     this.now = now;
     this.transport = null;
@@ -234,28 +255,39 @@ export class DedicatedGameSession {
     }
   }
 
-  async openTransport(endpoint, resumed) {
+  async openTransport(endpoint, resumed, timeoutMs = this.connectTimeoutMs) {
     const generation = ++this.connectionGeneration;
+    const abort = new AbortController();
+    this.connectionAbort = abort;
+    const timeout = setTimeout(
+      () => abort.abort(new Error("Dedicated handshake timed out")),
+      timeoutMs,
+    );
     let transport = null;
     try {
       transport = this.transportFactory(endpoint);
       this.transport = transport;
-      await transport.ready;
+      await boundedWait(transport.ready, abort.signal);
       this.requireCurrentTransport(transport, generation);
 
       const streams = transport.incomingUnidirectionalStreams.getReader();
-      const { value: welcomeStream, done } = await streams.read();
-      streams.releaseLock();
+      let welcomeStream;
+      let done;
+      try {
+        ({ value: welcomeStream, done } = await boundedWait(streams.read(), abort.signal));
+      } finally {
+        streams.releaseLock();
+      }
       if (done || !welcomeStream) throw new Error("Dedicated server closed before welcome");
 
-      const welcome = decodeGameServerWelcome(await readAll(welcomeStream));
+      const welcome = decodeGameServerWelcome(await readAll(welcomeStream, abort.signal));
       this.requireCurrentTransport(transport, generation);
       const previous = this.welcome;
       if (resumed) this.validateResumedWelcome(previous, welcome);
 
       this.datagramWriter = transport.datagrams.writable.getWriter();
       this.welcome = welcome;
-      await this.flushPendingCommands(transport, generation);
+      await boundedWait(this.flushPendingCommands(transport, generation), abort.signal);
       this.requireCurrentTransport(transport, generation);
 
       this.callbacks.onWelcome?.(welcome, { resumed });
@@ -268,27 +300,33 @@ export class DedicatedGameSession {
     } catch (error) {
       if (transport) this.detachTransport(transport, generation, true);
       throw error;
+    } finally {
+      clearTimeout(timeout);
     }
   }
 
   async consumeSnapshots(transport, generation) {
-    const reader = transport.datagrams.readable.getReader();
+    let reader;
     try {
+      reader = transport.datagrams.readable.getReader();
       while (this.isCurrentTransport(transport, generation)) {
         const { value, done } = await reader.read();
+        if (!this.isCurrentTransport(transport, generation)) return;
         if (done) return;
         this.callbacks.onSnapshot?.(decodeGameServerSnapshot(value));
       }
     } catch (error) {
       this.handleTransportFailure(transport, generation, error);
     } finally {
-      reader.releaseLock();
+      reader?.releaseLock();
     }
   }
 
   detachTransport(transport, generation, closeTransport) {
     if (this.transport !== transport || this.connectionGeneration !== generation) return false;
     this.connectionGeneration += 1;
+    this.connectionAbort?.abort(new Error("Dedicated connection was superseded"));
+    this.connectionAbort = null;
     try {
       this.datagramWriter?.releaseLock();
     } catch {
@@ -308,7 +346,7 @@ export class DedicatedGameSession {
 
   handleTransportFailure(transport, generation, error = null) {
     if (this.closedByClient || !this.isCurrentTransport(transport, generation)) return;
-    if (!this.detachTransport(transport, generation, false)) return;
+    if (!this.detachTransport(transport, generation, true)) return;
     if (error) this.callbacks.onError?.(error);
     if (!this.welcome) {
       this.callbacks.onStateChange?.("disconnected");
@@ -346,7 +384,11 @@ export class DedicatedGameSession {
       const token = this.welcome.reconnectToken;
       const attemptedToken = reconnectTokenHex(token);
       try {
-        await this.openTransport(reconnectEndpoint(this.endpoint, token), true);
+        await this.openTransport(
+          reconnectEndpoint(this.endpoint, token),
+          true,
+          Math.max(1, Math.min(this.connectTimeoutMs, deadline - this.now())),
+        );
         return;
       } catch (error) {
         lastError = error;
@@ -379,6 +421,7 @@ export class DedicatedGameSession {
       this.requireCurrentTransport(transport, generation);
       if (!this.datagramWriter) throw new Error("Dedicated datagram writer is unavailable");
       await this.datagramWriter.write(this.pendingCommands[0]);
+      this.requireCurrentTransport(transport, generation);
       this.pendingCommands.shift();
     }
   }
@@ -396,7 +439,10 @@ export class DedicatedGameSession {
     const transport = this.transport;
     const generation = this.connectionGeneration;
     try {
-      await this.datagramWriter.write(frame);
+      await boundedWait(
+        this.datagramWriter.write(frame),
+        AbortSignal.any([this.connectionAbort.signal, AbortSignal.timeout(this.connectTimeoutMs)]),
+      );
     } catch (error) {
       if (this.isCurrentTransport(transport, generation)) {
         this.enqueueCommand(frame);
@@ -411,6 +457,8 @@ export class DedicatedGameSession {
     this.closedByClient = true;
     this.reconnectRequested = false;
     this.connectionGeneration += 1;
+    this.connectionAbort?.abort(new Error("Dedicated session was closed"));
+    this.connectionAbort = null;
     try {
       this.datagramWriter?.releaseLock();
     } catch {

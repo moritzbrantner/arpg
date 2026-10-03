@@ -7,6 +7,9 @@ const vendor = (...parts) => resolve(here, "src", "vendor", "input-bindings", ..
 
 export default defineConfig({
   base: "/arpg/",
+  esbuild: {
+    jsx: "automatic",
+  },
   resolve: {
     alias: [
       {

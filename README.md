@@ -13,6 +13,7 @@ The browser slice currently proves:
 - an isometric follow camera and simple 3D scene rendered through `3d-lab`;
 - nearby primary attacks against deterministic monster state;
 - deterministic character progression exposed through authoritative snapshots;
+- a deterministic combat training arena available through the character screen or `?scenario=training&seed=<u32>`, with pause, single-step, explicit simulation speed, seed restart, and live combat diagnostics;
 - a settings menu with graphics controls and the reusable `input-bindings` keybinding editor;
 - local Rust/Wasm play;
 - one fresh 32-bit run seed per new authority, carried in authoritative snapshots so multiplayer and replay evidence identify the exact generated dungeon;
@@ -57,8 +58,8 @@ Rust validation:
 
 ```sh
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-features
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+cargo test --locked --workspace --all-features
 ```
 
 Browser shell:
@@ -66,11 +67,28 @@ Browser shell:
 ```sh
 cargo install wasm-pack --locked --version 0.13.1
 cd web
-bun install
+bun install --frozen-lockfile
+bun run setup
 bun run dev
 ```
 
-The web build downloads the accepted browser sources from `input-bindings` and `multiplayer-setup-service`, verifies their exact Git blob hashes, and then builds the Rust/Wasm package. Generated vendored sources and Wasm output are not committed.
+Browser validation after setup:
+
+```sh
+bun run format:check
+bun run lint
+bun run test
+bun run build
+bun run test:physics-wasm
+bunx playwright install chromium
+bun run test:browser
+```
+
+Formatting writes are explicit through `bun run format`. Browser tests start their
+own local servers on OS-allocated ports, use the actual WASM game, and retain
+failure traces under ignored `web/test-results/`.
+
+`bun run setup` acquires the accepted browser sources from `input-bindings` and `multiplayer-setup-service`, verifies their exact Git blob hashes, and builds the Rust/Wasm package. Verified foundation files are reused without downloads or rewrites. After setup, `bun run build` bundles locally with Vite and `bun run dev` starts Vite without downloading sources. Run `bun run wasm` again after Rust changes. Generated vendored sources and Wasm output are not committed.
 
 For peer co-op, run or deploy `multiplayer-setup-service` separately and enter its URL in **Settings → Peer co-op**. Local development defaults to `http://127.0.0.1:8787`. GitHub Pages requires an HTTPS/WSS deployment whose `ALLOWED_ORIGINS` includes the ARPG Pages origin.
 
@@ -82,14 +100,18 @@ ARPG_SERVER_KEY_PEM=key.pem \
 cargo run -p arpg-game-server --bin server
 ```
 
-The dedicated host defaults to UDP port `4433` and session path `/arpg`. Optional configuration is available through `ARPG_SERVER_PORT`, `ARPG_SERVER_SESSION_PATH`, `ARPG_SERVER_RECOVERY_PATH`, and `ARPG_SERVER_DRAIN_GRACE_MS`. A fresh run seed is generated once when the process starts and logged for replay evidence; set `ARPG_RUN_SEED=<u32>` to reproduce a known run exactly. In a browser with WebTransport support, enter the resulting HTTPS endpoint (for example `https://127.0.0.1:4433/arpg`) under **Settings → Dedicated online**. The certificate must be trusted by the browser.
+The dedicated host defaults to UDP port `4433` and session path `/arpg`. Optional configuration is available through `ARPG_SERVER_PORT`, `ARPG_SERVER_SESSION_PATH`, `ARPG_SERVER_RECOVERY_PATH`, and `ARPG_SERVER_DRAIN_GRACE_MS`. See [`.env.example`](.env.example) for the environment contract; export these variables into the server process because the native server does not load dotenv files. Keep local configuration, certificates, private keys, and recovery data uncommitted. A fresh run seed is generated once when the process starts and logged for replay evidence; set `ARPG_RUN_SEED=<u32>` to reproduce a known run exactly. In a browser with WebTransport support, enter the resulting HTTPS endpoint (for example `https://127.0.0.1:4433/arpg`) under **Settings → Dedicated online**. The certificate must be trusted by the browser.
+
+## Repository development policy
+
+[`AGENTS.md`](AGENTS.md) describes how to resolve the live shared coding-agent conventions, the domain ownership boundaries, and the checks used by this repository. Shared policy remains in the central checkout rather than being copied or pinned here.
 
 ## Pinned foundations
 
-- `physics-engine`: `43cb991ac2fce267654fc0c8a1b29984c1162428`
-- `3d-lab`: `2af3ef54bb515c8f5611d4f7d39d484202a42784`
+- `physics-engine`: `65e00816fa4e17c899f45d618dcdc8c40990dc00`
+- `3d-lab`: `f484db8a3d2a7a555fa463eddf9c28790b240ce0`
 - `input-bindings`: `b3b7204faa47d3b0af56eebc55cdfd4ced127ddc`
-- `multiplayer-setup-service`: `556f1aa2ac889acffd5b2b27163fca10f1901793`
-- `game-server`: `81cad7a4d80849d13c37120a411d3a053c46f9a0`
+- `multiplayer-setup-service`: `a8064298182c71267a453071f923d9e0640afdcf`
+- `game-server`: `a3851dab9c1fb25dd31b465fb554ca475769caab`
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the authority and trust boundaries.

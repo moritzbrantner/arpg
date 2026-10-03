@@ -1,0 +1,13 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "env": { "browser": true, "node": true },
+  "plugins": ["react", "import"],
+  "ignorePatterns": ["src/vendor/**", "src/wasm/**"],
+  "rules": {
+    "no-unused-vars": "error",
+    "no-undef": "error",
+    "react/jsx-no-undef": "error",
+    "react/jsx-key": "error",
+    "import/no-cycle": "error"
+  }
+}
