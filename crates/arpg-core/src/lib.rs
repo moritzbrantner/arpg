@@ -18,6 +18,7 @@ pub type PlayerId = u32;
 pub type RoomId = u32;
 pub type RunSeed = u32;
 pub const TICK_HZ: u16 = 60;
+const PHYSICS_TICKS_PER_GAME_TICK: i32 = 1;
 pub const MAX_PLAYERS: usize = 4;
 pub const WORLD_UNITS_PER_METER: i32 = 100;
 pub const SAVE_STATE_SCHEMA_VERSION: u16 = 1;
@@ -538,6 +539,7 @@ pub struct ArpgGame {
     run_seed: RunSeed,
     tick: u64,
     world: World,
+    physics_steps: u64,
     players: BTreeMap<PlayerId, PlayerState>,
     last_sequences: BTreeMap<PlayerId, u32>,
     rooms: Vec<RoomSnapshot>,
@@ -586,6 +588,7 @@ impl ArpgGame {
             run_seed,
             tick: 0,
             world,
+            physics_steps: 0,
             players: BTreeMap::new(),
             last_sequences: BTreeMap::new(),
             rooms,
@@ -942,6 +945,14 @@ impl ArpgGame {
             return Err(GameError::new("saved player action timing is invalid"));
         }
         Ok(())
+    }
+
+    /// Number of physics-engine ticks stepped by this game since construction.
+    ///
+    /// Performance evidence uses this operation count to detect regressions
+    /// where one gameplay tick begins stepping physics more than once.
+    pub fn physics_steps(&self) -> u64 {
+        self.physics_steps
     }
 
     fn player_body_id(player_id: PlayerId) -> BodyId {
@@ -1569,7 +1580,14 @@ impl AuthoritativeGame for ArpgGame {
         {
             #[cfg(test)]
             let measurement = physics_workloads::start_physics();
-            let _report = self.world.step(1).map_err(physics_error)?;
+            let _report = self
+                .world
+                .step(PHYSICS_TICKS_PER_GAME_TICK)
+                .map_err(physics_error)?;
+            self.physics_steps = self
+                .physics_steps
+                .checked_add(u64::from(PHYSICS_TICKS_PER_GAME_TICK.unsigned_abs()))
+                .ok_or_else(|| GameError::new("physics step counter overflow"))?;
             #[cfg(test)]
             physics_workloads::finish_physics(measurement, &_report);
         }
@@ -2012,6 +2030,17 @@ mod tests {
             experience: 0,
             gold: 0,
         }
+    }
+
+    #[test]
+    fn each_gameplay_tick_steps_physics_once() {
+        let mut game = ArpgGame::new().unwrap();
+        game.add_player(1).unwrap();
+        assert_eq!(game.physics_steps(), 0);
+        for _ in 0..5 {
+            game.advance_tick().unwrap();
+        }
+        assert_eq!(game.physics_steps(), 5);
     }
 
     #[test]
