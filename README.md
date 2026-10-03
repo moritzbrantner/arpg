@@ -16,6 +16,7 @@ The browser slice currently proves:
 - a deterministic combat training arena available through the character screen or `?scenario=training&seed=<u32>`, with pause, single-step, explicit simulation speed, seed restart, and live combat diagnostics;
 - a settings menu with graphics controls and the reusable `input-bindings` keybinding editor;
 - local Rust/Wasm play;
+- versioned Rust-authoritative savestates with browser quick-save/load and portable JSON import/export;
 - one fresh 32-bit run seed per new authority, carried in authoritative snapshots so multiplayer and replay evidence identify the exact generated dungeon;
 - host-authoritative peer co-op using `multiplayer-setup-service` for rendezvous and direct WebRTC data channels for commands/snapshots;
 - dedicated online play over the shared `game-server` WebTransport protocol, with browser-side framing and snapshot-hash verification but no duplicated gameplay rules;
@@ -40,7 +41,7 @@ The next product foundation is the **mechanical game loop**: locomotion, action 
 | Dedicated sessions, ticks, reconnect, replay/recovery | `game-server` |
 | Browser composition/HUD/settings | `web` |
 
-Neither renderer nor network transport is a source of gameplay truth.
+Savestate semantics also live in `arpg-core`: the browser only persists or transfers the versioned save document and asks Rust to validate and restore it. Neither renderer nor network transport is a source of gameplay truth.
 
 ## Execution modes
 

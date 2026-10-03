@@ -36,6 +36,7 @@ version = "0.1.0"
 dependencies = [
  "arpg-core",
  "arpg-protocol",
+ "serde_json",
  "wasm-bindgen",
 ]
 

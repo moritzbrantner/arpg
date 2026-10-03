@@ -492,6 +492,21 @@ select {
   color: #8f887b;
   font-size: 0.78rem;
 }
+.character-select-save-actions {
+  display: flex;
+  gap: 0.65rem;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.character-select-save-actions > button:not(.enter-world-button):not(.training-entry-button) {
+  min-height: 3.15rem;
+  border-color: #5a5349;
+  background: #171916e8;
+}
+.save-file-input {
+  display: none;
+}
 .training-entry-button {
   min-width: 10rem;
   min-height: 3.15rem;
@@ -925,6 +940,26 @@ select {
   min-width: 0;
   border-bottom: 0 !important;
 }
+.save-state-summary {
+  display: grid;
+  gap: 0.25rem;
+  margin: 0.4rem 0 0.9rem;
+  padding: 0.8rem 0.9rem;
+  border: 1px solid #38332e;
+  background: #12110f;
+}
+.save-state-summary strong {
+  color: #eee8dc;
+  font-size: 0.92rem;
+}
+.save-state-summary span {
+  color: #a99f91;
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+.save-state-actions button {
+  min-width: 8.5rem;
+}
 
 /* The reusable editor is viewport-responsive, but this editor lives in a
    narrower drawer. Force its container-sized compact layout here. */
@@ -1167,6 +1202,11 @@ select {
     margin: 0;
     text-align: center;
   }
+  .character-select-save-actions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .character-select-save-actions > button,
   .training-entry-button,
   .enter-world-button {
     width: 100%;
