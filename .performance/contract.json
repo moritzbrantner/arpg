@@ -1,0 +1,81 @@
+{
+  "schemaVersion": 1,
+  "suite": "arpg/product-composition-v1",
+  "description": "Transport-neutral ARPG core composition over physics-engine. The product contract protects command/tick/snapshot orchestration without duplicating physics-engine microbenchmarks or game-server transport benchmarks.",
+  "scenarios": [
+    {
+      "id": "four-player-combat",
+      "kind": "journey",
+      "description": "Drive four players through deterministic movement, periodic attacks, physics stepping and regular snapshots for one simulated minute.",
+      "dimensions": {
+        "players": 4,
+        "ticks": 3600,
+        "tick_hz": 60,
+        "snapshot_interval_ticks": 60,
+        "attack_interval_ticks": 90,
+        "movement_change_interval_ticks": 300,
+        "runs": 3
+      },
+      "correctnessEvidence": [
+        "identical final ArpgSnapshot across repeated runs",
+        "monotonic command sequences",
+        "intermediate snapshot tick identity",
+        "physics-engine remains authoritative for movement/collision"
+      ],
+      "metrics": [
+        {
+          "name": "median_elapsed_ns",
+          "unit": "ns",
+          "direction": "lower",
+          "signal": "wall-clock",
+          "blocking": false
+        },
+        {
+          "name": "physics_steps",
+          "unit": "steps",
+          "direction": "lower",
+          "signal": "operation-count",
+          "blocking": true,
+          "budget": { "max": 3600 }
+        },
+        {
+          "name": "snapshot_materializations",
+          "unit": "snapshots",
+          "direction": "lower",
+          "signal": "operation-count",
+          "blocking": false,
+          "notes": "Expose an internal counter before making snapshot/materialization cost blocking; the journey intentionally samples every 60 ticks rather than every tick."
+        },
+        {
+          "name": "monster_target_evaluations",
+          "unit": "evaluations",
+          "direction": "lower",
+          "signal": "operation-count",
+          "blocking": false,
+          "notes": "Planned deterministic counter for attack/AI scaling as the monster population grows."
+        }
+      ]
+    },
+    {
+      "id": "server-snapshot-path",
+      "kind": "scaling",
+      "description": "Future game-server integration evidence should measure serialization/snapshot/reconnect composition separately from ARPG core stepping.",
+      "dimensions": {
+        "players": 4
+      },
+      "correctnessEvidence": [
+        "same authoritative ArpgSnapshot crosses local/browser/dedicated hosting seams"
+      ],
+      "metrics": [
+        {
+          "name": "snapshot_bytes",
+          "unit": "bytes",
+          "direction": "lower",
+          "signal": "size",
+          "blocking": false,
+          "notes": "Add when the game-server adapter exposes a stable benchmark fixture; do not move transport logic into arpg-core to obtain this metric."
+        }
+      ]
+    }
+  ]
+}
