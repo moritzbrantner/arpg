@@ -7,6 +7,11 @@ use std::fmt;
 use physics_engine::{BodyId, RigidBody, Vec3i, World, WorldConfig};
 use serde::{Deserialize, Serialize};
 
+#[cfg(test)]
+mod physics_work;
+#[cfg(test)]
+mod physics_workloads;
+
 pub type DoorId = u64;
 pub type GroundLootId = u64;
 pub type PlayerId = u32;
@@ -22,6 +27,12 @@ pub const SAVE_STATE_RULES_VERSION: u16 = 1;
 // the previous 260 units/tick (156 m/s).
 const PLAYER_SPEED: i32 = 7;
 const PLAYER_DIAGONAL_SPEED: i32 = 5;
+// Control converges on player intent over a few 60 Hz ticks instead of replacing
+// collision-resolved velocity every frame. This keeps movement responsive while
+// preserving physics-engine as the velocity authority.
+const PLAYER_ACCELERATION_PER_TICK: i32 = 3;
+const PLAYER_BRAKING_PER_TICK: i32 = 5;
+const PLAYER_REVERSAL_PER_TICK: i32 = 5;
 const PLAYER_BODY_BASE: u64 = 1_000;
 const STATIC_BODY_BASE: u64 = 10_000;
 const DOOR_BODY_BASE: u64 = 20_000;
@@ -359,6 +370,8 @@ pub struct ArpgSaveState {
 pub struct PlayerSaveState {
     pub id: PlayerId,
     pub position: [i32; 3],
+    /// Physical velocity carried into the next tick by controlled acceleration.
+    pub velocity: [i32; 3],
     pub movement: [i8; 2],
     pub facing: [i8; 2],
     pub action: Option<PlayerActionSnapshot>,
@@ -601,6 +614,7 @@ impl ArpgGame {
                 Ok(PlayerSaveState {
                     id,
                     position: vec_to_array(body.position()),
+                    velocity: vec_to_array(body.velocity()),
                     movement: [state.movement_x, state.movement_z],
                     facing: [state.facing_x, state.facing_z],
                     action: state.action.map(ActionState::snapshot),
@@ -834,7 +848,12 @@ impl ArpgGame {
                 gold: player.gold,
             };
             game.last_sequences.insert(player.id, player.last_sequence);
-            let velocity = Self::movement_velocity(*state);
+            let [velocity_x, velocity_y, velocity_z] = player.velocity;
+            if velocity_y != 0 || velocity_x.abs() > PLAYER_SPEED || velocity_z.abs() > PLAYER_SPEED
+            {
+                return Err(GameError::new("saved player velocity is out of range"));
+            }
+            let velocity = array_to_vec(player.velocity);
             game.world
                 .set_velocity(Self::player_body_id(player.id), velocity)
                 .map_err(physics_error)?;
@@ -898,10 +917,7 @@ impl ArpgGame {
         )
     }
 
-    fn movement_velocity(state: PlayerState) -> Vec3i {
-        if state.health == 0 || state.action.is_some() {
-            return Vec3i::ZERO;
-        }
+    fn movement_target_velocity(state: PlayerState) -> Vec3i {
         let x = i32::from(state.movement_x.clamp(-1, 1));
         let z = i32::from(state.movement_z.clamp(-1, 1));
         if x != 0 && z != 0 {
@@ -909,6 +925,51 @@ impl ArpgGame {
         } else {
             Vec3i::new(x * PLAYER_SPEED, 0, z * PLAYER_SPEED)
         }
+    }
+
+    fn controlled_movement_velocity(current: Vec3i, state: PlayerState) -> Vec3i {
+        if state.health == 0 || state.action.is_some() {
+            return Vec3i::ZERO;
+        }
+        let target = Self::movement_target_velocity(state);
+        let changing_x = current.x != target.x;
+        let changing_z = current.z != target.z;
+        let changing_two_axes = changing_x && changing_z;
+        Vec3i::new(
+            Self::approach_controlled_axis(current.x, target.x, changing_two_axes),
+            0,
+            Self::approach_controlled_axis(current.z, target.z, changing_two_axes),
+        )
+    }
+
+    fn approach_controlled_axis(current: i32, target: i32, changing_two_axes: bool) -> i32 {
+        let maximum_delta = if target == 0 {
+            PLAYER_BRAKING_PER_TICK
+        } else if current != 0 && current.signum() != target.signum() {
+            PLAYER_REVERSAL_PER_TICK
+        } else {
+            PLAYER_ACCELERATION_PER_TICK
+        };
+        let maximum_delta = Self::normalized_axis_control_delta(maximum_delta, changing_two_axes);
+        if current < target {
+            current.saturating_add(maximum_delta).min(target)
+        } else if current > target {
+            current.saturating_sub(maximum_delta).max(target)
+        } else {
+            current
+        }
+    }
+
+    fn normalized_axis_control_delta(maximum_delta: i32, changing_two_axes: bool) -> i32 {
+        if !changing_two_axes {
+            return maximum_delta;
+        }
+        let maximum_squared = maximum_delta * maximum_delta;
+        let mut component = maximum_delta;
+        while component > 0 && 2 * component * component > maximum_squared {
+            component -= 1;
+        }
+        component
     }
 
     fn room_at_position(&self, position: Vec3i) -> Option<RoomId> {
@@ -1316,7 +1377,7 @@ impl ArpgGame {
             if self.doors[index].locked == desired_locked {
                 continue;
             }
-            let door = self.doors[index].clone();
+            let door = &self.doors[index];
             if desired_locked {
                 self.world
                     .add_body(RigidBody::fixed(
@@ -1444,14 +1505,26 @@ impl AuthoritativeGame for ArpgGame {
             monster.stagger_ticks_remaining = monster.stagger_ticks_remaining.saturating_sub(1);
         }
         for (&player_id, &state) in &self.players {
+            let body_id = Self::player_body_id(player_id);
+            let current_velocity = self
+                .world
+                .body(body_id)
+                .ok_or_else(|| GameError::new("player physics body is missing"))?
+                .velocity();
             self.world
                 .set_velocity(
-                    Self::player_body_id(player_id),
-                    Self::movement_velocity(state),
+                    body_id,
+                    Self::controlled_movement_velocity(current_velocity, state),
                 )
                 .map_err(physics_error)?;
         }
-        self.world.step(1).map_err(physics_error)?;
+        {
+            #[cfg(test)]
+            let measurement = physics_workloads::start_physics();
+            let _report = self.world.step(1).map_err(physics_error)?;
+            #[cfg(test)]
+            physics_workloads::finish_physics(measurement, &_report);
+        }
         self.reconcile_encounters()?;
         self.advance_actions()?;
         self.advance_monster_actions()?;
@@ -1879,32 +1952,139 @@ mod tests {
         );
     }
 
+    fn movement_state(x: i8, z: i8) -> PlayerState {
+        PlayerState {
+            movement_x: x,
+            movement_z: z,
+            facing_x: if x == 0 { 1 } else { x },
+            facing_z: z,
+            action: None,
+            hurt_ticks_remaining: 0,
+            health: BASE_MAX_HEALTH,
+            experience: 0,
+            gold: 0,
+        }
+    }
+
     #[test]
     fn movement_speed_is_tuned_for_precise_room_navigation() {
-        let cardinal = ArpgGame::movement_velocity(PlayerState {
-            movement_x: 1,
-            movement_z: 0,
-            facing_x: 1,
-            facing_z: 0,
-            action: None,
-            hurt_ticks_remaining: 0,
-            health: BASE_MAX_HEALTH,
-            experience: 0,
-            gold: 0,
-        });
-        let diagonal = ArpgGame::movement_velocity(PlayerState {
-            movement_x: 1,
-            movement_z: 1,
-            facing_x: 1,
-            facing_z: 1,
-            action: None,
-            hurt_ticks_remaining: 0,
-            health: BASE_MAX_HEALTH,
-            experience: 0,
-            gold: 0,
-        });
+        let cardinal = ArpgGame::movement_target_velocity(movement_state(1, 0));
+        let diagonal = ArpgGame::movement_target_velocity(movement_state(1, 1));
         assert_eq!(cardinal, Vec3i::new(7, 0, 0));
         assert_eq!(diagonal, Vec3i::new(5, 0, 5));
+    }
+
+    #[test]
+    fn locomotion_accelerates_brakes_and_reverses_over_bounded_ticks() {
+        let forward = movement_state(1, 0);
+        let idle = movement_state(0, 0);
+        let reverse = movement_state(-1, 0);
+
+        let first = ArpgGame::controlled_movement_velocity(Vec3i::ZERO, forward);
+        let second = ArpgGame::controlled_movement_velocity(first, forward);
+        let full = ArpgGame::controlled_movement_velocity(second, forward);
+        assert_eq!(first, Vec3i::new(3, 0, 0));
+        assert_eq!(second, Vec3i::new(6, 0, 0));
+        assert_eq!(full, Vec3i::new(7, 0, 0));
+
+        let braking = ArpgGame::controlled_movement_velocity(full, idle);
+        let stopped = ArpgGame::controlled_movement_velocity(braking, idle);
+        assert_eq!(braking, Vec3i::new(2, 0, 0));
+        assert_eq!(stopped, Vec3i::ZERO);
+
+        let turning = ArpgGame::controlled_movement_velocity(full, reverse);
+        let crossed_zero = ArpgGame::controlled_movement_velocity(turning, reverse);
+        let accelerating_reverse = ArpgGame::controlled_movement_velocity(crossed_zero, reverse);
+        let reversed = ArpgGame::controlled_movement_velocity(accelerating_reverse, reverse);
+        assert_eq!(turning, Vec3i::new(2, 0, 0));
+        assert_eq!(crossed_zero, Vec3i::new(-3, 0, 0));
+        assert_eq!(accelerating_reverse, Vec3i::new(-6, 0, 0));
+        assert_eq!(reversed, Vec3i::new(-7, 0, 0));
+    }
+
+    #[test]
+    fn diagonal_control_normalizes_acceleration_braking_and_reversal() {
+        let forward = movement_state(1, 1);
+        let idle = movement_state(0, 0);
+        let reverse = movement_state(-1, -1);
+
+        let first = ArpgGame::controlled_movement_velocity(Vec3i::ZERO, forward);
+        let second = ArpgGame::controlled_movement_velocity(first, forward);
+        let full = ArpgGame::controlled_movement_velocity(second, forward);
+        assert_eq!(first, Vec3i::new(2, 0, 2));
+        assert_eq!(second, Vec3i::new(4, 0, 4));
+        assert_eq!(full, Vec3i::new(5, 0, 5));
+        assert!(first.x * first.x + first.z * first.z <= PLAYER_ACCELERATION_PER_TICK.pow(2));
+
+        let braking = ArpgGame::controlled_movement_velocity(full, idle);
+        let stopped = ArpgGame::controlled_movement_velocity(braking, idle);
+        assert_eq!(braking, Vec3i::new(2, 0, 2));
+        assert_eq!(stopped, Vec3i::ZERO);
+
+        let turning = ArpgGame::controlled_movement_velocity(full, reverse);
+        let crossed_zero = ArpgGame::controlled_movement_velocity(turning, reverse);
+        let accelerating_reverse = ArpgGame::controlled_movement_velocity(crossed_zero, reverse);
+        let reversed = ArpgGame::controlled_movement_velocity(accelerating_reverse, reverse);
+        assert_eq!(turning, Vec3i::new(2, 0, 2));
+        assert_eq!(crossed_zero, Vec3i::new(-1, 0, -1));
+        assert_eq!(accelerating_reverse, Vec3i::new(-3, 0, -3));
+        assert_eq!(reversed, Vec3i::new(-5, 0, -5));
+    }
+
+    #[test]
+    fn action_commitment_stops_controlled_movement_immediately() {
+        let mut game = ArpgGame::new_with_seed(42).unwrap();
+        game.add_player(1).unwrap();
+        game.apply_command(
+            PlayerCommand::new(1, 1, ArpgCommand::SetMovement { x: 1, z: 0 }).unwrap(),
+        )
+        .unwrap();
+        for _ in 0..3 {
+            game.advance_tick().unwrap();
+        }
+        assert_eq!(
+            game.world
+                .body(ArpgGame::player_body_id(1))
+                .unwrap()
+                .velocity(),
+            Vec3i::new(7, 0, 0)
+        );
+
+        game.apply_command(PlayerCommand::new(1, 2, ArpgCommand::PrimaryAttack).unwrap())
+            .unwrap();
+        game.advance_tick().unwrap();
+
+        assert_eq!(
+            game.world
+                .body(ArpgGame::player_body_id(1))
+                .unwrap()
+                .velocity(),
+            Vec3i::ZERO
+        );
+    }
+
+    #[test]
+    fn diagonal_control_slides_along_outer_wall() {
+        let mut game = ArpgGame::new_with_seed(42).unwrap();
+        game.add_player(1).unwrap();
+        let body_id = ArpgGame::player_body_id(1);
+        let contact_x = ARENA_HALF_WIDTH - WALL_HALF_THICKNESS - PLAYER_HALF_EXTENTS.x;
+        let start_z = -1_000;
+        game.world
+            .set_position(body_id, Vec3i::new(contact_x, PLAYER_Y, start_z))
+            .unwrap();
+        game.apply_command(
+            PlayerCommand::new(1, 1, ArpgCommand::SetMovement { x: 1, z: 1 }).unwrap(),
+        )
+        .unwrap();
+
+        for _ in 0..10 {
+            game.advance_tick().unwrap();
+        }
+
+        let position = game.world.body(body_id).unwrap().position();
+        assert_eq!(position.x, contact_x);
+        assert!(position.z > start_z + 30);
     }
 
     fn run_action(game: &mut ArpgGame, player_id: PlayerId, sequence: u32, command: ArpgCommand) {
@@ -2790,6 +2970,34 @@ mod tests {
     }
 
     #[test]
+    fn save_state_preserves_velocity_while_accelerating() {
+        let mut game = ArpgGame::new_with_seed(0x51A7_E123).unwrap();
+        game.add_player(1).unwrap();
+        game.apply_command(
+            PlayerCommand::new(1, 1, ArpgCommand::SetMovement { x: 1, z: 0 }).unwrap(),
+        )
+        .unwrap();
+        game.advance_tick().unwrap();
+
+        let save = game.save_state().unwrap();
+        assert_ne!(save.players[0].velocity, [0, 0, 0]);
+        assert_ne!(save.players[0].velocity, [PLAYER_SPEED, 0, 0]);
+        let mut restored = ArpgGame::from_save_state(save.clone()).unwrap();
+        for _ in 0..4 {
+            game.advance_tick().unwrap();
+            restored.advance_tick().unwrap();
+            assert_eq!(restored.snapshot().unwrap(), game.snapshot().unwrap());
+        }
+
+        let mut tampered = save;
+        tampered.players[0].velocity = [PLAYER_SPEED + 1, 0, 0];
+        assert_eq!(
+            ArpgGame::from_save_state(tampered).unwrap_err().message(),
+            "saved player velocity is out of range"
+        );
+    }
+
+    #[test]
     fn save_state_restores_command_sequence_fence() {
         let mut game = ArpgGame::new_with_seed(17).unwrap();
         game.add_player(1).unwrap();
@@ -2836,5 +3044,4 @@ mod tests {
             "save room set does not match generated dungeon"
         );
     }
-
 }

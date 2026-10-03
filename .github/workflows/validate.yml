@@ -9,7 +9,7 @@ jobs:
     permissions:
       contents: read
       packages: read
-    uses: moritzbrantner/reusable-workflows/.github/workflows/validate-repo.yml@28a77d034ce18595e5f058f81e8063ea67d23bd9
+    uses: moritzbrantner/reusable-workflows/.github/workflows/validate-repo.yml@main
     with:
       bun_version: ""
       node_version: ""
@@ -26,12 +26,12 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.98.0
+          toolchain: 1.98.1
           targets: wasm32-unknown-unknown
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.2
       - name: Install wasm-pack
@@ -39,11 +39,26 @@ jobs:
       - name: Install web dependencies
         working-directory: web
         run: bun install --frozen-lockfile
-      - name: Test browser input helpers
+      - name: Check browser formatting and lint
+        working-directory: web
+        run: bun run format:check && bun run lint
+      - name: Test browser contracts
         working-directory: web
         run: bun run test
+      - name: Install browser test runtime
+        working-directory: web
+        run: bunx playwright install --with-deps chromium
       - name: Build browser MVP
         working-directory: web
+        run: bun run setup
+      - name: Bundle browser MVP
+        working-directory: web
         run: bun run build
+      - name: Execute compiled WASM gameplay controls
+        working-directory: web
+        run: bun run test:physics-wasm
+      - name: Verify browser workflows
+        working-directory: web
+        run: bun run test:browser
       - name: Verify build kept lockfiles unchanged
         run: git diff --exit-code -- Cargo.lock web/bun.lock

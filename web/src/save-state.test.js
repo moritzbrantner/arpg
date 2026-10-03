@@ -84,9 +84,27 @@ describe("save documents", () => {
       controlledPlayerId: 1,
     });
     expect(hasPersistedSaveDocument(store)).toBe(false);
-    persistSaveDocument(store, document);
+    expect(persistSaveDocument(store, document)).toBe(true);
     expect(hasPersistedSaveDocument(store)).toBe(true);
     expect(store.getItem(SAVE_STORAGE_KEY)).toBe(serializeSaveDocument(document));
     expect(loadPersistedSaveDocument(store)).toEqual(document);
+  });
+
+  test("reports blocked or full storage without throwing", () => {
+    const document = createSaveDocument(coreStateJson, {
+      characterId: "thorne",
+      controlledPlayerId: 1,
+    });
+    const blocked = {
+      getItem() {
+        throw new DOMException("Blocked", "SecurityError");
+      },
+      setItem() {
+        throw new DOMException("Quota exceeded", "QuotaExceededError");
+      },
+    };
+    expect(persistSaveDocument(blocked, document)).toBe(false);
+    expect(hasPersistedSaveDocument(blocked)).toBe(false);
+    expect(loadPersistedSaveDocument(blocked)).toBeNull();
   });
 });

@@ -1,3 +1,5 @@
+import { persistStoredValue, readStoredValue } from "./preferences.js";
+
 export const SAVE_STORAGE_KEY = "arpg-save-document-v1";
 export const SAVE_DOCUMENT_FORMAT = "arpg-save";
 export const SAVE_DOCUMENT_VERSION = 1;
@@ -64,23 +66,21 @@ export function serializeSaveDocument(document) {
   return `${JSON.stringify(parseSaveDocument(JSON.stringify(document)), null, 2)}\n`;
 }
 
+/**
+ * Persists the save in browser storage. Returns false when storage is blocked
+ * or full; the save itself remains valid and the caller decides how to report it.
+ */
 export function persistSaveDocument(storage, document) {
-  const encoded = serializeSaveDocument(document);
-  storage.setItem(SAVE_STORAGE_KEY, encoded);
-  return encoded;
+  return persistStoredValue(SAVE_STORAGE_KEY, serializeSaveDocument(document), storage);
 }
 
 export function loadPersistedSaveDocument(storage) {
-  const encoded = storage.getItem(SAVE_STORAGE_KEY);
+  const encoded = readStoredValue(SAVE_STORAGE_KEY, null, storage);
   return encoded === null ? null : parseSaveDocument(encoded);
 }
 
 export function hasPersistedSaveDocument(storage) {
-  try {
-    return storage.getItem(SAVE_STORAGE_KEY) !== null;
-  } catch {
-    return false;
-  }
+  return readStoredValue(SAVE_STORAGE_KEY, null, storage) !== null;
 }
 
 export function saveFileName(document) {
