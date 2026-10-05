@@ -116,3 +116,26 @@ test("touch combat and settings remain usable on a phone viewport", async ({ bro
     await context.close();
   }
 });
+
+test("leaving and re-entering the world restarts one paused-aware simulation", async ({
+  page,
+  appUrl,
+}) => {
+  await page.goto(`${appUrl}?scenario=training&seed=42`);
+  const panel = page.getByRole("complementary", { name: "Training arena controls" });
+  const tickOf = async () => Number((await panel.getByText(/^Tick \d+$/).textContent()).slice(5));
+
+  for (let round = 0; round < 3; round += 1) {
+    await expect.poll(tickOf).toBeGreaterThan(5);
+    await page.getByRole("button", { name: "Characters", exact: true }).click();
+    await expect(page.getByRole("main", { name: "Character selection" })).toBeVisible();
+    await page.getByRole("button", { name: "Training Arena", exact: true }).click();
+  }
+
+  await page.getByRole("button", { name: "Pause", exact: true }).click();
+  const paused = await tickOf();
+  await page.waitForTimeout(250);
+  expect(await tickOf()).toBe(paused);
+  await page.getByRole("button", { name: "Step", exact: true }).click();
+  await expect.poll(tickOf).toBe(paused + 1);
+});
