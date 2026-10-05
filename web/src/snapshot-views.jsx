@@ -109,8 +109,9 @@ export function CombatActions({
           setTouchDraw(true);
         },
         onPointerUp: () => setTouchDraw(false),
-        onPointerCancel: () => setTouchDraw(false),
-        onLostPointerCapture: () => setTouchDraw(false),
+        // Interrupted pointers cancel the draw; only a deliberate release shoots.
+        onPointerCancel: () => setTouchDraw(false, true),
+        onLostPointerCapture: () => setTouchDraw(false, true),
         onKeyDown: (event) => {
           if ((event.key === "Enter" || event.key === " ") && !event.repeat) setTouchDraw(true);
         },

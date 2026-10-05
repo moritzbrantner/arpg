@@ -1334,19 +1334,13 @@ impl ArpgGame {
         }
         let mut arrow_ids = BTreeSet::new();
         for arrow in &save.arrows {
-            let [vx, vy, vz] = arrow.velocity;
-            let speed_range = -ARROW_FULL_SPEED..=ARROW_FULL_SPEED;
             if arrow.id < ARROW_ID_BASE
                 || arrow.id >= save.next_arrow_id
                 || !arrow_ids.insert(arrow.id)
                 || arrow.owner_id == 0
                 || arrow.launched_at_tick >= save.tick
                 || !(1..=ARROW_LIFETIME_TICKS).contains(&arrow.ticks_remaining)
-                || !(ARROW_MIN_DAMAGE..=ARROW_FULL_DAMAGE).contains(&arrow.damage)
-                || vy != 0
-                || (vx == 0 && vz == 0)
-                || !speed_range.contains(&vx)
-                || !speed_range.contains(&vz)
+                || !Self::arrow_launch_is_possible(arrow)
                 || !game.dungeon_contains(arrow.position, Vec3i::ZERO)
             {
                 return Err(GameError::new("save contains an invalid arrow"));
@@ -1483,6 +1477,29 @@ impl ArpgGame {
             return Err(GameError::new("saved facing cannot be zero"));
         }
         Ok(())
+    }
+
+    /// Whether some accepted draw and facing produce exactly this arrow's velocity and damage.
+    fn arrow_launch_is_possible(arrow: &ArrowSnapshot) -> bool {
+        (BOW_MIN_DRAW_TICKS..=BOW_FULL_DRAW_TICKS).any(|charge| {
+            let (speed, damage) = Self::arrow_launch(charge);
+            let diagonal = speed * ARROW_DIAGONAL_NUMERATOR / ARROW_DIAGONAL_DENOMINATOR;
+            let [vx, vy, vz] = arrow.velocity;
+            let cardinal = (vx.abs() == speed && vz == 0) || (vx == 0 && vz.abs() == speed);
+            let diagonal = vx.abs() == diagonal && vz.abs() == diagonal;
+            damage == arrow.damage && vy == 0 && (cardinal || diagonal)
+        })
+    }
+
+    /// Speed and damage of an arrow launched with `charge` draw ticks.
+    fn arrow_launch(charge: u8) -> (i32, u16) {
+        let charge = i32::from(charge.min(BOW_FULL_DRAW_TICKS));
+        let full = i32::from(BOW_FULL_DRAW_TICKS);
+        let speed = ARROW_MIN_SPEED + (ARROW_FULL_SPEED - ARROW_MIN_SPEED) * charge / full;
+        let damage = ARROW_MIN_DAMAGE
+            + u16::try_from(i32::from(ARROW_FULL_DAMAGE - ARROW_MIN_DAMAGE) * charge / full)
+                .expect("arrow damage fits u16");
+        (speed, damage)
     }
 
     fn validate_loadout(player: &PlayerSaveState) -> Result<(), GameError> {
@@ -2171,12 +2188,7 @@ impl ArpgGame {
             .and_then(|state| state.action)
             .map(|action| action.charge)
             .ok_or_else(|| GameError::new("shot has no committed action"))?;
-        let charge = i32::from(charge.min(BOW_FULL_DRAW_TICKS));
-        let full = i32::from(BOW_FULL_DRAW_TICKS);
-        let speed = ARROW_MIN_SPEED + (ARROW_FULL_SPEED - ARROW_MIN_SPEED) * charge / full;
-        let damage = ARROW_MIN_DAMAGE
-            + u16::try_from(i32::from(ARROW_FULL_DAMAGE - ARROW_MIN_DAMAGE) * charge / full)
-                .expect("arrow damage fits u16");
+        let (speed, damage) = Self::arrow_launch(charge);
         let (fx, fz) = (i32::from(facing_x), i32::from(facing_z));
         let axis_speed = if fx != 0 && fz != 0 {
             speed * ARROW_DIAGONAL_NUMERATOR / ARROW_DIAGONAL_DENOMINATOR
@@ -2402,6 +2414,8 @@ impl ArpgGame {
                     player.hurt_ticks_remaining = PLAYER_HURT_TICKS;
                     player.action = None;
                     player.guard.stance = None;
+                    // A hit lowers a drawn bow immediately, before any release can arrive.
+                    player.draw_ticks = None;
                     StrikeResult::Hit {
                         damage: previous_health - player.health,
                         defeated: player.health == 0,
@@ -2751,8 +2765,13 @@ impl AuthoritativeGame for ArpgGame {
                     .players
                     .get_mut(&command.player_id)
                     .expect("player existence checked");
+                // Re-check life and freedom: damage this tick may have landed after the draw
+                // advanced.
                 if let Some(drawn) = state.draw_ticks.take()
                     && drawn >= BOW_MIN_DRAW_TICKS
+                    && state.health > 0
+                    && state.hurt_ticks_remaining == 0
+                    && state.action.is_none()
                 {
                     let mut action = Self::new_action(ActionKind::Shoot, state);
                     action.charge = drawn;
@@ -5464,6 +5483,25 @@ mod tests {
     }
 
     #[test]
+    fn a_release_after_a_same_tick_hit_does_not_shoot() {
+        let (mut game, x, z) = bow_arena();
+        draw_for(&mut game, BOW_FULL_DRAW_TICKS);
+        place_monster(&mut game, 2, x - 100, z);
+        // The claw lands after this tick's draw step; the release arrives before the next.
+        assert_eq!(claw(&mut game, 2), CLAW_HIT);
+        command(&mut game, ArpgCommand::ReleaseBow);
+        assert_eq!(action_kind(&game), None);
+
+        let (mut game, _, _) = bow_arena();
+        draw_for(&mut game, BOW_FULL_DRAW_TICKS);
+        let state = game.players.get_mut(&1).unwrap();
+        state.health = 0;
+        command(&mut game, ArpgCommand::ReleaseBow);
+        assert_eq!(action_kind(&game), None);
+        assert!(game.arrows.is_empty());
+    }
+
+    #[test]
     fn the_bow_disables_sword_strikes_and_guard_without_resetting_guard_break() {
         let (mut game, _, _) = strike_arena();
         game.players
@@ -5597,6 +5635,14 @@ mod tests {
             },
             ArrowSnapshot {
                 damage: ARROW_FULL_DAMAGE + 1,
+                ..mid_flight.arrows[0]
+            },
+            ArrowSnapshot {
+                velocity: [1, 0, 0],
+                ..mid_flight.arrows[0]
+            },
+            ArrowSnapshot {
+                damage: ARROW_FULL_DAMAGE,
                 ..mid_flight.arrows[0]
             },
         ] {

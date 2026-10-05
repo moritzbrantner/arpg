@@ -146,8 +146,9 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
   let movement = idleMovement();
   // Every device currently holding guard; the authority sees one held flag.
   const guardSources = new Set<GuardSource>();
-  // Whether this client is holding a bow draw; released draws shoot, cancelled ones do not.
-  let drawing = false;
+  // Every device currently holding the bow draw. The last deliberate release shoots; an
+  // interrupted hold (pointer cancel, focus loss) only cancels.
+  const drawSources = new Set<GuardSource>();
 
   const update = (patch: Partial<ClientState>) => {
     let changed = false;
@@ -227,7 +228,7 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
     trainingCarry = 0;
     movement = idleMovement();
     guardSources.clear();
-    drawing = false;
+    drawSources.clear();
   };
 
   // Replaces the current source. The returned token identifies the new generation.
@@ -487,11 +488,16 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
       if (isHeld !== wasHeld) dispatch({ type: "setGuard", raised: isHeld });
     },
 
-    // Held bow draw: pressing draws, releasing shoots (the authority ignores short draws).
-    setBowDraw(held: boolean) {
-      if (held === drawing) return;
-      drawing = held;
-      dispatch({ type: held ? "drawBow" : "releaseBow" });
+    // Held bow draw per device: the first hold draws; releasing the last hold shoots
+    // (the authority ignores short draws) or, when `interrupted`, cancels without shooting.
+    setBowDraw(source: GuardSource, held: boolean, { interrupted = false } = {}) {
+      if (held) {
+        if (drawSources.size === 0) dispatch({ type: "drawBow" });
+        drawSources.add(source);
+        return;
+      }
+      if (!drawSources.delete(source) || drawSources.size > 0) return;
+      dispatch({ type: interrupted ? "cancelBow" : "releaseBow" });
     },
 
     releaseInput() {
@@ -507,8 +513,8 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
         dispatch({ type: "setGuard", raised: false });
       }
       // Losing focus or opening a menu must never fire a drawn bow.
-      if (drawing) {
-        drawing = false;
+      if (drawSources.size > 0) {
+        drawSources.clear();
         dispatch({ type: "cancelBow" });
       }
     },

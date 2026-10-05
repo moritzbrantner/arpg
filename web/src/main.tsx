@@ -738,8 +738,8 @@ function App() {
         }
         if (settingsOpen) return;
         if (dispatch.action === "game.primaryAttack" && focusedPlayer()?.weapon === "bow") {
-          if (dispatch.phase === "press") runtime.setBowDraw(true);
-          if (dispatch.phase === "release") runtime.setBowDraw(false);
+          if (dispatch.phase === "press") runtime.setBowDraw("keyboard", true);
+          if (dispatch.phase === "release") runtime.setBowDraw("keyboard", false);
           return;
         }
         if (dispatch.action === "game.switchWeapon") {
@@ -1161,7 +1161,9 @@ function App() {
           playerId={playerId}
           triggerCombatAction={triggerCombatAction}
           setTouchGuard={(held) => runtime.setGuard("touch", held)}
-          setTouchDraw={(held) => runtime.setBowDraw(held)}
+          setTouchDraw={(held, interrupted = false) =>
+            runtime.setBowDraw("touch", held, { interrupted })
+          }
           switchWeapon={switchWeapon}
         />
       )}
