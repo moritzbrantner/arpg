@@ -1340,6 +1340,9 @@ impl ArpgGame {
                 || arrow.owner_id == 0
                 || arrow.launched_at_tick >= save.tick
                 || !(1..=ARROW_LIFETIME_TICKS).contains(&arrow.ticks_remaining)
+                // An arrow launched during tick L has flown (tick - L) ticks of its lifetime.
+                || save.tick - arrow.launched_at_tick
+                    != u64::from(ARROW_LIFETIME_TICKS - arrow.ticks_remaining)
                 || !Self::arrow_launch_is_possible(arrow)
                 || !game.dungeon_contains(arrow.position, Vec3i::ZERO)
             {
@@ -5639,6 +5642,11 @@ mod tests {
             },
             ArrowSnapshot {
                 velocity: [1, 0, 0],
+                ..mid_flight.arrows[0]
+            },
+            ArrowSnapshot {
+                launched_at_tick: 0,
+                ticks_remaining: ARROW_LIFETIME_TICKS,
                 ..mid_flight.arrows[0]
             },
             ArrowSnapshot {

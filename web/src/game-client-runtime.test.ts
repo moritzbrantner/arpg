@@ -576,3 +576,18 @@ test("bow holds are tracked per device and interrupted holds cancel", () => {
     "cancelBow",
   ]);
 });
+
+test("cancelling a held draw clears every device so the next press draws again", () => {
+  const { runtime, games } = harness();
+  runtime.startLocal({ seed: 1 });
+  runtime.setBowDraw("keyboard", true);
+  runtime.cancelBowDraw();
+  runtime.cancelBowDraw();
+  runtime.setBowDraw("keyboard", false);
+  runtime.setBowDraw("keyboard", true);
+  expect(games[0].commands.map((command) => command.payload.type)).toEqual([
+    "drawBow",
+    "cancelBow",
+    "drawBow",
+  ]);
+});

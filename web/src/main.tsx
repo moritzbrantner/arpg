@@ -531,6 +531,8 @@ function App() {
   const switchWeapon = useCallback(() => {
     const player = focusedPlayer();
     if (!player?.alive) return;
+    // Switching never fires: any held draw is cancelled first.
+    runtime.cancelBowDraw();
     runtime.dispatch({
       type: "equipWeapon",
       weapon: player.weapon === "bow" ? "swordAndShield" : "bow",
@@ -737,9 +739,13 @@ function App() {
           return;
         }
         if (settingsOpen) return;
+        // Always forward a release so a draw held across a weapon switch cannot stick.
+        if (dispatch.action === "game.primaryAttack" && dispatch.phase === "release") {
+          runtime.setBowDraw("keyboard", false);
+          return;
+        }
         if (dispatch.action === "game.primaryAttack" && focusedPlayer()?.weapon === "bow") {
           if (dispatch.phase === "press") runtime.setBowDraw("keyboard", true);
-          if (dispatch.phase === "release") runtime.setBowDraw("keyboard", false);
           return;
         }
         if (dispatch.action === "game.switchWeapon") {

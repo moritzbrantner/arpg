@@ -500,6 +500,13 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
       dispatch({ type: interrupted ? "cancelBow" : "releaseBow" });
     },
 
+    // Drops every held bow draw without shooting (weapon switches, menus).
+    cancelBowDraw() {
+      if (drawSources.size === 0) return;
+      drawSources.clear();
+      dispatch({ type: "cancelBow" });
+    },
+
     releaseInput() {
       movement.forward = false;
       movement.backward = false;
