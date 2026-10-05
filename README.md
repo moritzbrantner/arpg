@@ -24,7 +24,29 @@ The browser slice currently proves:
 - a runnable TLS/WebTransport dedicated server using the shared `game-server` transport, reconnect, recovery, tick, and shutdown machinery;
 - GitHub Pages build/deployment for browser acceptance.
 
-This is deliberately not yet a content-complete ARPG. The slice exists to prove the foundations before inventory, loot, skills, richer AI, assets, persistence, or larger levels are built on top.
+This is deliberately not yet a content-complete ARPG. The slice exists to prove the foundations before inventory, loot, skills, richer AI, assets, character persistence, or larger levels are built on top.
+
+## Capability status
+
+The near-term execution order is the content-readiness roadmap [#50](https://github.com/moritzbrantner/arpg/issues/50); [`docs/ROADMAP.md`](docs/ROADMAP.md) keeps the long-term game vision.
+
+| Capability | Status | Implementation | Exercised by |
+| --- | --- | --- | --- |
+| Startup and character selection | Implemented | [`web/src/main.tsx`](web/src/main.tsx), [`character-selection.js`](web/src/character-selection.js) | `character-selection.test.js`; browser specs in [`web/tests/browser`](web/tests/browser) |
+| Movement, locomotion feel and wall sliding | Implemented | [`arpg-core`](crates/arpg-core/src/lib.rs) through `physics-engine` | `locomotion_accelerates_brakes_and_reverses_over_bounded_ticks`, `diagonal_control_slides_along_outer_wall`, `wasd_style_movement_is_driven_through_physics_engine` |
+| Combat phases, facing, telegraphs, stagger, defeat | Implemented | [`arpg-core`](crates/arpg-core/src/lib.rs) | `attacks_have_authoritative_commitment_active_and_recovery_phases`, `attack_targeting_respects_committed_facing`, `monster_attack_is_telegraphed_before_damage`, `player_stagger_interrupts_monster_windup`; `app.spec.js`, `hotkeys.spec.js` |
+| Gold drop and explicit pickup | Implemented | [`arpg-core`](crates/arpg-core/src/lib.rs) | `kill_drop_pickup_requires_explicit_interaction`, `interaction_respects_pickup_range` |
+| Seeded dungeon, rooms, doors and encounters | Implemented | [`arpg-core`](crates/arpg-core/src/lib.rs) | [`dungeon_properties.rs`](crates/arpg-core/tests/dungeon_properties.rs), `entering_combat_room_locks_connected_doors_until_encounter_is_cleared` |
+| Training scenario (`?scenario=training&seed=<u32>`) | Implemented | [`training-arena.js`](web/src/training-arena.js) | `training-arena.test.js`; `app.spec.js`, `hotkeys.spec.js` |
+| Versioned savestates | Implemented | [`arpg-core`](crates/arpg-core/src/lib.rs), [`save-state.js`](web/src/save-state.js) | `save_state_*` tests, `save-state.test.js`, `savestate.spec.js` |
+| Local Rust/Wasm authority | Implemented | [`arpg-web-wasm`](crates/arpg-web-wasm/src/lib.rs) | `bun run test:physics-wasm`; all browser specs |
+| Peer-hosted co-op | Implemented | [`peer-session.js`](web/src/peer-session.js) | `peer-session.test.js`, `turn.spec.ts` |
+| Dedicated online | Implemented; browser recovery test disabled ([#86](https://github.com/moritzbrantner/arpg/issues/86)) | [`arpg-game-server`](crates/arpg-game-server/src/lib.rs), [`dedicated-session.js`](web/src/dedicated-session.js) | `real_arpg_snapshot_matches_the_game_server_runtime_path`, `rejects_malformed_game_payloads_before_the_core_sees_them`, `dedicated-session.test.js` |
+| Persistent physics solver migration | In flight: compatible engine update landed ([evidence](docs/physics-workloads.md)); solver/controller transition pending | [#48](https://github.com/moritzbrantner/arpg/issues/48) is the sole migration owner | `physics_workloads` traces |
+| Typed client runtime, scenario workbench, content definitions | Planned (F0) | [#52](https://github.com/moritzbrantner/arpg/issues/52), [#53](https://github.com/moritzbrantner/arpg/issues/53), [#54](https://github.com/moritzbrantner/arpg/issues/54) | — |
+| Humanoid, camera, jumping, unified input, menus | Planned (F1) | [#55](https://github.com/moritzbrantner/arpg/issues/55)–[#61](https://github.com/moritzbrantner/arpg/issues/61) | — |
+| Directional melee, bow, shield, combos, counters | Planned (F2) | [#63](https://github.com/moritzbrantner/arpg/issues/63), [#76](https://github.com/moritzbrantner/arpg/issues/76)–[#80](https://github.com/moritzbrantner/arpg/issues/80) | — |
+| Saves, loot, loadouts, co-op parity, content readiness | Planned (F3/F4) | [#68](https://github.com/moritzbrantner/arpg/issues/68)–[#75](https://github.com/moritzbrantner/arpg/issues/75) | — |
 
 The next product foundation is the **mechanical game loop**: locomotion, action timing, targeting, hit/reaction semantics, pickup/reward interaction, and the one-way presentation cue boundary. These mechanics are treated as reusable ARPG domain contracts rather than late polish or per-skill/per-monster special cases. See [the roadmap](docs/ROADMAP.md).
 
