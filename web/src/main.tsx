@@ -593,17 +593,28 @@ function App() {
         buildFrame(snapshot, playerId, rect.width, rect.height, selectedCharacter.accent),
       );
     };
+    // Snapshots can arrive faster than the display (local catch-up, bursts of dedicated
+    // datagrams). Draw at most once per animation frame, always from the latest snapshot.
+    let frameRequest = null;
+    const scheduleRender = () => {
+      if (frameRequest !== null) return;
+      frameRequest = requestAnimationFrame(() => {
+        frameRequest = null;
+        render();
+      });
+    };
     const resize = () => {
       const rect = canvasRef.current.getBoundingClientRect();
       renderer.setSize(rect.width, rect.height, devicePixelRatio);
       render();
     };
-    const unsubscribe = snapshotStore.subscribe(render);
+    const unsubscribe = snapshotStore.subscribe(scheduleRender);
     const observer = new ResizeObserver(resize);
     observer.observe(canvasRef.current);
     resize();
     return () => {
       unsubscribe();
+      if (frameRequest !== null) cancelAnimationFrame(frameRequest);
       observer.disconnect();
       renderer.dispose();
     };

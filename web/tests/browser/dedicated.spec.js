@@ -76,11 +76,29 @@ async function installCertificatePin(page, hashBytes) {
   await page.addInitScript((pinned) => {
     const NativeWebTransport = globalThis.WebTransport;
     if (!NativeWebTransport) return;
+    // Chromium's offline emulation does not reach QUIC, so the test simulates an outage at
+    // the transport boundary: `__arpgOutage.begin()` drops the live transport and points new
+    // attempts at an unreachable endpoint until `end()`.
+    const live = new Set();
+    let outage = false;
+    globalThis.__arpgOutage = {
+      begin() {
+        outage = true;
+        for (const transport of live) transport.close({ closeCode: 1, reason: "simulated outage" });
+      },
+      end() {
+        outage = false;
+      },
+    };
     function PinnedWebTransport(url, options = {}) {
-      return new NativeWebTransport(url, {
+      const target = outage ? String(url).replace(/:\d+\//, ":9/") : url;
+      const transport = new NativeWebTransport(target, {
         ...options,
         serverCertificateHashes: [{ algorithm: "sha-256", value: new Uint8Array(pinned) }],
       });
+      live.add(transport);
+      transport.closed.finally(() => live.delete(transport)).catch(() => {});
+      return transport;
     }
     PinnedWebTransport.prototype = NativeWebTransport.prototype;
     Object.setPrototypeOf(PinnedWebTransport, NativeWebTransport);
@@ -133,12 +151,7 @@ async function stopDedicatedServer(child) {
   }
 }
 
-// fixme: snapshots now reassemble and the HUD reaches "run seed 42", but once dedicated
-// snapshots flow the page's main thread saturates in native work (CPU profile: ~100%
-// "(program)", negligible JS), so the Settings dialog never accepts the Close click.
-// Re-enable once dedicated rendering keeps the page responsive.
-test.fixme("browser WebTransport resumes the dedicated authority after an outage", async ({
-  context,
+test("browser WebTransport resumes the dedicated authority after an outage", async ({
   page,
   appUrl,
 }) => {
@@ -166,9 +179,9 @@ test.fixme("browser WebTransport resumes the dedicated authority after an outage
     await settings.getByRole("button", { name: "Close", exact: true }).click();
     await expect(settings).not.toBeVisible();
 
-    await context.setOffline(true);
+    await page.evaluate(() => globalThis.__arpgOutage.begin());
     await expect(status).toHaveText("Connecting to dedicated authority…", { timeout: 15_000 });
-    await context.setOffline(false);
+    await page.evaluate(() => globalThis.__arpgOutage.end());
     await expect(status).toContainText("Dedicated authority · player 1 · 60 Hz", {
       timeout: 30_000,
     });
@@ -177,7 +190,6 @@ test.fixme("browser WebTransport resumes the dedicated authority after an outage
     settings = page.getByRole("dialog", { name: "Settings", exact: true });
     await expect(settings).toContainText("Current mode: dedicated · player 1 · run seed 42");
   } finally {
-    await context.setOffline(false).catch(() => {});
     await stopDedicatedServer(server);
     rmSync(certificate.directory, { recursive: true, force: true });
   }
