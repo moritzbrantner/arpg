@@ -63,6 +63,7 @@ import {
   withTrainingRequest,
 } from "./training-arena.js";
 import { createGameClientRuntime } from "./game-client-runtime.ts";
+import { createActiveCueTracker } from "./frame-cues.js";
 import "./styles.css";
 
 const gameplayContext = { op: "context", id: "gameplay" };
@@ -584,9 +585,10 @@ function App() {
       shadows: graphics.shadows,
       pixelRatioLimit: graphics.pixelRatioLimit,
     });
+    const cues = createActiveCueTracker();
     const render = () => {
       const canvas = canvasRef.current;
-      const snapshot = snapshotStore.getSnapshot();
+      const snapshot = cues.take(snapshotStore.getSnapshot());
       if (!canvas || !snapshot) return;
       const rect = canvas.getBoundingClientRect();
       renderer.render(
@@ -597,6 +599,7 @@ function App() {
     // datagrams). Draw at most once per animation frame, always from the latest snapshot.
     let frameRequest = null;
     const scheduleRender = () => {
+      cues.observe(snapshotStore.getSnapshot());
       if (frameRequest !== null) return;
       frameRequest = requestAnimationFrame(() => {
         frameRequest = null;
