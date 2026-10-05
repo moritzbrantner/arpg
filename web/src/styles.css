@@ -1253,3 +1253,19 @@ select {
   color: #f5df9b;
   font-weight: 700;
 }
+
+.combat-action-swap {
+  border-color: #8a7a9c;
+  background: #3a3248e8;
+}
+.combat-action-primary[data-draw="drawing"] {
+  box-shadow:
+    0 0 0 3px #f5df9b,
+    0 0.4rem 1.5rem #0008;
+}
+.progression {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.2rem 0.75rem;
+}

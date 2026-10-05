@@ -5,7 +5,7 @@ use std::error::Error;
 use std::fmt;
 
 use physics_engine::{
-    BodyId, BodyKind, Ray, RigidBody, SUBTICKS_PER_TICK, Vec3i, World, WorldConfig,
+    BodyId, BodyKind, Ray, RigidBody, SUBTICKS_PER_TICK, Vec3i, World, WorldConfig, ray_cast_first,
 };
 use serde::{Deserialize, Serialize};
 
@@ -23,12 +23,13 @@ pub const TICK_HZ: u16 = 60;
 const PHYSICS_TICKS_PER_GAME_TICK: i32 = 1;
 pub const MAX_PLAYERS: usize = 4;
 pub const WORLD_UNITS_PER_METER: i32 = 100;
-pub const SAVE_STATE_SCHEMA_VERSION: u16 = 4;
+pub const SAVE_STATE_SCHEMA_VERSION: u16 = 5;
 // 2: directional multi-target strike volumes and obstruction by fixed geometry.
 // 3: directional shield guard, block and guard break.
 // 4: post-block counterattack opportunity.
 // 5: authored light/heavy combo transitions.
-pub const SAVE_STATE_RULES_VERSION: u16 = 5;
+// 6: bow loadout, draw/release and authoritative arrows.
+pub const SAVE_STATE_RULES_VERSION: u16 = 6;
 // physics-engine::World::step(1) integrates velocity as world units per simulation tick.
 // At 60 Hz and 100 world units per meter, 7 units/tick is 4.2 m/s rather than
 // the previous 260 units/tick (156 m/s).
@@ -102,6 +103,27 @@ const HEAVY_FINISHER_RANGE: i64 = 180;
 const HEAVY_FINISHER_DAMAGE_NUMERATOR: u16 = 2;
 const HEAVY_FINISHER_DAMAGE_DENOMINATOR: u16 = 1;
 const HEAVY_FINISHER_STAGGER_TICKS: u8 = 14;
+/// Draw ticks below which a release does not shoot.
+const BOW_MIN_DRAW_TICKS: u8 = 8;
+/// Draw ticks at which an arrow reaches full speed and damage.
+pub const BOW_FULL_DRAW_TICKS: u8 = 30;
+const SHOOT_WINDUP_TICKS: u8 = 1;
+const SHOOT_ACTIVE_TICKS: u8 = 1;
+const SHOOT_RECOVERY_TICKS: u8 = 10;
+const ARROW_MIN_SPEED: i32 = 30;
+const ARROW_FULL_SPEED: i32 = 60;
+const ARROW_DIAGONAL_NUMERATOR: i32 = 707;
+const ARROW_DIAGONAL_DENOMINATOR: i32 = 1_000;
+const ARROW_MIN_DAMAGE: u16 = 15;
+const ARROW_FULL_DAMAGE: u16 = 35;
+const ARROW_LIFETIME_TICKS: u8 = 40;
+const ARROW_STAGGER_TICKS: u8 = 4;
+/// Live arrows are bounded; launching beyond the bound retires the oldest arrow.
+const MAX_LIVE_ARROWS: usize = 32;
+const ARROW_ID_BASE: u64 = 1;
+/// Query-only hurt boxes for monsters, which are game-owned rather than physics bodies.
+const MONSTER_HURTBOX_BASE: u64 = 40_000;
+const MONSTER_HURTBOX_HALF_EXTENTS: Vec3i = Vec3i::new(40, 50, 40);
 /// Longest stagger any player strike applies; bounds restored monster reactions.
 const MAX_MONSTER_STAGGER_TICKS: u8 = {
     let mut maximum = PRIMARY_STAGGER_TICKS;
@@ -216,6 +238,16 @@ pub enum ArpgCommand {
     SetGuard {
         raised: bool,
     },
+    /// Switches the loadout fixture; only while no action is in progress.
+    EquipWeapon {
+        weapon: Weapon,
+    },
+    /// Starts drawing the bow (held input).
+    DrawBow,
+    /// Releases the drawn bow: shoots once if drawn at least the minimum.
+    ReleaseBow,
+    /// Lowers a drawn bow without shooting (focus loss, menus, explicit cancel).
+    CancelBow,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -232,6 +264,32 @@ pub enum ActionKind {
     LightFinisher,
     /// Heavy finisher branch after a connecting second light strike.
     HeavyFinisher,
+    /// Bow release: launches one arrow when its active phase opens.
+    Shoot,
+}
+
+/// The core-owned loadout fixture a player fights with. Ammunition is unlimited: this is a
+/// labelled training fixture until #69 introduces real equipment and items.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Weapon {
+    #[default]
+    SwordAndShield,
+    Bow,
+}
+
+/// One authoritative arrow in flight.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ArrowSnapshot {
+    pub id: u64,
+    pub owner_id: PlayerId,
+    pub launched_at_tick: u64,
+    pub position: [i32; 3],
+    /// World units travelled per tick; committed at release and never steered.
+    pub velocity: [i32; 3],
+    pub damage: u16,
+    pub ticks_remaining: u8,
 }
 
 /// Which attack input continues a combo.
@@ -315,6 +373,7 @@ impl ActionKind {
             Self::LightFollowUp => LIGHT_FOLLOW_UP_WINDUP_TICKS,
             Self::LightFinisher => LIGHT_FINISHER_WINDUP_TICKS,
             Self::HeavyFinisher => HEAVY_FINISHER_WINDUP_TICKS,
+            Self::Shoot => SHOOT_WINDUP_TICKS,
         }
     }
 
@@ -327,6 +386,7 @@ impl ActionKind {
             Self::LightFollowUp => LIGHT_FOLLOW_UP_ACTIVE_TICKS,
             Self::LightFinisher => LIGHT_FINISHER_ACTIVE_TICKS,
             Self::HeavyFinisher => HEAVY_FINISHER_ACTIVE_TICKS,
+            Self::Shoot => SHOOT_ACTIVE_TICKS,
         }
     }
 
@@ -339,6 +399,7 @@ impl ActionKind {
             Self::LightFollowUp => LIGHT_FOLLOW_UP_RECOVERY_TICKS,
             Self::LightFinisher => LIGHT_FINISHER_RECOVERY_TICKS,
             Self::HeavyFinisher => HEAVY_FINISHER_RECOVERY_TICKS,
+            Self::Shoot => SHOOT_RECOVERY_TICKS,
         }
     }
 }
@@ -362,6 +423,8 @@ pub struct PlayerActionSnapshot {
     pub connected: bool,
     /// The single buffered combo input waiting for its transition interval.
     pub buffered: Option<ComboInput>,
+    /// Bow draw ticks committed at release (zero for other actions).
+    pub charge: u8,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -502,6 +565,7 @@ pub struct ArpgSnapshot {
     pub monsters: Vec<MonsterSnapshot>,
     pub ground_loot: Vec<GroundLootSnapshot>,
     pub static_colliders: Vec<StaticColliderSnapshot>,
+    pub arrows: Vec<ArrowSnapshot>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -577,6 +641,9 @@ pub struct PlayerSnapshot {
     pub guard_points: u16,
     pub max_guard_points: u16,
     pub counter: Option<CounterOpportunity>,
+    pub weapon: Weapon,
+    /// Bow draw ticks while the bow is being drawn.
+    pub draw_ticks: Option<u8>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -618,6 +685,8 @@ pub struct ArpgSaveState {
     pub monsters: Vec<MonsterSaveState>,
     pub ground_loot: Vec<GroundLootSnapshot>,
     pub next_ground_loot_id: GroundLootId,
+    pub arrows: Vec<ArrowSnapshot>,
+    pub next_arrow_id: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -633,6 +702,8 @@ pub struct PlayerSaveState {
     pub hurt_ticks_remaining: u8,
     pub guard: GuardState,
     pub counter: Option<CounterOpportunity>,
+    pub weapon: Weapon,
+    pub draw_ticks: Option<u8>,
     pub health: u16,
     pub experience: u32,
     pub gold: u32,
@@ -691,6 +762,7 @@ struct ActionState {
     facing_z: i8,
     connected: bool,
     buffered: Option<ComboInput>,
+    charge: u8,
 }
 
 impl ActionState {
@@ -702,6 +774,7 @@ impl ActionState {
             facing: [self.facing_x, self.facing_z],
             connected: self.connected,
             buffered: self.buffered,
+            charge: self.charge,
         }
     }
 }
@@ -860,6 +933,8 @@ struct PlayerState {
     hurt_ticks_remaining: u8,
     guard: GuardState,
     counter: Option<CounterOpportunity>,
+    weapon: Weapon,
+    draw_ticks: Option<u8>,
     health: u16,
     experience: u32,
     gold: u32,
@@ -938,6 +1013,8 @@ pub struct ArpgGame {
     next_ground_loot_id: GroundLootId,
     static_colliders: Vec<StaticColliderSnapshot>,
     strike_outcomes: Vec<StrikeOutcome>,
+    arrows: Vec<ArrowSnapshot>,
+    next_arrow_id: u64,
 }
 
 impl Default for ArpgGame {
@@ -988,6 +1065,8 @@ impl ArpgGame {
             next_ground_loot_id: GROUND_LOOT_ID_BASE,
             static_colliders,
             strike_outcomes: Vec::new(),
+            arrows: Vec::new(),
+            next_arrow_id: ARROW_ID_BASE,
         })
     }
 
@@ -1014,6 +1093,8 @@ impl ArpgGame {
                     hurt_ticks_remaining: state.hurt_ticks_remaining,
                     guard: state.guard,
                     counter: state.counter,
+                    weapon: state.weapon,
+                    draw_ticks: state.draw_ticks,
                     health: state.health,
                     experience: state.experience,
                     gold: state.gold,
@@ -1063,6 +1144,8 @@ impl ArpgGame {
                 })
                 .collect(),
             next_ground_loot_id: self.next_ground_loot_id,
+            arrows: self.arrows.clone(),
+            next_arrow_id: self.next_arrow_id,
         })
     }
 
@@ -1133,6 +1216,7 @@ impl ArpgGame {
                 Self::validate_action_snapshot(action)?;
             }
             Self::validate_guard(player)?;
+            Self::validate_loadout(player)?;
             if let Some(counter) = player.counter
                 && (counter
                     != CounterOpportunity::grant(
@@ -1245,6 +1329,32 @@ impl ArpgGame {
         game.ground_loot = ground_loot;
         game.next_ground_loot_id = save.next_ground_loot_id;
 
+        if save.next_arrow_id < ARROW_ID_BASE || save.arrows.len() > MAX_LIVE_ARROWS {
+            return Err(GameError::new("save contains invalid arrow bookkeeping"));
+        }
+        let mut arrow_ids = BTreeSet::new();
+        for arrow in &save.arrows {
+            let [vx, vy, vz] = arrow.velocity;
+            let speed_range = -ARROW_FULL_SPEED..=ARROW_FULL_SPEED;
+            if arrow.id < ARROW_ID_BASE
+                || arrow.id >= save.next_arrow_id
+                || !arrow_ids.insert(arrow.id)
+                || arrow.owner_id == 0
+                || arrow.launched_at_tick >= save.tick
+                || !(1..=ARROW_LIFETIME_TICKS).contains(&arrow.ticks_remaining)
+                || !(ARROW_MIN_DAMAGE..=ARROW_FULL_DAMAGE).contains(&arrow.damage)
+                || vy != 0
+                || (vx == 0 && vz == 0)
+                || !speed_range.contains(&vx)
+                || !speed_range.contains(&vz)
+                || !game.dungeon_contains(arrow.position, Vec3i::ZERO)
+            {
+                return Err(GameError::new("save contains an invalid arrow"));
+            }
+        }
+        game.arrows = save.arrows;
+        game.next_arrow_id = save.next_arrow_id;
+
         for player in save.players {
             game.add_player(player.id)?;
             game.world
@@ -1270,10 +1380,13 @@ impl ArpgGame {
                     facing_z: action.facing[1],
                     connected: action.connected,
                     buffered: action.buffered,
+                    charge: action.charge,
                 }),
                 hurt_ticks_remaining: player.hurt_ticks_remaining,
                 guard: player.guard,
                 counter: player.counter,
+                weapon: player.weapon,
+                draw_ticks: player.draw_ticks,
                 health: player.health,
                 experience: player.experience,
                 gold: player.gold,
@@ -1368,6 +1481,29 @@ impl ArpgGame {
         Self::validate_axis(facing, "facing")?;
         if facing == [0, 0] {
             return Err(GameError::new("saved facing cannot be zero"));
+        }
+        Ok(())
+    }
+
+    fn validate_loadout(player: &PlayerSaveState) -> Result<(), GameError> {
+        let bow = player.weapon == Weapon::Bow;
+        let draw_valid = player.draw_ticks.is_none_or(|drawn| {
+            bow && drawn <= BOW_FULL_DRAW_TICKS
+                && player.health > 0
+                && player.action.is_none()
+                && player.hurt_ticks_remaining == 0
+        });
+        let action_valid = player.action.is_none_or(|action| match action.kind {
+            ActionKind::Shoot => {
+                bow && (BOW_MIN_DRAW_TICKS..=BOW_FULL_DRAW_TICKS).contains(&action.charge)
+            }
+            ActionKind::Interact => action.charge == 0,
+            _ => !bow && action.charge == 0,
+        });
+        let guard_valid = !bow || player.guard.stance.is_none();
+        let counter_valid = !bow || player.counter.is_none();
+        if !(draw_valid && action_valid && guard_valid && counter_valid) {
+            return Err(GameError::new("saved player loadout state is invalid"));
         }
         Ok(())
     }
@@ -1495,6 +1631,14 @@ impl ArpgGame {
         })
     }
 
+    fn advance_draw(state: &mut PlayerState) {
+        if state.health == 0 || state.hurt_ticks_remaining > 0 || state.action.is_some() {
+            state.draw_ticks = None;
+        } else if let Some(drawn) = state.draw_ticks.as_mut() {
+            *drawn = (*drawn + 1).min(BOW_FULL_DRAW_TICKS);
+        }
+    }
+
     fn advance_guard(state: &mut PlayerState) {
         state.guard.block_reaction_ticks_remaining =
             state.guard.block_reaction_ticks_remaining.saturating_sub(1);
@@ -1513,7 +1657,9 @@ impl ArpgGame {
             guard.stance = None;
             return;
         }
-        let free = state.action.is_none() && state.hurt_ticks_remaining == 0;
+        let free = state.action.is_none()
+            && state.hurt_ticks_remaining == 0
+            && state.weapon == Weapon::SwordAndShield;
         guard.stance = if guard.held && free {
             Some(match guard.stance {
                 None => GuardStance {
@@ -1622,8 +1768,10 @@ impl ArpgGame {
         if state.health == 0 || state.action.is_some() {
             return Ok(());
         }
-        // Committing to an action lowers the shield; a held guard rises again afterwards.
+        // Committing to an action lowers the shield (a held guard rises again afterwards)
+        // and lowers a drawn bow without shooting.
         state.guard.stance = None;
+        state.draw_ticks = None;
         state.action = Some(Self::new_action(kind, state));
         Ok(())
     }
@@ -1637,6 +1785,7 @@ impl ArpgGame {
             facing_z: state.facing_z,
             connected: false,
             buffered: None,
+            charge: 0,
         }
     }
 
@@ -1865,7 +2014,7 @@ impl ArpgGame {
                 HEAVY_FINISHER_DAMAGE_DENOMINATOR,
                 HEAVY_FINISHER_STAGGER_TICKS,
             ),
-            ActionKind::Interact => return Ok(()),
+            ActionKind::Interact | ActionKind::Shoot => return Ok(()),
         };
         let attack_damage = Self::attack_damage_for_level(player_level)
             .saturating_mul(damage_numerator)
@@ -1995,10 +2144,165 @@ impl ArpgGame {
                         self.resolve_attack(player_id, kind, facing_x, facing_z)?;
                     }
                     ActionKind::Interact => self.resolve_interaction(player_id)?,
+                    ActionKind::Shoot => self.launch_arrow(player_id, facing_x, facing_z)?,
                 }
             }
         }
         Ok(())
+    }
+
+    /// Launches one arrow from the shooter's centre along the committed release facing. The
+    /// launch point is the authoritative body centre, never a visual bow socket that could
+    /// protrude through a wall.
+    fn launch_arrow(
+        &mut self,
+        player_id: PlayerId,
+        facing_x: i8,
+        facing_z: i8,
+    ) -> Result<(), GameError> {
+        let position = self
+            .world
+            .body(Self::player_body_id(player_id))
+            .ok_or_else(|| GameError::new("player physics body is missing"))?
+            .position();
+        let charge = self
+            .players
+            .get(&player_id)
+            .and_then(|state| state.action)
+            .map(|action| action.charge)
+            .ok_or_else(|| GameError::new("shot has no committed action"))?;
+        let charge = i32::from(charge.min(BOW_FULL_DRAW_TICKS));
+        let full = i32::from(BOW_FULL_DRAW_TICKS);
+        let speed = ARROW_MIN_SPEED + (ARROW_FULL_SPEED - ARROW_MIN_SPEED) * charge / full;
+        let damage = ARROW_MIN_DAMAGE
+            + u16::try_from(i32::from(ARROW_FULL_DAMAGE - ARROW_MIN_DAMAGE) * charge / full)
+                .expect("arrow damage fits u16");
+        let (fx, fz) = (i32::from(facing_x), i32::from(facing_z));
+        let axis_speed = if fx != 0 && fz != 0 {
+            speed * ARROW_DIAGONAL_NUMERATOR / ARROW_DIAGONAL_DENOMINATOR
+        } else {
+            speed
+        };
+        if self.arrows.len() >= MAX_LIVE_ARROWS {
+            self.arrows.remove(0);
+        }
+        let id = self.next_arrow_id;
+        self.next_arrow_id = id
+            .checked_add(1)
+            .ok_or_else(|| GameError::new("arrow id overflow"))?;
+        self.arrows.push(ArrowSnapshot {
+            id,
+            owner_id: player_id,
+            launched_at_tick: self.tick,
+            position: vec_to_array(position),
+            velocity: [fx * axis_speed, 0, fz * axis_speed],
+            damage,
+            ticks_remaining: ARROW_LIFETIME_TICKS,
+        });
+        Ok(())
+    }
+
+    /// Moves every arrow along its committed segment for one tick. The physics-engine ray
+    /// query over fixed geometry and monster hurt boxes chooses the first contact; equal
+    /// contact times prefer the lower body id, so walls (10 000+) win ties against monster
+    /// hurt boxes (40 000+). A non-piercing arrow stops at its first contact.
+    fn advance_arrows(&mut self) -> Result<(), GameError> {
+        if self.arrows.is_empty() {
+            return Ok(());
+        }
+        let active_rooms = self
+            .rooms
+            .iter()
+            .filter(|room| room.encounter_state == RoomEncounterState::Active)
+            .map(|room| room.id)
+            .collect::<BTreeSet<_>>();
+        let arrows = std::mem::take(&mut self.arrows);
+        let mut remaining = Vec::with_capacity(arrows.len());
+        for mut arrow in arrows {
+            // Rebuilt per arrow: an earlier arrow this tick may have killed a monster.
+            let hurtboxes = self
+                .monsters
+                .iter()
+                .filter(|monster| monster.health > 0 && active_rooms.contains(&monster.room_id))
+                .map(|monster| {
+                    RigidBody::fixed(
+                        BodyId(MONSTER_HURTBOX_BASE + u64::from(monster.id)),
+                        monster.position,
+                        MONSTER_HURTBOX_HALF_EXTENTS,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let origin = array_to_vec(arrow.position);
+            let velocity = array_to_vec(arrow.velocity);
+            let fixed = self
+                .world
+                .bodies()
+                .filter(|body| body.kind() == BodyKind::Fixed);
+            let hit = ray_cast_first(fixed.chain(hurtboxes.iter()), Ray::new(origin, velocity), 1)
+                .map_err(physics_error)?;
+            match hit {
+                Some(hit) if hit.body.0 >= MONSTER_HURTBOX_BASE => {
+                    let monster_id = u32::try_from(hit.body.0 - MONSTER_HURTBOX_BASE)
+                        .expect("hurt box ids come from monster ids");
+                    self.resolve_arrow_hit(arrow, monster_id)?;
+                }
+                Some(_) => {}
+                None => {
+                    arrow.position = vec_to_array(Vec3i::new(
+                        origin.x + velocity.x,
+                        origin.y,
+                        origin.z + velocity.z,
+                    ));
+                    arrow.ticks_remaining -= 1;
+                    if arrow.ticks_remaining > 0 {
+                        remaining.push(arrow);
+                    }
+                }
+            }
+        }
+        self.arrows = remaining;
+        Ok(())
+    }
+
+    /// Routes an arrow impact through the shared strike outcome path.
+    fn resolve_arrow_hit(
+        &mut self,
+        arrow: ArrowSnapshot,
+        monster_id: u32,
+    ) -> Result<(), GameError> {
+        let monster = self
+            .monsters
+            .iter_mut()
+            .find(|monster| monster.id == monster_id)
+            .ok_or_else(|| GameError::new("arrow hit an unknown monster"))?;
+        let previous_health = monster.health;
+        monster.health = monster.health.saturating_sub(arrow.damage);
+        if monster.health > 0 {
+            monster.stagger_ticks_remaining = ARROW_STAGGER_TICKS;
+            monster.action = None;
+        }
+        let defeated = monster.health == 0;
+        let position = monster.position;
+        self.strike_outcomes.push(StrikeOutcome {
+            strike: StrikeId {
+                source: StrikeSource::Player(arrow.owner_id),
+                tick: arrow.launched_at_tick,
+            },
+            definition: "bow.arrow",
+            target: StrikeTarget::Monster(monster_id),
+            result: StrikeResult::Hit {
+                damage: previous_health - monster.health,
+                defeated,
+            },
+        });
+        if defeated {
+            // A departed shooter's arrow still kills, but nobody is credited.
+            if self.players.contains_key(&arrow.owner_id) {
+                self.award_experience(arrow.owner_id, MONSTER_EXPERIENCE_REWARD)?;
+            }
+            self.spawn_ground_loot(position)?;
+        }
+        self.reconcile_encounters()
     }
 
     fn resolve_monster_attack(
@@ -2325,6 +2629,8 @@ impl AuthoritativeGame for ArpgGame {
                 hurt_ticks_remaining: 0,
                 guard: GuardState::READY,
                 counter: None,
+                weapon: Weapon::SwordAndShield,
+                draw_ticks: None,
                 health: BASE_MAX_HEALTH,
                 experience: 0,
                 gold: 0,
@@ -2369,6 +2675,11 @@ impl AuthoritativeGame for ArpgGame {
                     state.facing_z = state.movement_z;
                 }
             }
+            ArpgCommand::PrimaryAttack | ArpgCommand::SecondaryAttack
+                if self.players[&command.player_id].weapon == Weapon::Bow =>
+            {
+                // Sword strikes need the sword; the bow uses draw/release.
+            }
             ArpgCommand::PrimaryAttack => {
                 let tick = self.tick;
                 let state = self
@@ -2408,6 +2719,52 @@ impl AuthoritativeGame for ArpgGame {
                     state.guard.stance = None;
                 }
             }
+            ArpgCommand::EquipWeapon { weapon } => {
+                let state = self
+                    .players
+                    .get_mut(&command.player_id)
+                    .expect("player existence checked");
+                if state.health > 0 && state.action.is_none() && state.weapon != weapon {
+                    state.weapon = weapon;
+                    // Nothing carries across a weapon change except guard-break recovery.
+                    state.draw_ticks = None;
+                    state.guard.stance = None;
+                    state.counter = None;
+                }
+            }
+            ArpgCommand::DrawBow => {
+                let state = self
+                    .players
+                    .get_mut(&command.player_id)
+                    .expect("player existence checked");
+                if state.weapon == Weapon::Bow
+                    && state.health > 0
+                    && state.action.is_none()
+                    && state.hurt_ticks_remaining == 0
+                    && state.draw_ticks.is_none()
+                {
+                    state.draw_ticks = Some(0);
+                }
+            }
+            ArpgCommand::ReleaseBow => {
+                let state = self
+                    .players
+                    .get_mut(&command.player_id)
+                    .expect("player existence checked");
+                if let Some(drawn) = state.draw_ticks.take()
+                    && drawn >= BOW_MIN_DRAW_TICKS
+                {
+                    let mut action = Self::new_action(ActionKind::Shoot, state);
+                    action.charge = drawn;
+                    state.action = Some(action);
+                }
+            }
+            ArpgCommand::CancelBow => {
+                self.players
+                    .get_mut(&command.player_id)
+                    .expect("player existence checked")
+                    .draw_ticks = None;
+            }
         }
         self.last_sequences
             .insert(command.player_id, command.sequence);
@@ -2419,6 +2776,7 @@ impl AuthoritativeGame for ArpgGame {
         for player in self.players.values_mut() {
             player.hurt_ticks_remaining = player.hurt_ticks_remaining.saturating_sub(1);
             Self::advance_guard(player);
+            Self::advance_draw(player);
         }
         for monster in &mut self.monsters {
             monster.stagger_ticks_remaining = monster.stagger_ticks_remaining.saturating_sub(1);
@@ -2453,6 +2811,7 @@ impl AuthoritativeGame for ArpgGame {
         }
         self.reconcile_encounters()?;
         self.advance_actions()?;
+        self.advance_arrows()?;
         self.advance_monster_actions()?;
         self.tick = self
             .tick
@@ -2499,6 +2858,8 @@ impl AuthoritativeGame for ArpgGame {
                     guard_points: state.guard.points,
                     max_guard_points: MAX_GUARD_POINTS,
                     counter: state.counter,
+                    weapon: state.weapon,
+                    draw_ticks: state.draw_ticks,
                 })
             })
             .collect::<Result<Vec<_>, GameError>>()?;
@@ -2513,7 +2874,7 @@ impl AuthoritativeGame for ArpgGame {
         }));
 
         Ok(ArpgSnapshot {
-            schema_version: 11,
+            schema_version: 12,
             run_seed: self.run_seed,
             tick: self.tick,
             world_units_per_meter: WORLD_UNITS_PER_METER,
@@ -2549,6 +2910,7 @@ impl AuthoritativeGame for ArpgGame {
                 })
                 .collect(),
             static_colliders,
+            arrows: self.arrows.clone(),
         })
     }
 }
@@ -2898,6 +3260,8 @@ mod tests {
             hurt_ticks_remaining: 0,
             guard: GuardState::READY,
             counter: None,
+            weapon: Weapon::SwordAndShield,
+            draw_ticks: None,
             health: BASE_MAX_HEALTH,
             experience: 0,
             gold: 0,
@@ -4404,6 +4768,7 @@ mod tests {
             facing_z: 0,
             connected: false,
             buffered: None,
+            charge: 0,
         });
         command(&mut game, ArpgCommand::PrimaryAttack);
         assert_eq!(action_kind(&game), Some(ActionKind::Interact));
@@ -4856,6 +5221,405 @@ mod tests {
         );
     }
 
+    fn bow_arena() -> (ArpgGame, i32, i32) {
+        let (mut game, x, z) = strike_arena();
+        // A dormant-room monster far away keeps nothing in range but the room active.
+        place_monster(&mut game, 99, x - 900, z);
+        command(
+            &mut game,
+            ArpgCommand::EquipWeapon {
+                weapon: Weapon::Bow,
+            },
+        );
+        (game, x, z)
+    }
+
+    fn draw_for(game: &mut ArpgGame, ticks: u8) {
+        command(game, ArpgCommand::DrawBow);
+        for _ in 0..ticks {
+            game.advance_tick().unwrap();
+        }
+    }
+
+    /// Releases and runs until the shot's arrows are gone, collecting arrow outcomes.
+    fn release_and_fly(game: &mut ArpgGame) -> Vec<StrikeOutcome> {
+        command(game, ArpgCommand::ReleaseBow);
+        let mut outcomes = Vec::new();
+        for _ in 0..80 {
+            game.advance_tick().unwrap();
+            outcomes.extend(
+                game.strike_outcomes()
+                    .iter()
+                    .filter(|outcome| outcome.definition == "bow.arrow")
+                    .copied(),
+            );
+            if game.arrows.is_empty() && current_action(game).is_none() {
+                break;
+            }
+        }
+        outcomes
+    }
+
+    #[test]
+    fn a_full_draw_launches_exactly_one_committed_arrow() {
+        let (mut game, x, z) = bow_arena();
+        draw_for(&mut game, BOW_FULL_DRAW_TICKS + 5);
+        assert_eq!(game.players[&1].draw_ticks, Some(BOW_FULL_DRAW_TICKS));
+        command(&mut game, ArpgCommand::ReleaseBow);
+        command(&mut game, ArpgCommand::ReleaseBow);
+        assert_eq!(action_kind(&game), Some(ActionKind::Shoot));
+        while game.arrows.is_empty() {
+            game.advance_tick().unwrap();
+        }
+        assert_eq!(game.arrows.len(), 1);
+        let arrow = game.arrows[0];
+        assert_eq!(arrow.owner_id, 1);
+        assert_eq!(arrow.damage, ARROW_FULL_DAMAGE);
+        assert_eq!(arrow.velocity, [ARROW_FULL_SPEED, 0, 0]);
+        // Launched from the body centre during the action step, then moved by the same
+        // tick's arrow step.
+        assert_eq!(arrow.position, [x + ARROW_FULL_SPEED, PLAYER_Y, z]);
+        while current_action(&game).is_some() {
+            game.advance_tick().unwrap();
+        }
+        assert_eq!(game.next_arrow_id, ARROW_ID_BASE + 1, "one shot, one arrow");
+    }
+
+    #[test]
+    fn short_draws_cancels_and_sword_loadouts_never_shoot() {
+        let (mut game, _, _) = bow_arena();
+        draw_for(&mut game, BOW_MIN_DRAW_TICKS - 1);
+        command(&mut game, ArpgCommand::ReleaseBow);
+        assert_eq!(action_kind(&game), None);
+
+        draw_for(&mut game, BOW_FULL_DRAW_TICKS);
+        command(&mut game, ArpgCommand::CancelBow);
+        command(&mut game, ArpgCommand::ReleaseBow);
+        assert_eq!(action_kind(&game), None);
+
+        draw_for(&mut game, BOW_MIN_DRAW_TICKS);
+        let charge_ok = {
+            command(&mut game, ArpgCommand::ReleaseBow);
+            current_action(&game).map(|action| action.charge)
+        };
+        assert_eq!(
+            charge_ok,
+            Some(BOW_MIN_DRAW_TICKS),
+            "the minimum draw is inclusive"
+        );
+
+        let (mut sword, _, _) = strike_arena();
+        command(&mut sword, ArpgCommand::DrawBow);
+        assert_eq!(sword.players[&1].draw_ticks, None);
+        command(&mut sword, ArpgCommand::ReleaseBow);
+        assert!(sword.arrows.is_empty() && current_action(&sword).is_none());
+    }
+
+    #[test]
+    fn arrows_hit_targets_ahead_through_the_shared_outcome_path() {
+        let (mut game, x, z) = bow_arena();
+        place_monster(&mut game, 1, x + 600, z);
+        draw_for(&mut game, BOW_FULL_DRAW_TICKS);
+        let outcomes = release_and_fly(&mut game);
+        assert_eq!(
+            targets(&outcomes),
+            [(
+                StrikeTarget::Monster(1),
+                StrikeResult::Hit {
+                    damage: ARROW_FULL_DAMAGE,
+                    defeated: false
+                }
+            )]
+        );
+        assert_eq!(monster_health(&game, 1), 100 - ARROW_FULL_DAMAGE);
+        assert!(
+            game.arrows.is_empty(),
+            "a non-piercing arrow stops at its first contact"
+        );
+    }
+
+    #[test]
+    fn arrows_miss_targets_that_move_away_and_expire_after_their_lifetime() {
+        let (mut game, x, z) = bow_arena();
+        place_monster(&mut game, 1, x + 900, z);
+        draw_for(&mut game, BOW_FULL_DRAW_TICKS);
+        command(&mut game, ArpgCommand::ReleaseBow);
+        while game.arrows.is_empty() {
+            game.advance_tick().unwrap();
+        }
+        game.monsters
+            .iter_mut()
+            .find(|monster| monster.id == 1)
+            .unwrap()
+            .position
+            .z = z + 300;
+        while !game.arrows.is_empty() {
+            game.advance_tick().unwrap();
+            assert!(game.strike_outcomes().is_empty());
+        }
+        assert_eq!(monster_health(&game, 1), 100);
+
+        // In open space an arrow despawns when its lifetime runs out.
+        let (mut game, x, z) = bow_arena();
+        game.arrows.push(ArrowSnapshot {
+            id: game.next_arrow_id,
+            owner_id: 1,
+            launched_at_tick: game.tick,
+            position: [x, PLAYER_Y, z],
+            velocity: [0, 0, 1],
+            damage: ARROW_MIN_DAMAGE,
+            ticks_remaining: 3,
+        });
+        game.next_arrow_id += 1;
+        for expected in [2, 1] {
+            game.advance_tick().unwrap();
+            assert_eq!(game.arrows[0].ticks_remaining, expected);
+        }
+        game.advance_tick().unwrap();
+        assert!(game.arrows.is_empty());
+    }
+
+    #[test]
+    fn fast_arrows_stop_at_thin_walls_and_walls_win_contact_ties() {
+        let (mut game, x, z) = bow_arena();
+        place_monster(&mut game, 1, x + 600, z);
+        place_blocker(
+            &mut game,
+            0,
+            x + 300,
+            z,
+            Vec3i::new(2, WALL_HALF_HEIGHT, 60),
+        );
+        draw_for(&mut game, BOW_FULL_DRAW_TICKS);
+        assert!(release_and_fly(&mut game).is_empty());
+        assert_eq!(monster_health(&game, 1), 100);
+
+        // Wall face and hurt-box face both at x + 200: equal contact time, wall first.
+        let (mut tie, x, z) = bow_arena();
+        place_monster(&mut tie, 1, x + 200 + MONSTER_HURTBOX_HALF_EXTENTS.x, z);
+        place_blocker(&mut tie, 0, x + 205, z, Vec3i::new(5, WALL_HALF_HEIGHT, 60));
+        draw_for(&mut tie, BOW_FULL_DRAW_TICKS);
+        assert!(release_and_fly(&mut tie).is_empty());
+    }
+
+    #[test]
+    fn a_muzzle_against_a_wall_cannot_shoot_through_it() {
+        let (mut game, x, z) = bow_arena();
+        place_blocker(
+            &mut game,
+            0,
+            x + PLAYER_HALF_EXTENTS.x + 3,
+            z,
+            Vec3i::new(2, WALL_HALF_HEIGHT, 60),
+        );
+        place_monster(&mut game, 1, x + 150, z);
+        draw_for(&mut game, BOW_FULL_DRAW_TICKS);
+        assert!(release_and_fly(&mut game).is_empty());
+        assert_eq!(monster_health(&game, 1), 100);
+    }
+
+    #[test]
+    fn diagonal_release_commits_a_normalised_direction() {
+        let (mut game, _, _) = bow_arena();
+        let state = game.players.get_mut(&1).unwrap();
+        state.facing_x = 1;
+        state.facing_z = -1;
+        draw_for(&mut game, BOW_FULL_DRAW_TICKS);
+        command(&mut game, ArpgCommand::ReleaseBow);
+        while game.arrows.is_empty() {
+            game.advance_tick().unwrap();
+        }
+        let diagonal = ARROW_FULL_SPEED * ARROW_DIAGONAL_NUMERATOR / ARROW_DIAGONAL_DENOMINATOR;
+        assert_eq!(game.arrows[0].velocity, [diagonal, 0, -diagonal]);
+    }
+
+    #[test]
+    fn hurt_death_and_weapon_switches_cancel_a_draw_without_shooting() {
+        let (mut game, x, z) = bow_arena();
+        draw_for(&mut game, BOW_FULL_DRAW_TICKS);
+        place_monster(&mut game, 2, x - 100, z);
+        assert_eq!(claw(&mut game, 2), CLAW_HIT);
+        game.advance_tick().unwrap();
+        assert_eq!(game.players[&1].draw_ticks, None);
+        command(&mut game, ArpgCommand::ReleaseBow);
+        assert_eq!(action_kind(&game), None);
+
+        let (mut game, _, _) = bow_arena();
+        draw_for(&mut game, BOW_FULL_DRAW_TICKS);
+        command(
+            &mut game,
+            ArpgCommand::EquipWeapon {
+                weapon: Weapon::SwordAndShield,
+            },
+        );
+        command(&mut game, ArpgCommand::ReleaseBow);
+        assert_eq!(game.players[&1].draw_ticks, None);
+        assert_eq!(action_kind(&game), None);
+
+        let (mut game, _, _) = bow_arena();
+        draw_for(&mut game, BOW_FULL_DRAW_TICKS);
+        game.players.get_mut(&1).unwrap().health = 0;
+        game.advance_tick().unwrap();
+        assert_eq!(game.players[&1].draw_ticks, None);
+    }
+
+    #[test]
+    fn the_bow_disables_sword_strikes_and_guard_without_resetting_guard_break() {
+        let (mut game, _, _) = strike_arena();
+        game.players
+            .get_mut(&1)
+            .unwrap()
+            .guard
+            .broken_ticks_remaining = 20;
+        command(
+            &mut game,
+            ArpgCommand::EquipWeapon {
+                weapon: Weapon::Bow,
+            },
+        );
+        command(&mut game, ArpgCommand::PrimaryAttack);
+        command(&mut game, ArpgCommand::SecondaryAttack);
+        assert_eq!(action_kind(&game), None);
+        command(&mut game, ArpgCommand::SetGuard { raised: true });
+        for _ in 0..10 {
+            game.advance_tick().unwrap();
+            assert_eq!(game.players[&1].guard.stance, None);
+        }
+        command(
+            &mut game,
+            ArpgCommand::EquipWeapon {
+                weapon: Weapon::SwordAndShield,
+            },
+        );
+        assert_eq!(game.players[&1].guard.broken_ticks_remaining, 10);
+
+        command(&mut game, ArpgCommand::PrimaryAttack);
+        command(
+            &mut game,
+            ArpgCommand::EquipWeapon {
+                weapon: Weapon::Bow,
+            },
+        );
+        assert_eq!(
+            game.players[&1].weapon,
+            Weapon::SwordAndShield,
+            "no switch mid-action"
+        );
+    }
+
+    #[test]
+    fn a_released_arrow_outlives_its_shooter() {
+        let (mut game, x, z) = bow_arena();
+        place_monster(&mut game, 1, x + 600, z);
+        game.monsters
+            .iter_mut()
+            .find(|monster| monster.id == 1)
+            .unwrap()
+            .health = 10;
+        draw_for(&mut game, BOW_FULL_DRAW_TICKS);
+        command(&mut game, ArpgCommand::ReleaseBow);
+        while game.arrows.is_empty() {
+            game.advance_tick().unwrap();
+        }
+        assert!(game.remove_player(1));
+        while !game.arrows.is_empty() {
+            game.advance_tick().unwrap();
+        }
+        assert_eq!(monster_health(&game, 1), 0);
+    }
+
+    #[test]
+    fn live_arrows_are_bounded() {
+        let (mut game, _, _) = bow_arena();
+        let mut shot = ArpgGame::new_action(ActionKind::Shoot, &game.players[&1]);
+        shot.charge = BOW_FULL_DRAW_TICKS;
+        game.players.get_mut(&1).unwrap().action = Some(shot);
+        for _ in 0..=MAX_LIVE_ARROWS {
+            game.launch_arrow(1, 1, 0).unwrap();
+        }
+        assert_eq!(game.arrows.len(), MAX_LIVE_ARROWS);
+        assert_eq!(
+            game.arrows[0].id,
+            ARROW_ID_BASE + 1,
+            "the oldest arrow retires"
+        );
+    }
+
+    #[test]
+    fn saves_before_release_and_mid_flight_continue_identically() {
+        let mut game = ArpgGame::new_with_seed(42).unwrap();
+        game.add_player(1).unwrap();
+        let mut sequence = 0;
+        let mut send = |game: &mut ArpgGame, command: ArpgCommand| {
+            sequence += 1;
+            game.apply_command(PlayerCommand::new(1, sequence, command).unwrap())
+                .unwrap();
+        };
+        send(
+            &mut game,
+            ArpgCommand::EquipWeapon {
+                weapon: Weapon::Bow,
+            },
+        );
+        send(&mut game, ArpgCommand::DrawBow);
+        for _ in 0..12 {
+            game.advance_tick().unwrap();
+        }
+        let before_release = game.save_state().unwrap();
+        send(&mut game, ArpgCommand::ReleaseBow);
+        while game.arrows.is_empty() {
+            game.advance_tick().unwrap();
+        }
+        game.advance_tick().unwrap();
+        let mid_flight = game.save_state().unwrap();
+        assert_eq!(mid_flight.arrows.len(), 1);
+
+        let mut restored = ArpgGame::from_save_state(mid_flight.clone()).unwrap();
+        for _ in 0..50 {
+            game.advance_tick().unwrap();
+            restored.advance_tick().unwrap();
+            assert_eq!(restored.snapshot().unwrap(), game.snapshot().unwrap());
+        }
+
+        let mut drawn = ArpgGame::from_save_state(before_release).unwrap();
+        assert_eq!(drawn.players[&1].draw_ticks, Some(12));
+        drawn.advance_tick().unwrap();
+        assert_eq!(drawn.players[&1].draw_ticks, Some(13));
+
+        for corrupt in [
+            ArrowSnapshot {
+                velocity: [0, 0, 0],
+                ..mid_flight.arrows[0]
+            },
+            ArrowSnapshot {
+                id: mid_flight.next_arrow_id,
+                ..mid_flight.arrows[0]
+            },
+            ArrowSnapshot {
+                damage: ARROW_FULL_DAMAGE + 1,
+                ..mid_flight.arrows[0]
+            },
+        ] {
+            let mut tampered = mid_flight.clone();
+            tampered.arrows[0] = corrupt;
+            assert!(
+                ArpgGame::from_save_state(tampered)
+                    .unwrap_err()
+                    .message()
+                    .contains("arrow")
+            );
+        }
+        let mut tampered = mid_flight;
+        tampered.players[0].weapon = Weapon::SwordAndShield;
+        tampered.players[0].draw_ticks = Some(3);
+        assert!(
+            ArpgGame::from_save_state(tampered)
+                .unwrap_err()
+                .message()
+                .contains("loadout")
+        );
+    }
+
     #[test]
     fn generated_rooms_are_large_enough_for_arpg_combat() {
         for seed in 0..64 {
@@ -4958,7 +5722,7 @@ mod tests {
         game.add_player(1).unwrap();
         let snapshot = game.snapshot().unwrap();
         let generated = generate_dungeon(snapshot.run_seed);
-        assert_eq!(snapshot.schema_version, 11);
+        assert_eq!(snapshot.schema_version, 12);
         assert_eq!(snapshot.run_seed, 0xDEAD_BEEF);
         assert_eq!(game.run_seed(), snapshot.run_seed);
         assert_eq!(snapshot.rooms, generated.rooms);

@@ -201,3 +201,32 @@ test("timed attacks chain into the light combo and a missed window starts over",
   await pressAndStep();
   await expect(diagnostics).toContainText("primaryAttack · windup");
 });
+
+test("the bow draws while held, shoots one arrow on release and cancels on blur", async ({
+  page,
+  appUrl,
+}) => {
+  await page.goto(`${appUrl}?scenario=training&seed=42`);
+  const draw = page.getByRole("button", { name: "Draw bow", exact: true });
+  const arrows = page.locator(".training-diagnostics div").filter({ hasText: "Arrows" });
+  await page.getByRole("button", { name: "Switch to bow", exact: true }).waitFor();
+  await page.evaluate(() => document.activeElement?.blur());
+  await page.keyboard.press("x");
+  await expect(draw).toBeVisible();
+
+  await page.keyboard.down("Space");
+  await expect(draw).toHaveAttribute("data-draw", "drawing");
+  await page.waitForTimeout(600);
+  await page.keyboard.up("Space");
+  await expect(arrows).toContainText("Arrows1");
+  await expect(arrows).toContainText("Arrows0", { timeout: 5_000 });
+
+  await page.keyboard.down("Space");
+  await expect(draw).toHaveAttribute("data-draw", "drawing");
+  await page.waitForTimeout(600);
+  await page.evaluate(() => window.dispatchEvent(new Event("blur")));
+  await expect(draw).not.toHaveAttribute("data-draw", /.+/);
+  await page.keyboard.up("Space");
+  await page.waitForTimeout(300);
+  await expect(arrows).toContainText("Arrows0");
+});

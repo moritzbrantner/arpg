@@ -146,6 +146,8 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
   let movement = idleMovement();
   // Every device currently holding guard; the authority sees one held flag.
   const guardSources = new Set<GuardSource>();
+  // Whether this client is holding a bow draw; released draws shoot, cancelled ones do not.
+  let drawing = false;
 
   const update = (patch: Partial<ClientState>) => {
     let changed = false;
@@ -225,6 +227,7 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
     trainingCarry = 0;
     movement = idleMovement();
     guardSources.clear();
+    drawing = false;
   };
 
   // Replaces the current source. The returned token identifies the new generation.
@@ -484,6 +487,13 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
       if (isHeld !== wasHeld) dispatch({ type: "setGuard", raised: isHeld });
     },
 
+    // Held bow draw: pressing draws, releasing shoots (the authority ignores short draws).
+    setBowDraw(held: boolean) {
+      if (held === drawing) return;
+      drawing = held;
+      dispatch({ type: held ? "drawBow" : "releaseBow" });
+    },
+
     releaseInput() {
       movement.forward = false;
       movement.backward = false;
@@ -495,6 +505,11 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
       if (guardSources.size > 0) {
         guardSources.clear();
         dispatch({ type: "setGuard", raised: false });
+      }
+      // Losing focus or opening a menu must never fire a drawn bow.
+      if (drawing) {
+        drawing = false;
+        dispatch({ type: "cancelBow" });
       }
     },
 

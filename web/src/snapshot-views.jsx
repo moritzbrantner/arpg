@@ -30,6 +30,8 @@ export function PlayerHud({ store, playerId, status }) {
           <span>
             Guard {player.guardPoints}/{player.maxGuardPoints}
           </span>
+          <span>{player.weapon === "bow" ? "Bow (unlimited arrows)" : "Sword & shield"}</span>
+          {player.drawTicks != null && <span>Draw {player.drawTicks}t</span>}
         </div>
       )}
       <p>{status}</p>
@@ -71,7 +73,8 @@ export function PlayerHud({ store, playerId, status }) {
         </p>
       )}
       <p className="desktop-controls-hint">
-        WASD move · Space primary · Q heavy · F hold shield · E interact · Esc settings
+        WASD move · Space primary / hold to draw bow · Q heavy · F hold shield · X switch bow · E
+        interact · Esc settings
       </p>
       <p className="mobile-controls-hint">
         Left stick to move · Attack / Heavy / Guard / Interact on the right
@@ -83,13 +86,40 @@ export function PlayerHud({ store, playerId, status }) {
 const LIGHT_KINDS = new Set(["primaryAttack", "counter", "lightFollowUp", "lightFinisher"]);
 const HEAVY_KINDS = new Set(["secondaryAttack", "heavyFinisher"]);
 
-export function CombatActions({ store, playerId, triggerCombatAction, setTouchGuard }) {
+export function CombatActions({
+  store,
+  playerId,
+  triggerCombatAction,
+  setTouchGuard,
+  setTouchDraw,
+  switchWeapon,
+}) {
   const player = focusedPlayer(useSnapshot(store), playerId);
   const light = LIGHT_KINDS.has(player?.action?.kind);
   const heavy = HEAVY_KINDS.has(player?.action?.kind);
   // Attack buttons stay usable during attacks: the authority decides whether a press
   // continues a combo, is buffered or is ignored.
   const canAttack = Boolean(playerId && player?.alive);
+  const bow = player?.weapon === "bow";
+  // With the bow, Attack is a held draw: press draws, release shoots.
+  const drawHandlers = bow
+    ? {
+        onPointerDown: (event) => {
+          event.currentTarget.setPointerCapture?.(event.pointerId);
+          setTouchDraw(true);
+        },
+        onPointerUp: () => setTouchDraw(false),
+        onPointerCancel: () => setTouchDraw(false),
+        onLostPointerCapture: () => setTouchDraw(false),
+        onKeyDown: (event) => {
+          if ((event.key === "Enter" || event.key === " ") && !event.repeat) setTouchDraw(true);
+        },
+        onKeyUp: (event) => {
+          if (event.key === "Enter" || event.key === " ") setTouchDraw(false);
+        },
+        onContextMenu: (event) => event.preventDefault(),
+      }
+    : { onClick: () => triggerCombatAction("primaryAttack") };
   return (
     <section className="combat-actions" aria-label="Combat actions">
       <button
@@ -99,11 +129,12 @@ export function CombatActions({ store, playerId, triggerCombatAction, setTouchGu
         }`}
         data-phase={light ? player.action.phase : undefined}
         data-counter={player?.counter ? "ready" : undefined}
-        aria-label="Primary attack"
+        aria-label={bow ? "Draw bow" : "Primary attack"}
+        data-draw={player?.drawTicks != null ? "drawing" : undefined}
         disabled={!canAttack}
-        onClick={() => triggerCombatAction("primaryAttack")}
+        {...drawHandlers}
       >
-        <strong>{player?.counter ? "Counter" : "Attack"}</strong>
+        <strong>{bow ? "Draw" : player?.counter ? "Counter" : "Attack"}</strong>
         <span>Space</span>
       </button>
       <button
@@ -111,7 +142,7 @@ export function CombatActions({ store, playerId, triggerCombatAction, setTouchGu
         className={`combat-action combat-action-secondary ${heavy ? "is-committed" : ""}`}
         data-phase={heavy ? player.action.phase : undefined}
         aria-label="Heavy attack"
-        disabled={!canAttack}
+        disabled={!canAttack || bow}
         onClick={() => triggerCombatAction("secondaryAttack")}
       >
         <strong>Heavy</strong>
@@ -122,7 +153,7 @@ export function CombatActions({ store, playerId, triggerCombatAction, setTouchGu
         className={`combat-action combat-action-guard ${player?.guard ? "is-committed" : ""}`}
         data-guard={player?.guard?.phase}
         aria-label="Hold shield"
-        disabled={!playerId || !player?.alive}
+        disabled={!playerId || !player?.alive || bow}
         onPointerDown={(event) => {
           event.currentTarget.setPointerCapture?.(event.pointerId);
           setTouchGuard(true);
@@ -141,6 +172,16 @@ export function CombatActions({ store, playerId, triggerCombatAction, setTouchGu
       >
         <strong>Guard</strong>
         <span>F</span>
+      </button>
+      <button
+        type="button"
+        className="combat-action combat-action-swap"
+        aria-label={bow ? "Switch to sword and shield" : "Switch to bow"}
+        disabled={!canAttack || Boolean(player?.action)}
+        onClick={switchWeapon}
+      >
+        <strong>{bow ? "Sword" : "Bow"}</strong>
+        <span>X</span>
       </button>
       <button
         type="button"
@@ -196,6 +237,10 @@ export function TrainingDiagnostics({ store, playerId }) {
       <div>
         <dt>Player action</dt>
         <dd>{playerActionLabel}</dd>
+      </div>
+      <div>
+        <dt>Arrows</dt>
+        <dd>{snapshot?.arrows?.length ?? 0}</dd>
       </div>
     </dl>
   );

@@ -24,11 +24,13 @@ const snapshotJson = (tick, players = [1]) =>
         gold: 0,
         guardPoints: 100,
         maxGuardPoints: 100,
+        weapon: "swordAndShield",
       })),
       monsters: [],
       rooms: [],
       staticColliders: [],
       groundLoot: [],
+      arrows: [],
     },
   });
 
@@ -536,5 +538,23 @@ test("restoring a save that held guard releases it for this client", () => {
   });
   expect(restored.commands).toEqual([
     { playerId: 1, sequence: 4, payload: { type: "setGuard", raised: false } },
+  ]);
+});
+
+test("a held bow draw shoots on release and is cancelled, never fired, on focus loss", () => {
+  const { runtime, games } = harness();
+  runtime.startLocal({ seed: 1 });
+  runtime.setBowDraw(true);
+  runtime.setBowDraw(true);
+  runtime.setBowDraw(false);
+  runtime.setBowDraw(false);
+  runtime.setBowDraw(true);
+  runtime.releaseInput();
+  runtime.setBowDraw(false);
+  expect(games[0].commands.map((command) => command.payload.type)).toEqual([
+    "drawBow",
+    "releaseBow",
+    "drawBow",
+    "cancelBow",
   ]);
 });

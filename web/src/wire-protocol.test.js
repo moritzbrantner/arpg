@@ -10,8 +10,9 @@ const payload = {
   rooms: [],
   staticColliders: [],
   groundLoot: [],
+  arrows: [],
 };
-const encode = (value) => JSON.stringify({ protocolVersion: 9, payload: value });
+const encode = (value) => JSON.stringify({ protocolVersion: 10, payload: value });
 
 test("admits bounded presentation data and rejects malformed vectors and collections", () => {
   expect(decodeSnapshot(encode(payload))).toEqual(payload);
@@ -54,7 +55,10 @@ const player = {
     facing: [1, 0],
     connected: true,
     buffered: "heavy",
+    charge: 0,
   },
+  weapon: "bow",
+  drawTicks: 12,
 };
 
 test("admits shield guard state and rejects malformed guard data", () => {
@@ -69,6 +73,8 @@ test("admits shield guard state and rejects malformed guard data", () => {
     { ...player, counter: { usableFromTick: 40, expiresAtTick: 10 } },
     { ...player, action: { ...player.action, buffered: "special" } },
     { ...player, action: { ...player.action, connected: undefined } },
+    { ...player, weapon: "spear" },
+    { ...player, drawTicks: -1 },
   ])
     expect(() => decodeSnapshot(encode({ ...payload, players: [candidate] }))).toThrow();
 });
