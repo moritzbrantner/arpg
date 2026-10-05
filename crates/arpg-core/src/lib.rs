@@ -1715,11 +1715,17 @@ impl ArpgGame {
 
         let mut opened = BTreeSet::new();
         for id in save.opened_chests {
+            // Opening requires a cleared room, so an opened chest elsewhere is impossible.
+            let cleared = game
+                .chests
+                .iter()
+                .find(|chest| chest.id == id)
+                .is_some_and(|chest| game.room_cleared(chest.room_id));
             let chest = game
                 .chests
                 .iter_mut()
                 .find(|chest| chest.id == id)
-                .filter(|_| opened.insert(id))
+                .filter(|_| cleared && opened.insert(id))
                 .ok_or_else(|| GameError::new("save contains an invalid opened chest"))?;
             chest.opened = true;
         }
@@ -6700,6 +6706,21 @@ mod tests {
         let mut game = ArpgGame::new_with_seed(42).unwrap();
         game.add_player(1).unwrap();
         let id = game.chests[0].id;
+        let room = game.chests[0].room_id;
+        let mut uncleared = game.save_state().unwrap();
+        uncleared.opened_chests = vec![id];
+        assert!(
+            ArpgGame::from_save_state(uncleared).is_err(),
+            "a chest cannot be open while its room is not cleared"
+        );
+        game.rooms
+            .iter_mut()
+            .find(|r| r.id == room)
+            .unwrap()
+            .encounter_state = RoomEncounterState::Cleared;
+        for monster in game.monsters.iter_mut().filter(|m| m.room_id == room) {
+            monster.health = 0;
+        }
         game.chests[0].opened = true;
         let save = game.save_state().unwrap();
         assert_eq!(save.opened_chests, [id]);
