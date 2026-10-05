@@ -1,5 +1,7 @@
 # ARPG — Full Game Roadmap
 
+This document is the long-term game vision. The near-term execution order and its issues live in the content-readiness roadmap [#50](https://github.com/moritzbrantner/arpg/issues/50); the delivered/in-flight/planned status table is in the [README](../README.md#capability-status).
+
 ## Vision
 
 Build an isometric action RPG whose strengths are:
@@ -784,19 +786,6 @@ Correctness tests assert state/event semantics. Performance evidence measures re
 
 ## Immediate implementation sequence
 
-Work toward **Milestone A** before broad systems expansion:
-
-1. Finish the combat training arena and debugging controls.
-2. Finish player locomotion and collision feel.
-3. Integrate proper humanoid skeleton and locomotion animation from `3d-lab`.
-4. Add enemy pursuit/navigation through the existing physics boundary.
-5. Finish hit/stagger/knockback/death presentation.
-6. Add combat audio, particles, and restrained camera feedback.
-7. Introduce three mechanically distinct weapons.
-8. Introduce dodge/defense and the first non-basic skills.
-9. Add three to five enemy combat roles using the shared action system.
-10. Build the first proper boss from those primitives.
-11. Playtest and tune this small combat corpus repeatedly.
-12. Then move aggressively into inventory, equipment, itemization, and the first complete dungeon run.
+The execution order toward **Milestone A** and the content-ready foundation is maintained in [#50](https://github.com/moritzbrantner/arpg/issues/50) and its linked issues rather than duplicated here. Physics solver migration is owned by [#48](https://github.com/moritzbrantner/arpg/issues/48).
 
 Progress should be judged primarily by how much better the next five minutes of play become, not by the number of architectural capabilities added.
