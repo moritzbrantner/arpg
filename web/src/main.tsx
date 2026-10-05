@@ -30,7 +30,7 @@ import "@moritzbrantner/input-bindings-react/styles.css";
 import initWasm, { WasmGame, loadGameFromSaveStateJson } from "./wasm/arpg_web_wasm.js";
 import { attachPeerGameSession } from "./peer-session.js";
 import { DedicatedGameSession } from "./dedicated-session.js";
-import { ResilientLobbySession } from "./vendor/multiplayer-setup-service/resilient-lobby-session.ts";
+import { DemoLobbySession } from "./vendor/multiplayer-setup-service/demo-session.ts";
 import { sampleVirtualStick } from "./virtual-stick.js";
 import {
   CHARACTER_PRESETS,
@@ -719,7 +719,7 @@ function App() {
       closeSession();
       createAuthority();
       leaveTrainingScenario();
-      session = new ResilientLobbySession({
+      session = new DemoLobbySession({
         apiBase: setupUrl,
         topology: "host",
       });
@@ -749,7 +749,7 @@ function App() {
       setSnapshot(null);
       setPlayerId(null);
       leaveTrainingScenario();
-      session = new ResilientLobbySession({
+      session = new DemoLobbySession({
         apiBase: setupUrl,
         topology: "host",
       });
