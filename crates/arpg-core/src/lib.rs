@@ -4,7 +4,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 
-use physics_engine::{BodyId, Ray, RigidBody, SUBTICKS_PER_TICK, Vec3i, World, WorldConfig};
+use physics_engine::{
+    BodyId, BodyKind, Ray, RigidBody, SUBTICKS_PER_TICK, Vec3i, World, WorldConfig,
+};
 use serde::{Deserialize, Serialize};
 
 #[cfg(test)]
@@ -1305,9 +1307,14 @@ impl ArpgGame {
             .world
             .ray_cast(Ray::new(origin, direction), 1)
             .map_err(physics_error)?;
-        Ok(hits
-            .iter()
-            .any(|hit| hit.body.0 >= STATIC_BODY_BASE && hit.time.subticks() < SUBTICKS_PER_TICK))
+        // Players are dynamic bodies; only fixed geometry blocks a strike.
+        Ok(hits.iter().any(|hit| {
+            hit.time.subticks() < SUBTICKS_PER_TICK
+                && self
+                    .world
+                    .body(hit.body)
+                    .is_some_and(|body| body.kind() == BodyKind::Fixed)
+        }))
     }
 
     fn resolve_attack(
@@ -3218,6 +3225,31 @@ mod tests {
         assert_eq!(outcomes[1].target, StrikeTarget::Monster(2));
         assert!(matches!(outcomes[1].result, StrikeResult::Hit { .. }));
         assert_eq!(monster_health(&game, 1), 100);
+    }
+
+    #[test]
+    fn high_id_player_bodies_never_obstruct_strikes() {
+        let mut game = ArpgGame::new_with_seed(42).unwrap();
+        let (x, z) = game
+            .rooms
+            .iter()
+            .find(|room| room.id == STRIKE_ROOM)
+            .unwrap()
+            .center();
+        // Player 10_000's body id lands in the fixed-collider id range.
+        game.player_spawns[0] = Vec3i::new(x, PLAYER_Y, z);
+        game.add_player(10_000).unwrap();
+        game.reconcile_encounters().unwrap();
+        game.monsters.clear();
+        place_monster(&mut game, 1, x + 100, z);
+        game.apply_command(PlayerCommand::new(10_000, 1, ArpgCommand::PrimaryAttack).unwrap())
+            .unwrap();
+        let mut outcomes = Vec::new();
+        while game.players.get(&10_000).unwrap().action.is_some() {
+            game.advance_tick().unwrap();
+            outcomes.extend_from_slice(game.strike_outcomes());
+        }
+        assert_eq!(targets(&outcomes), [(StrikeTarget::Monster(1), LIGHT_HIT)]);
     }
 
     #[test]
