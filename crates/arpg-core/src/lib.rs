@@ -23,13 +23,14 @@ pub const TICK_HZ: u16 = 60;
 const PHYSICS_TICKS_PER_GAME_TICK: i32 = 1;
 pub const MAX_PLAYERS: usize = 4;
 pub const WORLD_UNITS_PER_METER: i32 = 100;
-pub const SAVE_STATE_SCHEMA_VERSION: u16 = 6;
+pub const SAVE_STATE_SCHEMA_VERSION: u16 = 7;
 // 2: directional multi-target strike volumes and obstruction by fixed geometry.
 // 3: directional shield guard, block and guard break.
 // 4: post-block counterattack opportunity.
 // 5: authored light/heavy combo transitions.
 // 6: bow loadout, draw/release and authoritative arrows.
-pub const SAVE_STATE_RULES_VERSION: u16 = 6;
+// 7: reward chests, line-of-sight interaction and reasoned interaction results.
+pub const SAVE_STATE_RULES_VERSION: u16 = 7;
 // physics-engine::World::step(1) integrates velocity as world units per simulation tick.
 // At 60 Hz and 100 world units per meter, 7 units/tick is 4.2 m/s rather than
 // the previous 260 units/tick (156 m/s).
@@ -62,6 +63,9 @@ const INTERACT_ACTIVE_TICKS: u8 = 1;
 const INTERACT_RECOVERY_TICKS: u8 = 3;
 const INTERACT_RANGE: i64 = 160;
 const GROUND_LOOT_GOLD_AMOUNT: u32 = 10;
+/// One reward chest per combat room, opened once after the room's encounter is cleared.
+const CHEST_ID_BASE: u64 = 50_000;
+const CHEST_GOLD_AMOUNT: u32 = 25;
 const MONSTER_ATTACK_RANGE: i64 = 180;
 const MONSTER_ATTACK_DAMAGE: u16 = 10;
 const MONSTER_ATTACK_WINDUP_TICKS: u8 = 18;
@@ -421,6 +425,8 @@ const SCENARIO_PILLAR_HALF_EXTENTS: Vec3i = Vec3i::new(20, WALL_HALF_HEIGHT, 60)
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StrikeEventSnapshot {
+    /// Position among every event (strikes and interactions) resolved in the same tick.
+    pub order: u32,
     pub source: StrikeSource,
     pub strike_tick: u64,
     pub definition: String,
@@ -721,6 +727,9 @@ pub struct ArpgSnapshot {
     /// Transient presentation evidence: not part of saves, so a freshly restored game
     /// publishes none until its next tick.
     pub strike_events: Vec<StrikeEventSnapshot>,
+    pub chests: Vec<ChestSnapshot>,
+    /// Interaction attempts resolved during the tick that produced this snapshot.
+    pub interaction_events: Vec<InteractionEventSnapshot>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -799,6 +808,8 @@ pub struct PlayerSnapshot {
     pub weapon: Weapon,
     /// Bow draw ticks while the bow is being drawn.
     pub draw_ticks: Option<u8>,
+    /// What Interact would act on now, or why it would do nothing.
+    pub interaction: InteractionPrompt,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -817,6 +828,82 @@ pub struct MonsterSnapshot {
 #[serde(rename_all = "camelCase")]
 pub enum LootKind {
     Gold,
+}
+
+/// A reward chest. Core owns availability: it can be opened once its room is cleared.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChestSnapshot {
+    pub id: u64,
+    pub room_id: RoomId,
+    pub position: [i32; 3],
+    pub opened: bool,
+    /// Whether the chest can be opened now (its room is cleared and it is still closed).
+    pub available: bool,
+}
+
+/// What an interaction would or did act on.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "id", rename_all = "camelCase")]
+pub enum InteractionTarget {
+    Loot(GroundLootId),
+    Chest(u64),
+}
+
+/// Why an interaction did nothing. Ordinary gameplay refusals, not transport errors.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum InteractionRefusal {
+    /// Nothing interactable within reach.
+    NothingInRange,
+    /// The nearest interactable is a chest whose room is not cleared yet.
+    ChestLocked,
+    /// Everything within reach is behind fixed geometry.
+    Obstructed,
+    /// The player is mid-action (or defeated) and cannot start an interaction now.
+    Busy,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum InteractionResult {
+    PickedUp {
+        target: InteractionTarget,
+        gold: u32,
+    },
+    Opened {
+        target: InteractionTarget,
+        gold: u32,
+    },
+    Refused {
+        reason: InteractionRefusal,
+    },
+}
+
+/// What a player's Interact would do now: the authoritative source for prompts.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum InteractionPrompt {
+    Available { target: InteractionTarget },
+    Unavailable { reason: InteractionRefusal },
+}
+
+/// One resolved interaction attempt, published with the tick that resolved it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InteractionEventSnapshot {
+    /// Position among every event (strikes and interactions) resolved in the same tick.
+    pub order: u32,
+    pub player_id: PlayerId,
+    pub result: InteractionResult,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -843,6 +930,8 @@ pub struct ArpgSaveState {
     pub arrows: Vec<ArrowSnapshot>,
     pub next_arrow_id: u64,
     pub scenario: ScenarioId,
+    /// Ids of chests already opened.
+    pub opened_chests: Vec<u64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -1002,6 +1091,8 @@ pub enum StrikeResult {
 /// parallel path per weapon.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StrikeOutcome {
+    /// Position among every event (strikes and interactions) resolved in the same tick.
+    pub order: u32,
     pub strike: StrikeId,
     pub definition: &'static str,
     pub target: StrikeTarget,
@@ -1179,6 +1270,8 @@ pub struct ArpgGame {
     arrows: Vec<ArrowSnapshot>,
     next_arrow_id: u64,
     scenario: ScenarioId,
+    chests: Vec<ChestSnapshot>,
+    interaction_events: Vec<InteractionEventSnapshot>,
 }
 
 impl Default for ArpgGame {
@@ -1204,6 +1297,21 @@ impl ArpgGame {
             player_spawns,
             monsters,
         } = generate_dungeon(run_seed);
+        let chests = rooms
+            .iter()
+            .filter(|room| room.kind == RoomKind::Combat)
+            .map(|room| ChestSnapshot {
+                id: CHEST_ID_BASE + u64::from(room.id),
+                room_id: room.id,
+                position: [
+                    (room.min_x + room.max_x) / 2,
+                    PLAYER_Y,
+                    room.max_z - ROOM_SPAWN_MARGIN,
+                ],
+                opened: false,
+                available: false,
+            })
+            .collect::<Vec<_>>();
         for collider in &static_colliders {
             world
                 .add_body(RigidBody::fixed(
@@ -1232,6 +1340,8 @@ impl ArpgGame {
             arrows: Vec::new(),
             next_arrow_id: ARROW_ID_BASE,
             scenario: ScenarioId::Dungeon,
+            chests,
+            interaction_events: Vec::new(),
         })
     }
 
@@ -1387,6 +1497,12 @@ impl ArpgGame {
             arrows: self.arrows.clone(),
             next_arrow_id: self.next_arrow_id,
             scenario: self.scenario,
+            opened_chests: self
+                .chests
+                .iter()
+                .filter(|chest| chest.opened)
+                .map(|chest| chest.id)
+                .collect(),
         })
     }
 
@@ -1596,6 +1712,23 @@ impl ArpgGame {
         }
         game.arrows = save.arrows;
         game.next_arrow_id = save.next_arrow_id;
+
+        let mut opened = BTreeSet::new();
+        for id in save.opened_chests {
+            // Opening requires a cleared room, so an opened chest elsewhere is impossible.
+            let cleared = game
+                .chests
+                .iter()
+                .find(|chest| chest.id == id)
+                .is_some_and(|chest| game.room_cleared(chest.room_id));
+            let chest = game
+                .chests
+                .iter_mut()
+                .find(|chest| chest.id == id)
+                .filter(|_| cleared && opened.insert(id))
+                .ok_or_else(|| GameError::new("save contains an invalid opened chest"))?;
+            chest.opened = true;
+        }
 
         for player in save.players {
             game.add_player(player.id)?;
@@ -2146,37 +2279,142 @@ impl ArpgGame {
         Ok(())
     }
 
+    /// Next ordinal in this tick's shared strike/interaction event order.
+    fn next_event_order(&self) -> u32 {
+        u32::try_from(self.strike_outcomes.len() + self.interaction_events.len())
+            .expect("per-tick event count fits u32")
+    }
+
+    fn push_strike_outcome(&mut self, outcome: StrikeOutcome) {
+        let order = self.next_event_order();
+        self.strike_outcomes
+            .push(StrikeOutcome { order, ..outcome });
+    }
+
+    fn room_cleared(&self, room_id: RoomId) -> bool {
+        self.rooms
+            .iter()
+            .any(|room| room.id == room_id && room.encounter_state == RoomEncounterState::Cleared)
+    }
+
+    /// Every interactable within reach of `position`, nearest first. Equal distances prefer
+    /// loot over chests and then the lower id. `usable` is false for a locked chest.
+    fn interaction_candidates(
+        &self,
+        position: Vec3i,
+    ) -> Vec<(i64, InteractionTarget, Vec3i, bool)> {
+        let range_sq = INTERACT_RANGE * INTERACT_RANGE;
+        let distance_sq = |at: Vec3i| {
+            let dx = i64::from(at.x - position.x);
+            let dz = i64::from(at.z - position.z);
+            dx * dx + dz * dz
+        };
+        let loot = self.ground_loot.iter().map(|loot| {
+            (
+                distance_sq(loot.position),
+                InteractionTarget::Loot(loot.id),
+                loot.position,
+                true,
+            )
+        });
+        let chests = self
+            .chests
+            .iter()
+            .filter(|chest| !chest.opened)
+            .map(|chest| {
+                let at = array_to_vec(chest.position);
+                (
+                    distance_sq(at),
+                    InteractionTarget::Chest(chest.id),
+                    at,
+                    self.room_cleared(chest.room_id),
+                )
+            });
+        let mut candidates = loot
+            .chain(chests)
+            .filter(|(distance, ..)| *distance <= range_sq)
+            .collect::<Vec<_>>();
+        candidates.sort_unstable_by_key(|(distance, target, ..)| (*distance, *target));
+        candidates
+    }
+
+    /// The interaction `Interact` would perform for this player right now, if any. The
+    /// browser shows prompts from this, never from its own radius.
+    fn interaction_choice(
+        &self,
+        position: Vec3i,
+    ) -> Result<Result<InteractionTarget, InteractionRefusal>, GameError> {
+        let mut refusal = InteractionRefusal::NothingInRange;
+        for (_, target, at, usable) in self.interaction_candidates(position) {
+            if self.strike_obstructed(position, at)? {
+                if refusal == InteractionRefusal::NothingInRange {
+                    refusal = InteractionRefusal::Obstructed;
+                }
+                continue;
+            }
+            if !usable {
+                refusal = InteractionRefusal::ChestLocked;
+                continue;
+            }
+            return Ok(Ok(target));
+        }
+        Ok(Err(refusal))
+    }
+
     fn resolve_interaction(&mut self, player_id: PlayerId) -> Result<(), GameError> {
         let player_position = self
             .world
             .body(Self::player_body_id(player_id))
             .ok_or_else(|| GameError::new("player physics body is missing"))?
             .position();
-        let range_sq = INTERACT_RANGE * INTERACT_RANGE;
-        let target = self
-            .ground_loot
-            .iter()
-            .enumerate()
-            .filter_map(|(index, loot)| {
-                let dx = i64::from(loot.position.x - player_position.x);
-                let dz = i64::from(loot.position.z - player_position.z);
-                let distance_sq = dx * dx + dz * dz;
-                (distance_sq <= range_sq).then_some((distance_sq, loot.id, index))
-            })
-            .min_by_key(|(distance_sq, id, _)| (*distance_sq, *id));
-        let Some((_, _, index)) = target else {
-            return Ok(());
-        };
-        let loot = self.ground_loot.remove(index);
-        let player = self
-            .players
-            .get_mut(&player_id)
-            .ok_or_else(|| GameError::new("interaction references an unknown player"))?;
-        match loot.kind {
-            LootKind::Gold => {
-                player.gold = player.gold.saturating_add(loot.amount);
+        let result = match self.interaction_choice(player_position)? {
+            Err(reason) => InteractionResult::Refused { reason },
+            Ok(target @ InteractionTarget::Loot(id)) => {
+                let index = self
+                    .ground_loot
+                    .iter()
+                    .position(|loot| loot.id == id)
+                    .expect("candidate loot exists");
+                let loot = self.ground_loot.remove(index);
+                match loot.kind {
+                    LootKind::Gold => InteractionResult::PickedUp {
+                        target,
+                        gold: loot.amount,
+                    },
+                }
             }
+            Ok(target @ InteractionTarget::Chest(id)) => {
+                let chest = self
+                    .chests
+                    .iter_mut()
+                    .find(|chest| chest.id == id)
+                    .expect("candidate chest exists");
+                chest.opened = true;
+                InteractionResult::Opened {
+                    target,
+                    gold: CHEST_GOLD_AMOUNT,
+                }
+            }
+        };
+        let mut result = result;
+        if let InteractionResult::PickedUp { gold, .. } | InteractionResult::Opened { gold, .. } =
+            &mut result
+        {
+            let player = self
+                .players
+                .get_mut(&player_id)
+                .ok_or_else(|| GameError::new("interaction references an unknown player"))?;
+            let before = player.gold;
+            player.gold = player.gold.saturating_add(*gold);
+            // Publish what was actually credited (gold saturates at its maximum).
+            *gold = player.gold - before;
         }
+        let order = self.next_event_order();
+        self.interaction_events.push(InteractionEventSnapshot {
+            order,
+            player_id,
+            result,
+        });
         Ok(())
     }
 
@@ -2340,7 +2578,8 @@ impl ArpgGame {
                     defeated,
                 }
             };
-            self.strike_outcomes.push(StrikeOutcome {
+            self.push_strike_outcome(StrikeOutcome {
+                order: 0,
                 strike,
                 definition: definition.id,
                 target,
@@ -2548,17 +2787,16 @@ impl ArpgGame {
         }
         let defeated = monster.health == 0;
         let position = monster.position;
-        self.strike_outcomes.push(StrikeOutcome {
+        let damage = previous_health - monster.health;
+        self.push_strike_outcome(StrikeOutcome {
+            order: 0,
             strike: StrikeId {
                 source: StrikeSource::Player(arrow.owner_id),
                 tick: arrow.launched_at_tick,
             },
             definition: "bow.arrow",
             target: StrikeTarget::Monster(monster_id),
-            result: StrikeResult::Hit {
-                damage: previous_health - monster.health,
-                defeated,
-            },
+            result: StrikeResult::Hit { damage, defeated },
         });
         if defeated {
             // A departed shooter's arrow still kills, but nobody is credited.
@@ -2685,7 +2923,8 @@ impl ArpgGame {
                     StrikeResult::Obstructed => {}
                 }
             }
-            self.strike_outcomes.push(StrikeOutcome {
+            self.push_strike_outcome(StrikeOutcome {
+                order: 0,
                 strike,
                 definition: definition.id,
                 target,
@@ -3045,6 +3284,7 @@ impl AuthoritativeGame for ArpgGame {
 
     fn advance_tick(&mut self) -> Result<(), GameError> {
         self.strike_outcomes.clear();
+        self.interaction_events.clear();
         for player in self.players.values_mut() {
             player.hurt_ticks_remaining = player.hurt_ticks_remaining.saturating_sub(1);
             Self::advance_guard(player);
@@ -3132,6 +3372,16 @@ impl AuthoritativeGame for ArpgGame {
                     counter: state.counter,
                     weapon: state.weapon,
                     draw_ticks: state.draw_ticks,
+                    interaction: if state.health == 0 || state.action.is_some() {
+                        InteractionPrompt::Unavailable {
+                            reason: InteractionRefusal::Busy,
+                        }
+                    } else {
+                        match self.interaction_choice(body.position())? {
+                            Ok(target) => InteractionPrompt::Available { target },
+                            Err(reason) => InteractionPrompt::Unavailable { reason },
+                        }
+                    },
                 })
             })
             .collect::<Result<Vec<_>, GameError>>()?;
@@ -3146,7 +3396,7 @@ impl AuthoritativeGame for ArpgGame {
         }));
 
         Ok(ArpgSnapshot {
-            schema_version: 13,
+            schema_version: 14,
             run_seed: self.run_seed,
             tick: self.tick,
             world_units_per_meter: WORLD_UNITS_PER_METER,
@@ -3184,10 +3434,20 @@ impl AuthoritativeGame for ArpgGame {
             static_colliders,
             arrows: self.arrows.clone(),
             scenario: self.scenario,
+            chests: self
+                .chests
+                .iter()
+                .map(|chest| ChestSnapshot {
+                    available: !chest.opened && self.room_cleared(chest.room_id),
+                    ..*chest
+                })
+                .collect(),
+            interaction_events: self.interaction_events.clone(),
             strike_events: self
                 .strike_outcomes
                 .iter()
                 .map(|outcome| StrikeEventSnapshot {
+                    order: outcome.order,
                     source: outcome.strike.source,
                     strike_tick: outcome.strike.tick,
                     definition: outcome.definition.to_owned(),
@@ -6205,6 +6465,299 @@ mod tests {
         }
     }
 
+    fn room2_chest(game: &ArpgGame) -> ChestSnapshot {
+        *game
+            .chests
+            .iter()
+            .find(|chest| chest.room_id == STRIKE_ROOM)
+            .unwrap()
+    }
+
+    fn move_player(game: &mut ArpgGame, player_id: PlayerId, x: i32, z: i32) {
+        game.world
+            .set_position(
+                ArpgGame::player_body_id(player_id),
+                Vec3i::new(x, PLAYER_Y, z),
+            )
+            .unwrap();
+    }
+
+    /// Interacts and returns the interaction events resolved for that action.
+    fn interact(game: &mut ArpgGame, player_id: PlayerId) -> Vec<InteractionEventSnapshot> {
+        let sequence = game
+            .last_sequences
+            .get(&player_id)
+            .copied()
+            .unwrap_or_default()
+            + 1;
+        game.apply_command(PlayerCommand::new(player_id, sequence, ArpgCommand::Interact).unwrap())
+            .unwrap();
+        let mut events = Vec::new();
+        while game.players[&player_id].action.is_some() {
+            game.advance_tick().unwrap();
+            events.extend(game.snapshot().unwrap().interaction_events);
+        }
+        events
+    }
+
+    fn prompt(game: &ArpgGame) -> InteractionPrompt {
+        game.snapshot().unwrap().players[0].interaction
+    }
+
+    #[test]
+    fn a_room_chest_stays_locked_until_its_encounter_is_cleared_and_opens_once() {
+        let (mut game, x, z) = strike_arena();
+        place_monster(&mut game, 1, x - 700, z);
+        let chest = room2_chest(&game);
+        let [cx, _, cz] = chest.position;
+        move_player(&mut game, 1, cx, cz - 100);
+        let locked = InteractionResult::Refused {
+            reason: InteractionRefusal::ChestLocked,
+        };
+        assert_eq!(
+            prompt(&game),
+            InteractionPrompt::Unavailable {
+                reason: InteractionRefusal::ChestLocked
+            }
+        );
+        assert_eq!(interact(&mut game, 1)[0].result, locked);
+
+        game.monsters[0].health = 0;
+        game.reconcile_encounters().unwrap();
+        assert!(
+            game.snapshot()
+                .unwrap()
+                .chests
+                .iter()
+                .any(|c| c.id == chest.id && c.available)
+        );
+        let target = InteractionTarget::Chest(chest.id);
+        assert_eq!(prompt(&game), InteractionPrompt::Available { target });
+        let gold = game.players[&1].gold;
+        assert_eq!(
+            interact(&mut game, 1)[0].result,
+            InteractionResult::Opened {
+                target,
+                gold: CHEST_GOLD_AMOUNT
+            }
+        );
+        assert_eq!(game.players[&1].gold, gold + CHEST_GOLD_AMOUNT);
+        assert_eq!(
+            interact(&mut game, 1)[0].result,
+            InteractionResult::Refused {
+                reason: InteractionRefusal::NothingInRange
+            },
+            "an opened chest cannot pay out twice"
+        );
+    }
+
+    #[test]
+    fn interaction_prefers_the_nearest_target_then_loot_then_identity() {
+        let (mut game, x, z) = strike_arena();
+        game.ground_loot.push(GroundLootState {
+            id: GROUND_LOOT_ID_BASE + 7,
+            position: Vec3i::new(x + 100, PLAYER_Y, z),
+            kind: LootKind::Gold,
+            amount: GROUND_LOOT_GOLD_AMOUNT,
+        });
+        game.ground_loot.push(GroundLootState {
+            id: GROUND_LOOT_ID_BASE + 3,
+            position: Vec3i::new(x - 100, PLAYER_Y, z),
+            kind: LootKind::Gold,
+            amount: GROUND_LOOT_GOLD_AMOUNT,
+        });
+        let chest = room2_chest(&game);
+        game.chests
+            .iter_mut()
+            .find(|c| c.id == chest.id)
+            .unwrap()
+            .position = [x, PLAYER_Y, z + 100];
+        game.reconcile_encounters().unwrap();
+        // Equal distances: loot before chests, then the lower loot id.
+        let order = (0..3)
+            .map(|_| match interact(&mut game, 1)[0].result {
+                InteractionResult::PickedUp { target, .. }
+                | InteractionResult::Opened { target, .. } => target,
+                InteractionResult::Refused { reason } => panic!("refused: {reason:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            order,
+            [
+                InteractionTarget::Loot(GROUND_LOOT_ID_BASE + 3),
+                InteractionTarget::Loot(GROUND_LOOT_ID_BASE + 7),
+                InteractionTarget::Chest(chest.id),
+            ]
+        );
+    }
+
+    #[test]
+    fn walls_block_interaction_and_explain_why() {
+        let (mut game, x, z) = strike_arena();
+        game.ground_loot.push(GroundLootState {
+            id: GROUND_LOOT_ID_BASE,
+            position: Vec3i::new(x + 120, PLAYER_Y, z),
+            kind: LootKind::Gold,
+            amount: GROUND_LOOT_GOLD_AMOUNT,
+        });
+        place_blocker(&mut game, 0, x + 70, z, Vec3i::new(5, WALL_HALF_HEIGHT, 40));
+        assert_eq!(
+            interact(&mut game, 1)[0].result,
+            InteractionResult::Refused {
+                reason: InteractionRefusal::Obstructed
+            }
+        );
+        game.ground_loot.push(GroundLootState {
+            id: GROUND_LOOT_ID_BASE + 1,
+            position: Vec3i::new(x - 140, PLAYER_Y, z),
+            kind: LootKind::Gold,
+            amount: GROUND_LOOT_GOLD_AMOUNT,
+        });
+        assert!(matches!(
+            interact(&mut game, 1)[0].result,
+            InteractionResult::PickedUp {
+                target: InteractionTarget::Loot(id),
+                ..
+            } if id == GROUND_LOOT_ID_BASE + 1
+        ));
+        assert_eq!(game.ground_loot.len(), 1, "the walled-off loot stays");
+    }
+
+    #[test]
+    fn simultaneous_pickups_pay_exactly_once() {
+        let (mut game, x, z) = strike_arena();
+        game.add_player(2).unwrap();
+        move_player(&mut game, 2, x, z + 40);
+        game.ground_loot.push(GroundLootState {
+            id: GROUND_LOOT_ID_BASE,
+            position: Vec3i::new(x + 50, PLAYER_Y, z + 20),
+            kind: LootKind::Gold,
+            amount: GROUND_LOOT_GOLD_AMOUNT,
+        });
+        for player in [1, 2] {
+            game.apply_command(PlayerCommand::new(player, 1, ArpgCommand::Interact).unwrap())
+                .unwrap();
+        }
+        let mut events = Vec::new();
+        while game.players[&1].action.is_some() || game.players[&2].action.is_some() {
+            game.advance_tick().unwrap();
+            events.extend(game.snapshot().unwrap().interaction_events);
+        }
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            events[0],
+            InteractionEventSnapshot {
+                player_id: 1,
+                result: InteractionResult::PickedUp { .. },
+                ..
+            }
+        ));
+        assert_eq!(
+            events[1].result,
+            InteractionResult::Refused {
+                reason: InteractionRefusal::NothingInRange
+            }
+        );
+        assert_eq!(
+            game.players[&1].gold + game.players[&2].gold,
+            GROUND_LOOT_GOLD_AMOUNT
+        );
+    }
+
+    #[test]
+    fn prompts_are_busy_mid_action_and_events_share_one_tick_order() {
+        let (mut game, x, z) = strike_arena();
+        game.add_player(2).unwrap();
+        move_player(&mut game, 2, x, z + 300);
+        place_monster(&mut game, 1, x + 100, z);
+        game.ground_loot.push(GroundLootState {
+            id: GROUND_LOOT_ID_BASE,
+            position: Vec3i::new(x, PLAYER_Y, z + 340),
+            kind: LootKind::Gold,
+            amount: GROUND_LOOT_GOLD_AMOUNT,
+        });
+        // Player 1 attacks; player 2 interacts so both resolve in the same tick.
+        game.apply_command(PlayerCommand::new(1, 1, ArpgCommand::PrimaryAttack).unwrap())
+            .unwrap();
+        for _ in 0..(PRIMARY_WINDUP_TICKS - INTERACT_WINDUP_TICKS) {
+            game.advance_tick().unwrap();
+        }
+        game.apply_command(PlayerCommand::new(2, 1, ArpgCommand::Interact).unwrap())
+            .unwrap();
+        assert_eq!(
+            game.snapshot().unwrap().players[1].interaction,
+            InteractionPrompt::Unavailable {
+                reason: InteractionRefusal::Busy
+            }
+        );
+        let mut both = None;
+        for _ in 0..10 {
+            game.advance_tick().unwrap();
+            let snapshot = game.snapshot().unwrap();
+            if !snapshot.strike_events.is_empty() && !snapshot.interaction_events.is_empty() {
+                both = Some(snapshot);
+                break;
+            }
+        }
+        let snapshot = both.expect("a strike and an interaction in the same tick");
+        // Players resolve in id order: player 1's strike, then player 2's pickup.
+        assert_eq!(snapshot.strike_events[0].order, 0);
+        assert_eq!(snapshot.interaction_events[0].order, 1);
+    }
+
+    #[test]
+    fn interaction_events_report_the_gold_actually_credited() {
+        let (mut game, x, z) = strike_arena();
+        game.players.get_mut(&1).unwrap().gold = u32::MAX - 3;
+        game.ground_loot.push(GroundLootState {
+            id: GROUND_LOOT_ID_BASE,
+            position: Vec3i::new(x + 50, PLAYER_Y, z),
+            kind: LootKind::Gold,
+            amount: GROUND_LOOT_GOLD_AMOUNT,
+        });
+        let events = interact(&mut game, 1);
+        assert_eq!(
+            events[0].result,
+            InteractionResult::PickedUp {
+                target: InteractionTarget::Loot(GROUND_LOOT_ID_BASE),
+                gold: 3
+            }
+        );
+        assert_eq!(game.players[&1].gold, u32::MAX);
+    }
+
+    #[test]
+    fn opened_chests_survive_saves_and_unknown_ones_are_rejected() {
+        let mut game = ArpgGame::new_with_seed(42).unwrap();
+        game.add_player(1).unwrap();
+        let id = game.chests[0].id;
+        let room = game.chests[0].room_id;
+        let mut uncleared = game.save_state().unwrap();
+        uncleared.opened_chests = vec![id];
+        assert!(
+            ArpgGame::from_save_state(uncleared).is_err(),
+            "a chest cannot be open while its room is not cleared"
+        );
+        game.rooms
+            .iter_mut()
+            .find(|r| r.id == room)
+            .unwrap()
+            .encounter_state = RoomEncounterState::Cleared;
+        for monster in game.monsters.iter_mut().filter(|m| m.room_id == room) {
+            monster.health = 0;
+        }
+        game.chests[0].opened = true;
+        let save = game.save_state().unwrap();
+        assert_eq!(save.opened_chests, [id]);
+        let restored = ArpgGame::from_save_state(save.clone()).unwrap();
+        assert!(restored.chests[0].opened);
+        for corrupt in [vec![1], vec![id, id]] {
+            let mut tampered = save.clone();
+            tampered.opened_chests = corrupt;
+            assert!(ArpgGame::from_save_state(tampered).is_err());
+        }
+    }
+
     #[test]
     fn generated_rooms_are_large_enough_for_arpg_combat() {
         for seed in 0..64 {
@@ -6307,7 +6860,7 @@ mod tests {
         game.add_player(1).unwrap();
         let snapshot = game.snapshot().unwrap();
         let generated = generate_dungeon(snapshot.run_seed);
-        assert_eq!(snapshot.schema_version, 13);
+        assert_eq!(snapshot.schema_version, 14);
         assert_eq!(snapshot.run_seed, 0xDEAD_BEEF);
         assert_eq!(game.run_seed(), snapshot.run_seed);
         assert_eq!(snapshot.rooms, generated.rooms);

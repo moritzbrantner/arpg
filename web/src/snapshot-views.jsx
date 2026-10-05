@@ -8,7 +8,7 @@ function focusedPlayer(snapshot, playerId) {
   return snapshot?.players.find((player) => player.id === playerId) ?? null;
 }
 
-export function PlayerHud({ store, playerId, status }) {
+export function PlayerHud({ store, playerId, status, interactKey = "E" }) {
   const snapshot = useSnapshot(store);
   const player = focusedPlayer(snapshot, playerId);
   const healthPercent = player?.maxHealth
@@ -36,6 +36,11 @@ export function PlayerHud({ store, playerId, status }) {
       )}
       <p>{status}</p>
       {player && !player.alive && <p className="defeated-status">Defeated</p>}
+      {player?.alive && interactionPromptText(player.interaction, interactKey) && (
+        <p className="interaction-prompt">
+          {interactionPromptText(player.interaction, interactKey)}
+        </p>
+      )}
       {player?.alive && (player.guard || player.reaction?.kind === "guardBroken") && (
         <p className="guard-status" aria-live="polite">
           {player.reaction?.kind === "guardBroken"
@@ -208,6 +213,25 @@ export function TrainingTick({ store }) {
 
 const TIMELINE_LIMIT = 8;
 
+// Prompts come from the authority's own interaction choice, never a browser radius.
+function interactionPromptText(interaction, key) {
+  if (interaction?.kind === "available") {
+    const what = interaction.target.kind === "chest" ? "Open chest" : "Pick up gold";
+    return key ? `${key} · ${what}` : `${what} (Interact is unbound)`;
+  }
+  if (interaction?.reason === "chestLocked") return "Chest locked until the room is cleared";
+  if (interaction?.reason === "obstructed") return "Out of reach behind a wall";
+  return null;
+}
+
+function describeInteraction(event) {
+  const { result } = event;
+  if (result.kind === "refused")
+    return `player ${event.playerId} · interact refused · ${result.reason}`;
+  const verb = result.kind === "opened" ? "opened" : "picked up";
+  return `player ${event.playerId} · ${verb} ${result.target.kind} ${result.target.id} · +${result.gold} gold`;
+}
+
 function describeParty(party) {
   return `${party.kind} ${party.id}`;
 }
@@ -230,15 +254,27 @@ export function StrikeTimeline({ store }) {
       if (!snapshot) return;
       const restarted = snapshot.tick < lastTick;
       lastTick = snapshot.tick;
-      const events = snapshot.strikeEvents ?? [];
-      if (!restarted && events.length === 0) return;
+      // The authority numbers every event of a tick; show them in that order.
+      const lines = [
+        ...(snapshot.strikeEvents ?? []).map((event) => ({
+          order: event.order,
+          text: `${event.definition} · ${describeParty(event.source)} → ${describeParty(
+            event.target,
+          )} · ${describeResult(event.result)}`,
+        })),
+        ...(snapshot.interactionEvents ?? []).map((event) => ({
+          order: event.order,
+          text: describeInteraction(event),
+        })),
+      ]
+        .sort((left, right) => left.order - right.order)
+        .map((line) => line.text);
+      if (!restarted && lines.length === 0) return;
       setEntries((current) =>
         [
-          ...events.map((event, index) => ({
+          ...lines.map((line, index) => ({
             key: `${snapshot.tick}-${index}`,
-            text: `tick ${snapshot.tick} · ${event.definition} · ${describeParty(
-              event.source,
-            )} → ${describeParty(event.target)} · ${describeResult(event.result)}`,
+            text: `tick ${snapshot.tick} · ${line}`,
           })),
           ...(restarted ? [] : current),
         ].slice(0, TIMELINE_LIMIT),
@@ -246,10 +282,10 @@ export function StrikeTimeline({ store }) {
     });
   }, [store]);
   return (
-    <section className="strike-timeline" aria-label="Strike timeline">
-      <h2>Strikes</h2>
+    <section className="strike-timeline" aria-label="Event timeline">
+      <h2>Events</h2>
       {entries.length === 0 ? (
-        <p>No strikes yet</p>
+        <p>No events yet</p>
       ) : (
         <ol>
           {entries.map((entry) => (

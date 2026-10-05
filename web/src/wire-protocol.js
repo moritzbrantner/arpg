@@ -1,6 +1,6 @@
-// Browser projection of the arpg-protocol v11 envelope. This adapter validates
+// Browser projection of the arpg-protocol v12 envelope. This adapter validates
 // only data consumed by presentation; gameplay rules remain in arpg-core.
-export const PROTOCOL_VERSION = 11;
+export const PROTOCOL_VERSION = 12;
 const MAX_SNAPSHOT_CHARACTERS = 65_535;
 const integer = (value) => Number.isSafeInteger(value);
 const nonNegative = (value) => integer(value) && value >= 0;
@@ -29,6 +29,17 @@ const scenarios = new Set([
 const parties = new Set(["player", "monster"]);
 const strikeResults = new Set(["hit", "blocked", "guardBroken", "obstructed"]);
 const party = (value) => parties.has(value?.kind) && nonNegative(value.id);
+const interactionTargets = new Set(["loot", "chest"]);
+const interactionRefusals = new Set(["nothingInRange", "chestLocked", "obstructed", "busy"]);
+const interactionTarget = (value) => interactionTargets.has(value?.kind) && nonNegative(value.id);
+const interactionPrompt = (value) =>
+  (value?.kind === "available" && interactionTarget(value.target)) ||
+  (value?.kind === "unavailable" && interactionRefusals.has(value.reason));
+const interactionResult = (value) =>
+  ((value?.kind === "pickedUp" || value?.kind === "opened") &&
+    interactionTarget(value.target) &&
+    nonNegative(value.gold)) ||
+  (value?.kind === "refused" && interactionRefusals.has(value.reason));
 const comboInputs = new Set(["light", "heavy"]);
 const playerReactions = new Set(["hurt", "blocked", "guardBroken"]);
 const guardPhases = new Set(["raising", "raised"]);
@@ -99,13 +110,29 @@ export function decodeSnapshot(encoded) {
             value.usableFromTick < value.expiresAtTick,
         ) &&
         weapons.has(player.weapon) &&
-        optional(player.drawTicks, nonNegative),
+        optional(player.drawTicks, nonNegative) &&
+        interactionPrompt(player.interaction),
+    ) &&
+    list(
+      "chests",
+      (chest) =>
+        nonNegative(chest?.id) &&
+        nonNegative(chest.roomId) &&
+        vector(chest.position, 3) &&
+        typeof chest.opened === "boolean" &&
+        typeof chest.available === "boolean",
+    ) &&
+    list(
+      "interactionEvents",
+      (event) =>
+        nonNegative(event?.order) && nonNegative(event.playerId) && interactionResult(event.result),
     ) &&
     scenarios.has(snapshot.scenario) &&
     list(
       "strikeEvents",
       (event) =>
-        party(event?.source) &&
+        nonNegative(event?.order) &&
+        party(event.source) &&
         party(event.target) &&
         nonNegative(event.strikeTick) &&
         typeof event.definition === "string" &&

@@ -10,7 +10,8 @@ import {
 import { createRoot } from "react-dom/client";
 import * as THREE from "three";
 import { createThreeSceneRenderer } from "@moritzbrantner/three-d-renderer";
-import { validateRegistry } from "@moritzbrantner/input-bindings";
+import { applyProfile, validateRegistry } from "@moritzbrantner/input-bindings";
+import { keyLabelForAction } from "./binding-labels.js";
 import { createSnapshotStore } from "./snapshot-store.js";
 import {
   PlayerHud,
@@ -318,6 +319,14 @@ function buildFrame(snapshot, focusPlayerId, width, height, focusPlayerAccent = 
         },
       ];
     }),
+    ...(snapshot.chests ?? []).map((chest) => ({
+      id: `chest-${chest.id}`,
+      geometry: { kind: "box", size: [0.6, 0.4, 0.4] },
+      color: chest.opened ? "#3a3530" : chest.available ? "#d6b45f" : "#6b5236",
+      transform: {
+        translation: chest.position.map((value, axis) => (axis === 1 ? 0.2 : value / scale)),
+      },
+    })),
     ...(snapshot.arrows ?? []).map((arrow) => {
       const translation = arrow.position.map((value) => value / scale);
       const yaw = Math.atan2(arrow.velocity[0], arrow.velocity[2]);
@@ -472,6 +481,11 @@ function App() {
   const [joinCode, setJoinCode] = useState(
     () => new URLSearchParams(location.search).get("join") ?? "",
   );
+
+  const interactKey = useMemo(() => {
+    const defaults = inputRegistry.actions.flatMap((action) => action.defaults);
+    return keyLabelForAction(applyProfile(defaults, profile).bindings, "game.interact");
+  }, [profile]);
 
   const selectedCharacter = useMemo(
     () => resolveCharacter(selectedCharacterId),
@@ -1172,7 +1186,12 @@ function App() {
         </aside>
       )}
 
-      <PlayerHud store={snapshotStore} playerId={playerId} status={status} />
+      <PlayerHud
+        store={snapshotStore}
+        playerId={playerId}
+        status={status}
+        interactKey={interactKey}
+      />
 
       {ready && !settingsOpen && (
         <section className="mobile-controls" aria-label="Touch controls">

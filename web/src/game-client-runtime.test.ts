@@ -25,6 +25,7 @@ const snapshotJson = (tick, players = [1]) =>
         guardPoints: 100,
         maxGuardPoints: 100,
         weapon: "swordAndShield",
+        interaction: { kind: "unavailable", reason: "nothingInRange" },
       })),
       monsters: [],
       rooms: [],
@@ -33,6 +34,8 @@ const snapshotJson = (tick, players = [1]) =>
       arrows: [],
       scenario: "dungeon",
       strikeEvents: [],
+      chests: [],
+      interactionEvents: [],
     },
   });
 
