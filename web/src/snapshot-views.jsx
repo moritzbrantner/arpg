@@ -45,13 +45,20 @@ export function PlayerHud({ store, playerId, status }) {
                 : "Raising shield"}
         </p>
       )}
+      {player?.alive && player.counter && snapshot.tick < player.counter.expiresAtTick && (
+        <p className="counter-prompt" aria-live="assertive">
+          Counter! · {player.counter.expiresAtTick - snapshot.tick}t
+        </p>
+      )}
       {player?.action && (
         <p className="action-status">
           {player.action.kind === "secondaryAttack"
             ? "Heavy"
             : player.action.kind === "interact"
               ? "Interact"
-              : "Primary"}{" "}
+              : player.action.kind === "counter"
+                ? "Counter"
+                : "Primary"}{" "}
           · {player.action.phase} · {player.action.ticksRemaining}t
         </p>
       )}
@@ -72,14 +79,21 @@ export function CombatActions({ store, playerId, triggerCombatAction, setTouchGu
       <button
         type="button"
         className={`combat-action combat-action-primary ${
-          player?.action?.kind === "primaryAttack" ? "is-committed" : ""
-        }`}
-        data-phase={player?.action?.kind === "primaryAttack" ? player.action.phase : undefined}
+          player?.action?.kind === "primaryAttack" || player?.action?.kind === "counter"
+            ? "is-committed"
+            : ""
+        } ${player?.counter ? "is-counter-ready" : ""}`}
+        data-phase={
+          player?.action?.kind === "primaryAttack" || player?.action?.kind === "counter"
+            ? player.action.phase
+            : undefined
+        }
+        data-counter={player?.counter ? "ready" : undefined}
         aria-label="Primary attack"
         disabled={!playerId || !player?.alive || Boolean(player?.action)}
         onClick={() => triggerCombatAction("primaryAttack")}
       >
-        <strong>Attack</strong>
+        <strong>{player?.counter ? "Counter" : "Attack"}</strong>
         <span>Space</span>
       </button>
       <button

@@ -1,13 +1,13 @@
-// Browser projection of the arpg-protocol v7 envelope. This adapter validates
+// Browser projection of the arpg-protocol v8 envelope. This adapter validates
 // only data consumed by presentation; gameplay rules remain in arpg-core.
-export const PROTOCOL_VERSION = 7;
+export const PROTOCOL_VERSION = 8;
 const MAX_SNAPSHOT_CHARACTERS = 65_535;
 const integer = (value) => Number.isSafeInteger(value);
 const nonNegative = (value) => integer(value) && value >= 0;
 const vector = (value, size) =>
   Array.isArray(value) && value.length === size && value.every(integer);
 const phases = new Set(["windup", "active", "recovery"]);
-const kinds = new Set(["primaryAttack", "secondaryAttack", "interact"]);
+const kinds = new Set(["primaryAttack", "secondaryAttack", "interact", "counter"]);
 const playerReactions = new Set(["hurt", "blocked", "guardBroken"]);
 const guardPhases = new Set(["raising", "raised"]);
 const optional = (value, validate) => value === null || value === undefined || validate(value);
@@ -62,7 +62,14 @@ export function decodeSnapshot(encoded) {
         ) &&
         nonNegative(player.guardPoints) &&
         nonNegative(player.maxGuardPoints) &&
-        player.guardPoints <= player.maxGuardPoints,
+        player.guardPoints <= player.maxGuardPoints &&
+        optional(
+          player.counter,
+          (value) =>
+            nonNegative(value?.usableFromTick) &&
+            nonNegative(value.expiresAtTick) &&
+            value.usableFromTick < value.expiresAtTick,
+        ),
     ) &&
     list(
       "monsters",

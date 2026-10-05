@@ -1243,3 +1243,13 @@ select {
     min-height: 2.8rem;
   }
 }
+
+.combat-action-primary.is-counter-ready {
+  box-shadow:
+    0 0 0 3px #f5df9b,
+    0 0.4rem 1.5rem #0008;
+}
+.counter-prompt {
+  color: #f5df9b;
+  font-weight: 700;
+}
