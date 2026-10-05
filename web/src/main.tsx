@@ -63,6 +63,7 @@ import {
   withTrainingRequest,
 } from "./training-arena.js";
 import { createGameClientRuntime } from "./game-client-runtime.ts";
+import { createActiveCueTracker } from "./frame-cues.js";
 import "./styles.css";
 
 const gameplayContext = { op: "context", id: "gameplay" };
@@ -612,26 +613,39 @@ function App() {
       shadows: graphics.shadows,
       pixelRatioLimit: graphics.pixelRatioLimit,
     });
+    const cues = createActiveCueTracker();
     const render = () => {
       const canvas = canvasRef.current;
-      const snapshot = snapshotStore.getSnapshot();
+      const snapshot = cues.take(snapshotStore.getSnapshot());
       if (!canvas || !snapshot) return;
       const rect = canvas.getBoundingClientRect();
       renderer.render(
         buildFrame(snapshot, playerId, rect.width, rect.height, selectedCharacter.accent),
       );
     };
+    // Snapshots can arrive faster than the display (local catch-up, bursts of dedicated
+    // datagrams). Draw at most once per animation frame, always from the latest snapshot.
+    let frameRequest = null;
+    const scheduleRender = () => {
+      cues.observe(snapshotStore.getSnapshot());
+      if (frameRequest !== null) return;
+      frameRequest = requestAnimationFrame(() => {
+        frameRequest = null;
+        render();
+      });
+    };
     const resize = () => {
       const rect = canvasRef.current.getBoundingClientRect();
       renderer.setSize(rect.width, rect.height, devicePixelRatio);
       render();
     };
-    const unsubscribe = snapshotStore.subscribe(render);
+    const unsubscribe = snapshotStore.subscribe(scheduleRender);
     const observer = new ResizeObserver(resize);
     observer.observe(canvasRef.current);
     resize();
     return () => {
       unsubscribe();
+      if (frameRequest !== null) cancelAnimationFrame(frameRequest);
       observer.disconnect();
       renderer.dispose();
     };
