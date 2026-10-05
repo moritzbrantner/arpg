@@ -23,10 +23,11 @@ pub const TICK_HZ: u16 = 60;
 const PHYSICS_TICKS_PER_GAME_TICK: i32 = 1;
 pub const MAX_PLAYERS: usize = 4;
 pub const WORLD_UNITS_PER_METER: i32 = 100;
-pub const SAVE_STATE_SCHEMA_VERSION: u16 = 2;
+pub const SAVE_STATE_SCHEMA_VERSION: u16 = 3;
 // 2: directional multi-target strike volumes and obstruction by fixed geometry.
 // 3: directional shield guard, block and guard break.
-pub const SAVE_STATE_RULES_VERSION: u16 = 3;
+// 4: post-block counterattack opportunity.
+pub const SAVE_STATE_RULES_VERSION: u16 = 4;
 // physics-engine::World::step(1) integrates velocity as world units per simulation tick.
 // At 60 Hz and 100 world units per meter, 7 units/tick is 4.2 m/s rather than
 // the previous 260 units/tick (156 m/s).
@@ -73,6 +74,27 @@ const GUARD_REGEN_PER_TICK: u16 = 1;
 const GUARD_BLOCK_REACTION_TICKS: u8 = 8;
 const GUARD_BREAK_TICKS: u8 = 45;
 const MONSTER_CLAW_GUARD_COST: u16 = 30;
+/// Ticks a successful block keeps the counter opportunity open (initial playtest proposal:
+/// about half a second at 60 Hz).
+pub const COUNTER_WINDOW_TICKS: u64 = 30;
+const COUNTER_WINDUP_TICKS: u8 = 3;
+const COUNTER_ACTIVE_TICKS: u8 = 1;
+const COUNTER_RECOVERY_TICKS: u8 = 10;
+const COUNTER_RANGE: i64 = 200;
+const COUNTER_DAMAGE_NUMERATOR: u16 = 2;
+const COUNTER_DAMAGE_DENOMINATOR: u16 = 1;
+const COUNTER_STAGGER_TICKS: u8 = 12;
+/// Longest stagger any player strike applies; bounds restored monster reactions.
+const MAX_MONSTER_STAGGER_TICKS: u8 = {
+    let mut maximum = PRIMARY_STAGGER_TICKS;
+    if SECONDARY_STAGGER_TICKS > maximum {
+        maximum = SECONDARY_STAGGER_TICKS;
+    }
+    if COUNTER_STAGGER_TICKS > maximum {
+        maximum = COUNTER_STAGGER_TICKS;
+    }
+    maximum
+};
 const PRIMARY_STAGGER_TICKS: u8 = 4;
 const SECONDARY_STAGGER_TICKS: u8 = 8;
 const BASE_ATTACK_DAMAGE: u16 = 25;
@@ -178,6 +200,8 @@ pub enum ActionKind {
     PrimaryAttack,
     SecondaryAttack,
     Interact,
+    /// Fast punishing strike available only through a post-block counter opportunity.
+    Counter,
 }
 
 impl ActionKind {
@@ -186,6 +210,7 @@ impl ActionKind {
             Self::PrimaryAttack => PRIMARY_WINDUP_TICKS,
             Self::SecondaryAttack => SECONDARY_WINDUP_TICKS,
             Self::Interact => INTERACT_WINDUP_TICKS,
+            Self::Counter => COUNTER_WINDUP_TICKS,
         }
     }
 
@@ -194,6 +219,7 @@ impl ActionKind {
             Self::PrimaryAttack => PRIMARY_ACTIVE_TICKS,
             Self::SecondaryAttack => SECONDARY_ACTIVE_TICKS,
             Self::Interact => INTERACT_ACTIVE_TICKS,
+            Self::Counter => COUNTER_ACTIVE_TICKS,
         }
     }
 
@@ -202,6 +228,7 @@ impl ActionKind {
             Self::PrimaryAttack => PRIMARY_RECOVERY_TICKS,
             Self::SecondaryAttack => SECONDARY_RECOVERY_TICKS,
             Self::Interact => INTERACT_RECOVERY_TICKS,
+            Self::Counter => COUNTER_RECOVERY_TICKS,
         }
     }
 }
@@ -277,6 +304,39 @@ pub struct GuardState {
     pub points: u16,
     pub broken_ticks_remaining: u8,
     pub block_reaction_ticks_remaining: u8,
+}
+
+/// The single pending counter opportunity granted by an actual successful block.
+///
+/// Eligibility is the half-open command interval `[usable_from_tick, expires_at_tick)`,
+/// compared with the game tick at which a command is applied. The block resolves during
+/// tick `blocked_at_tick`; the first command applied afterwards may already use it. A
+/// fresh primary attack within the interval starts the counter and consumes it, even if
+/// the counter later misses. A newer successful block replaces it; an unblocked hit, guard
+/// break or death removes it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CounterOpportunity {
+    pub blocked_monster_id: u32,
+    pub blocked_at_tick: u64,
+    pub usable_from_tick: u64,
+    pub expires_at_tick: u64,
+}
+
+impl CounterOpportunity {
+    fn grant(blocked_monster_id: u32, blocked_at_tick: u64) -> Self {
+        let usable_from_tick = blocked_at_tick + 1;
+        Self {
+            blocked_monster_id,
+            blocked_at_tick,
+            usable_from_tick,
+            expires_at_tick: usable_from_tick + COUNTER_WINDOW_TICKS,
+        }
+    }
+
+    fn usable_at(self, tick: u64) -> bool {
+        (self.usable_from_tick..self.expires_at_tick).contains(&tick)
+    }
 }
 
 impl GuardState {
@@ -402,6 +462,7 @@ pub struct PlayerSnapshot {
     pub guard: Option<GuardStance>,
     pub guard_points: u16,
     pub max_guard_points: u16,
+    pub counter: Option<CounterOpportunity>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -457,6 +518,7 @@ pub struct PlayerSaveState {
     pub action: Option<PlayerActionSnapshot>,
     pub hurt_ticks_remaining: u8,
     pub guard: GuardState,
+    pub counter: Option<CounterOpportunity>,
     pub health: u16,
     pub experience: u32,
     pub gold: u32,
@@ -629,6 +691,17 @@ const SWORD_HEAVY_THRUST: StrikeDefinition = StrikeDefinition {
     guard_cost: 0,
 };
 
+/// Counter slash: a fast single-target strike opened by a successful block. It uses the
+/// ordinary facing, reach and obstruction rules and can miss a retreating attacker.
+const COUNTER_SLASH: StrikeDefinition = StrikeDefinition {
+    id: "sword.counterSlash",
+    reach: COUNTER_RANGE,
+    frontal: true,
+    max_targets: 1,
+    blockable: true,
+    guard_cost: 0,
+};
+
 /// Monster melee: strikes only its committed target, in any direction within reach.
 const MONSTER_CLAW: StrikeDefinition = StrikeDefinition {
     id: "monster.claw",
@@ -648,6 +721,7 @@ struct PlayerState {
     action: Option<ActionState>,
     hurt_ticks_remaining: u8,
     guard: GuardState,
+    counter: Option<CounterOpportunity>,
     health: u16,
     experience: u32,
     gold: u32,
@@ -801,6 +875,7 @@ impl ArpgGame {
                     action: state.action.map(ActionState::snapshot),
                     hurt_ticks_remaining: state.hurt_ticks_remaining,
                     guard: state.guard,
+                    counter: state.counter,
                     health: state.health,
                     experience: state.experience,
                     gold: state.gold,
@@ -920,6 +995,18 @@ impl ArpgGame {
                 Self::validate_action_snapshot(action)?;
             }
             Self::validate_guard(player)?;
+            if let Some(counter) = player.counter
+                && (counter
+                    != CounterOpportunity::grant(
+                        counter.blocked_monster_id,
+                        counter.blocked_at_tick,
+                    )
+                    || counter.expires_at_tick <= save.tick
+                    || counter.blocked_at_tick >= save.tick
+                    || player.health == 0)
+            {
+                return Err(GameError::new("saved counter opportunity is invalid"));
+            }
             if player.last_sequence == u32::MAX {
                 return Err(GameError::new(
                     "saved command sequence leaves no valid next command",
@@ -944,7 +1031,7 @@ impl ArpgGame {
                     "saved monster health exceeds authoritative maximum",
                 ));
             }
-            if monster.stagger_ticks_remaining > SECONDARY_STAGGER_TICKS {
+            if monster.stagger_ticks_remaining > MAX_MONSTER_STAGGER_TICKS {
                 return Err(GameError::new("saved monster stagger reaction is invalid"));
             }
             if let Some(action) = monster.action {
@@ -1046,6 +1133,7 @@ impl ArpgGame {
                 }),
                 hurt_ticks_remaining: player.hurt_ticks_remaining,
                 guard: player.guard,
+                counter: player.counter,
                 health: player.health,
                 experience: player.experience,
                 gold: player.gold,
@@ -1251,9 +1339,12 @@ impl ArpgGame {
     }
 
     fn advance_guard(state: &mut PlayerState) {
+        state.guard.block_reaction_ticks_remaining =
+            state.guard.block_reaction_ticks_remaining.saturating_sub(1);
+        if state.health == 0 {
+            state.counter = None;
+        }
         let guard = &mut state.guard;
-        guard.block_reaction_ticks_remaining =
-            guard.block_reaction_ticks_remaining.saturating_sub(1);
         if state.health == 0 {
             guard.held = false;
             guard.stance = None;
@@ -1535,6 +1626,12 @@ impl ArpgGame {
                 SECONDARY_ATTACK_DAMAGE_DENOMINATOR,
                 SECONDARY_STAGGER_TICKS,
             ),
+            ActionKind::Counter => (
+                COUNTER_SLASH,
+                COUNTER_DAMAGE_NUMERATOR,
+                COUNTER_DAMAGE_DENOMINATOR,
+                COUNTER_STAGGER_TICKS,
+            ),
             ActionKind::Interact => return Ok(()),
         };
         let attack_damage = Self::attack_damage_for_level(player_level)
@@ -1643,7 +1740,9 @@ impl ArpgGame {
             };
             if let Some((kind, facing_x, facing_z)) = effect {
                 match kind {
-                    ActionKind::PrimaryAttack | ActionKind::SecondaryAttack => {
+                    ActionKind::PrimaryAttack
+                    | ActionKind::SecondaryAttack
+                    | ActionKind::Counter => {
                         self.resolve_attack(player_id, kind, facing_x, facing_z)?;
                     }
                     ActionKind::Interact => self.resolve_interaction(player_id)?,
@@ -1756,6 +1855,16 @@ impl ArpgGame {
                     }
                 }
             };
+            let tick = self.tick;
+            if let Some(player) = self.players.get_mut(&target_player_id) {
+                match result {
+                    StrikeResult::Blocked { .. } => {
+                        player.counter = Some(CounterOpportunity::grant(monster_id, tick));
+                    }
+                    StrikeResult::Hit { .. } | StrikeResult::GuardBroken => player.counter = None,
+                    StrikeResult::Obstructed => {}
+                }
+            }
             self.strike_outcomes.push(StrikeOutcome {
                 strike,
                 definition: definition.id,
@@ -1966,6 +2075,7 @@ impl AuthoritativeGame for ArpgGame {
                 action: None,
                 hurt_ticks_remaining: 0,
                 guard: GuardState::READY,
+                counter: None,
                 health: BASE_MAX_HEALTH,
                 experience: 0,
                 gold: 0,
@@ -2011,7 +2121,19 @@ impl AuthoritativeGame for ArpgGame {
                 }
             }
             ArpgCommand::PrimaryAttack => {
-                self.start_action(command.player_id, ActionKind::PrimaryAttack)?
+                let tick = self.tick;
+                let state = self
+                    .players
+                    .get_mut(&command.player_id)
+                    .expect("player existence checked");
+                let counter = state.counter.filter(|counter| counter.usable_at(tick));
+                if counter.is_some() && state.health > 0 && state.action.is_none() {
+                    // Starting the counter atomically consumes the opportunity.
+                    state.counter = None;
+                    self.start_action(command.player_id, ActionKind::Counter)?
+                } else {
+                    self.start_action(command.player_id, ActionKind::PrimaryAttack)?
+                }
             }
             ArpgCommand::SecondaryAttack => {
                 self.start_action(command.player_id, ActionKind::SecondaryAttack)?
@@ -2077,6 +2199,15 @@ impl AuthoritativeGame for ArpgGame {
             .tick
             .checked_add(1)
             .ok_or_else(|| GameError::new("tick overflow"))?;
+        let tick = self.tick;
+        for player in self.players.values_mut() {
+            if player
+                .counter
+                .is_some_and(|counter| tick >= counter.expires_at_tick)
+            {
+                player.counter = None;
+            }
+        }
         Ok(())
     }
 
@@ -2108,6 +2239,7 @@ impl AuthoritativeGame for ArpgGame {
                     guard: state.guard.stance,
                     guard_points: state.guard.points,
                     max_guard_points: MAX_GUARD_POINTS,
+                    counter: state.counter,
                 })
             })
             .collect::<Result<Vec<_>, GameError>>()?;
@@ -2122,7 +2254,7 @@ impl AuthoritativeGame for ArpgGame {
         }));
 
         Ok(ArpgSnapshot {
-            schema_version: 9,
+            schema_version: 10,
             run_seed: self.run_seed,
             tick: self.tick,
             world_units_per_meter: WORLD_UNITS_PER_METER,
@@ -2506,6 +2638,7 @@ mod tests {
             action: None,
             hurt_ticks_remaining: 0,
             guard: GuardState::READY,
+            counter: None,
             health: BASE_MAX_HEALTH,
             experience: 0,
             gold: 0,
@@ -3885,6 +4018,271 @@ mod tests {
         }
     }
 
+    /// Arena with a guarding player and one monster in front whose claw was just blocked
+    /// during the tick before `game.tick`.
+    fn blocked_once(monster_offset: i32) -> (ArpgGame, i32, i32) {
+        let (mut game, x, z) = strike_arena();
+        place_monster(&mut game, 1, x + monster_offset, z);
+        raise_guard_fully(&mut game);
+        assert_eq!(claw(&mut game, 1), CLAW_BLOCKED);
+        game.tick += 1;
+        (game, x, z)
+    }
+
+    fn command(game: &mut ArpgGame, command: ArpgCommand) {
+        let sequence = game.last_sequences.get(&1).copied().unwrap_or_default() + 1;
+        game.apply_command(PlayerCommand::new(1, sequence, command).unwrap())
+            .unwrap();
+    }
+
+    fn action_kind(game: &ArpgGame) -> Option<ActionKind> {
+        game.players
+            .get(&1)
+            .unwrap()
+            .action
+            .map(|action| action.kind)
+    }
+
+    #[test]
+    fn a_successful_block_grants_one_bounded_counter_opportunity() {
+        let (game, _, _) = blocked_once(120);
+        let counter = game.players.get(&1).unwrap().counter.unwrap();
+        assert_eq!(counter.usable_from_tick, game.tick);
+        assert_eq!(counter.expires_at_tick, game.tick + COUNTER_WINDOW_TICKS);
+        assert_eq!(counter.blocked_monster_id, 1);
+        assert_eq!(game.snapshot().unwrap().players[0].counter, Some(counter));
+    }
+
+    #[test]
+    fn raising_guard_or_being_hit_grants_nothing() {
+        let (mut game, x, z) = strike_arena();
+        place_monster(&mut game, 1, x - 120, z);
+        hold_guard(&mut game, 1, true);
+        for _ in 0..6 {
+            game.advance_tick().unwrap();
+        }
+        assert_eq!(game.players.get(&1).unwrap().counter, None);
+        assert_eq!(claw(&mut game, 1), CLAW_HIT);
+        assert_eq!(game.players.get(&1).unwrap().counter, None);
+        command(&mut game, ArpgCommand::PrimaryAttack);
+        assert_eq!(
+            action_kind(&game),
+            Some(ActionKind::PrimaryAttack),
+            "no counter benefit"
+        );
+    }
+
+    #[test]
+    fn a_timed_primary_attack_executes_the_counter_and_consumes_it() {
+        let (mut game, x, _) = blocked_once(120);
+        command(&mut game, ArpgCommand::PrimaryAttack);
+        assert_eq!(action_kind(&game), Some(ActionKind::Counter));
+        assert_eq!(game.players.get(&1).unwrap().counter, None);
+        let mut outcomes = Vec::new();
+        while game.players.get(&1).unwrap().action.is_some() {
+            game.advance_tick().unwrap();
+            outcomes.extend(
+                game.strike_outcomes()
+                    .iter()
+                    .filter(|outcome| outcome.strike.source == StrikeSource::Player(1))
+                    .copied(),
+            );
+        }
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].definition, "sword.counterSlash");
+        assert_eq!(
+            outcomes[0].result,
+            StrikeResult::Hit {
+                damage: BASE_ATTACK_DAMAGE * COUNTER_DAMAGE_NUMERATOR,
+                defeated: false
+            }
+        );
+        let _ = x;
+
+        command(&mut game, ArpgCommand::PrimaryAttack);
+        assert_eq!(
+            action_kind(&game),
+            Some(ActionKind::PrimaryAttack),
+            "spent once only"
+        );
+    }
+
+    #[test]
+    fn counter_eligibility_is_the_half_open_window() {
+        for (delay, expect_counter) in [
+            (0, true),
+            (COUNTER_WINDOW_TICKS - 1, true),
+            (COUNTER_WINDOW_TICKS, false),
+        ] {
+            let (mut game, x, z) = blocked_once(120);
+            // Keep the monster out of the way while time passes.
+            game.monsters[0].position = Vec3i::new(x - 600, PLAYER_Y, z);
+            for _ in 0..delay {
+                game.advance_tick().unwrap();
+            }
+            command(&mut game, ArpgCommand::PrimaryAttack);
+            let expected = if expect_counter {
+                ActionKind::Counter
+            } else {
+                ActionKind::PrimaryAttack
+            };
+            assert_eq!(action_kind(&game), Some(expected), "after {delay} ticks");
+            if !expect_counter {
+                assert_eq!(game.players.get(&1).unwrap().counter, None);
+            }
+        }
+    }
+
+    #[test]
+    fn a_denied_start_keeps_the_opportunity_and_duplicates_cannot_spend_twice() {
+        let (mut game, _, _) = blocked_once(120);
+        let state = game.players.get_mut(&1).unwrap();
+        state.action = Some(ActionState {
+            kind: ActionKind::Interact,
+            phase: ActionPhase::Recovery,
+            ticks_remaining: 1,
+            facing_x: 1,
+            facing_z: 0,
+        });
+        command(&mut game, ArpgCommand::PrimaryAttack);
+        assert_eq!(action_kind(&game), Some(ActionKind::Interact));
+        assert!(game.players.get(&1).unwrap().counter.is_some());
+
+        game.players.get_mut(&1).unwrap().action = None;
+        let sequence = game.last_sequences[&1] + 1;
+        game.apply_command(PlayerCommand::new(1, sequence, ArpgCommand::PrimaryAttack).unwrap())
+            .unwrap();
+        assert_eq!(action_kind(&game), Some(ActionKind::Counter));
+        assert!(
+            game.apply_command(
+                PlayerCommand::new(1, sequence, ArpgCommand::PrimaryAttack).unwrap()
+            )
+            .is_err(),
+            "a duplicated delivery is stale"
+        );
+    }
+
+    #[test]
+    fn the_counter_can_miss_a_retreating_attacker() {
+        let (mut game, x, z) = blocked_once(120);
+        command(&mut game, ArpgCommand::PrimaryAttack);
+        game.monsters[0].position = Vec3i::new(x + 400, PLAYER_Y, z);
+        while game.players.get(&1).unwrap().action.is_some() {
+            game.advance_tick().unwrap();
+            assert!(
+                game.strike_outcomes()
+                    .iter()
+                    .all(|outcome| outcome.strike.source != StrikeSource::Player(1))
+            );
+        }
+        assert_eq!(monster_health(&game, 1), 100);
+    }
+
+    #[test]
+    fn guard_break_hurt_and_death_invalidate_and_new_blocks_replace() {
+        let (mut game, x, z) = blocked_once(120);
+        place_monster(&mut game, 2, x + 100, z + 40);
+        assert_eq!(claw(&mut game, 2), CLAW_BLOCKED);
+        assert_eq!(
+            game.players
+                .get(&1)
+                .unwrap()
+                .counter
+                .unwrap()
+                .blocked_monster_id,
+            2,
+            "a newer genuine block replaces the opportunity"
+        );
+        game.players.get_mut(&1).unwrap().guard.points = 1;
+        assert_eq!(claw(&mut game, 1), StrikeResult::GuardBroken);
+        assert_eq!(game.players.get(&1).unwrap().counter, None);
+
+        let (mut game, x, z) = blocked_once(120);
+        place_monster(&mut game, 2, x - 120, z);
+        assert_eq!(claw(&mut game, 2), CLAW_HIT);
+        assert_eq!(game.players.get(&1).unwrap().counter, None);
+
+        let (mut game, _, _) = blocked_once(120);
+        game.players.get_mut(&1).unwrap().health = 0;
+        game.advance_tick().unwrap();
+        assert_eq!(game.players.get(&1).unwrap().counter, None);
+    }
+
+    #[test]
+    fn a_save_right_after_a_counter_hit_restores() {
+        // Generated monsters only: saves must match the generated dungeon.
+        let mut game = ArpgGame::new_with_seed(42).unwrap();
+        let (x, z) = game
+            .rooms
+            .iter()
+            .find(|room| room.id == STRIKE_ROOM)
+            .unwrap()
+            .center();
+        game.player_spawns[0] = Vec3i::new(x, PLAYER_Y, z);
+        game.add_player(1).unwrap();
+        game.reconcile_encounters().unwrap();
+        let index = game
+            .monsters
+            .iter()
+            .position(|monster| monster.room_id == STRIKE_ROOM)
+            .unwrap();
+        game.monsters[index].position = Vec3i::new(x + 120, PLAYER_Y, z);
+        let monster_id = game.monsters[index].id;
+        raise_guard_fully(&mut game);
+        assert_eq!(claw(&mut game, monster_id), CLAW_BLOCKED);
+        game.tick += 1;
+        command(&mut game, ArpgCommand::PrimaryAttack);
+        assert_eq!(action_kind(&game), Some(ActionKind::Counter));
+        while game.monsters[index].stagger_ticks_remaining == 0 {
+            game.advance_tick().unwrap();
+        }
+        assert_eq!(
+            game.monsters[0].stagger_ticks_remaining,
+            COUNTER_STAGGER_TICKS
+        );
+        let restored = ArpgGame::from_save_state(game.save_state().unwrap()).unwrap();
+        assert_eq!(restored.snapshot().unwrap(), game.snapshot().unwrap());
+    }
+
+    #[test]
+    fn a_pending_counter_survives_save_and_restore_without_extra_time() {
+        let mut game = ArpgGame::new_with_seed(42).unwrap();
+        game.add_player(1).unwrap();
+        game.players.get_mut(&1).unwrap().counter = Some(CounterOpportunity::grant(1, 0));
+        game.tick = 5;
+        let save = game.save_state().unwrap();
+        let mut restored = ArpgGame::from_save_state(save.clone()).unwrap();
+        assert_eq!(restored.snapshot().unwrap(), game.snapshot().unwrap());
+        for _ in 0..COUNTER_WINDOW_TICKS {
+            game.advance_tick().unwrap();
+            restored.advance_tick().unwrap();
+            assert_eq!(restored.snapshot().unwrap(), game.snapshot().unwrap());
+        }
+        assert_eq!(restored.players.get(&1).unwrap().counter, None);
+
+        for corrupt in [
+            CounterOpportunity {
+                expires_at_tick: 100,
+                ..CounterOpportunity::grant(1, 0)
+            },
+            CounterOpportunity::grant(1, 5),
+            CounterOpportunity {
+                usable_from_tick: 0,
+                expires_at_tick: 5,
+                ..CounterOpportunity::grant(1, 0)
+            },
+        ] {
+            let mut tampered = save.clone();
+            tampered.players[0].counter = Some(corrupt);
+            assert!(
+                ArpgGame::from_save_state(tampered)
+                    .unwrap_err()
+                    .message()
+                    .contains("counter")
+            );
+        }
+    }
+
     #[test]
     fn generated_rooms_are_large_enough_for_arpg_combat() {
         for seed in 0..64 {
@@ -3987,7 +4385,7 @@ mod tests {
         game.add_player(1).unwrap();
         let snapshot = game.snapshot().unwrap();
         let generated = generate_dungeon(snapshot.run_seed);
-        assert_eq!(snapshot.schema_version, 9);
+        assert_eq!(snapshot.schema_version, 10);
         assert_eq!(snapshot.run_seed, 0xDEAD_BEEF);
         assert_eq!(game.run_seed(), snapshot.run_seed);
         assert_eq!(snapshot.rooms, generated.rooms);
