@@ -1043,11 +1043,26 @@ select {
   .hud p {
     font-size: 0.78rem;
   }
+  /* Five controls wrap into rows beside the movement stick instead of overflowing. */
   .combat-actions {
-    gap: 0.55rem;
+    flex-wrap: wrap-reverse;
+    justify-content: flex-end;
+    gap: 0.4rem;
+    max-width: calc(
+      100% - clamp(6rem, 26vw, 8.75rem) - 2.5rem - env(safe-area-inset-left) -
+        env(safe-area-inset-right)
+    );
+  }
+  .virtual-stick {
+    width: clamp(6rem, 26vw, 8.75rem);
   }
   .combat-action {
-    width: clamp(4.5rem, 18vw, 5.5rem);
+    width: clamp(3.25rem, 15vw, 5.5rem);
+    padding: 0.2rem;
+  }
+  .combat-action strong {
+    font-size: clamp(0.66rem, 2.9vw, 0.88rem);
+    letter-spacing: 0;
   }
   .combat-action span {
     display: none;

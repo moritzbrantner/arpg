@@ -106,6 +106,8 @@ export interface RestoredGame {
   movement: [number, number];
   // Whether the saved authority still holds the guard; this client holds nothing yet.
   guardHeld?: boolean;
+  // Whether the saved authority is mid-draw; this client holds no draw yet.
+  drawHeld?: boolean;
 }
 
 const textEncoder = new TextEncoder();
@@ -318,6 +320,7 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
       lastSequence,
       movement: [x, z],
       guardHeld = false,
+      drawHeld = false,
     }: RestoredGame) {
       if (disposed()) {
         next.free?.();
@@ -328,6 +331,8 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
       movement.lastX = x;
       movement.lastZ = z;
       if (guardHeld) dispatch({ type: "setGuard", raised: false });
+      // A restored draw nobody is holding is lowered, never fired.
+      if (drawHeld) dispatch({ type: "cancelBow" });
     },
 
     async hostPeer(apiBase: string) {

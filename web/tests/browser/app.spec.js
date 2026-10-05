@@ -230,3 +230,37 @@ test("the bow draws while held, shoots one arrow on release and cancels on blur"
   await page.waitForTimeout(300);
   await expect(arrows).toContainText("Arrows0");
 });
+
+test("all combat controls stay reachable on the narrowest phones", async ({ browser, appUrl }) => {
+  for (const width of [320, 360, 390]) {
+    const context = await browser.newContext({
+      viewport: { width, height: 640 },
+      hasTouch: true,
+      isMobile: true,
+    });
+    const page = await context.newPage();
+    try {
+      await page.goto(`${appUrl}?scenario=training&seed=42`);
+      const controls = page.getByRole("region", { name: "Combat actions" }).getByRole("button");
+      await expect(controls).toHaveCount(5);
+      const stick = await page.getByRole("group", { name: "Movement joystick" }).boundingBox();
+      const boxes = [];
+      for (const control of await controls.all()) boxes.push(await control.boundingBox());
+      for (const box of boxes) {
+        expect(box.x).toBeGreaterThanOrEqual(0);
+        expect(box.x + box.width).toBeLessThanOrEqual(width);
+        expect(box.x).toBeGreaterThanOrEqual(stick.x + stick.width);
+      }
+      for (const [index, box] of boxes.entries())
+        for (const other of boxes.slice(index + 1))
+          expect(
+            box.x + box.width <= other.x ||
+              other.x + other.width <= box.x ||
+              box.y + box.height <= other.y ||
+              other.y + other.height <= box.y,
+          ).toBe(true);
+    } finally {
+      await context.close();
+    }
+  }
+});

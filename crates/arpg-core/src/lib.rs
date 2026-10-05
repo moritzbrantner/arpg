@@ -1494,13 +1494,15 @@ impl ArpgGame {
         })
     }
 
-    /// Speed and damage of an arrow launched with `charge` draw ticks.
+    /// Speed and damage of an arrow launched with `charge` draw ticks: the minimum accepted
+    /// draw gives the minimum arrow and a full draw the full arrow, linearly in between.
     fn arrow_launch(charge: u8) -> (i32, u16) {
-        let charge = i32::from(charge.min(BOW_FULL_DRAW_TICKS));
-        let full = i32::from(BOW_FULL_DRAW_TICKS);
-        let speed = ARROW_MIN_SPEED + (ARROW_FULL_SPEED - ARROW_MIN_SPEED) * charge / full;
+        let charge = charge.clamp(BOW_MIN_DRAW_TICKS, BOW_FULL_DRAW_TICKS);
+        let progress = i32::from(charge - BOW_MIN_DRAW_TICKS);
+        let span = i32::from(BOW_FULL_DRAW_TICKS - BOW_MIN_DRAW_TICKS);
+        let speed = ARROW_MIN_SPEED + (ARROW_FULL_SPEED - ARROW_MIN_SPEED) * progress / span;
         let damage = ARROW_MIN_DAMAGE
-            + u16::try_from(i32::from(ARROW_FULL_DAMAGE - ARROW_MIN_DAMAGE) * charge / full)
+            + u16::try_from(i32::from(ARROW_FULL_DAMAGE - ARROW_MIN_DAMAGE) * progress / span)
                 .expect("arrow damage fits u16");
         (speed, damage)
     }
@@ -1515,7 +1517,10 @@ impl ArpgGame {
         });
         let action_valid = player.action.is_none_or(|action| match action.kind {
             ActionKind::Shoot => {
-                bow && (BOW_MIN_DRAW_TICKS..=BOW_FULL_DRAW_TICKS).contains(&action.charge)
+                // Any hit clears a shot, so a shot can only belong to a live, unhurt archer.
+                bow && player.health > 0
+                    && player.hurt_ticks_remaining == 0
+                    && (BOW_MIN_DRAW_TICKS..=BOW_FULL_DRAW_TICKS).contains(&action.charge)
             }
             ActionKind::Interact => action.charge == 0,
             _ => !bow && action.charge == 0,
@@ -5486,6 +5491,20 @@ mod tests {
     }
 
     #[test]
+    fn the_minimum_and_full_draws_span_the_declared_arrow_range() {
+        assert_eq!(
+            ArpgGame::arrow_launch(BOW_MIN_DRAW_TICKS),
+            (ARROW_MIN_SPEED, ARROW_MIN_DAMAGE)
+        );
+        assert_eq!(
+            ArpgGame::arrow_launch(BOW_FULL_DRAW_TICKS),
+            (ARROW_FULL_SPEED, ARROW_FULL_DAMAGE)
+        );
+        // Halfway through the accepted draw (8 + 11 = 19 of 30 ticks).
+        assert_eq!(ArpgGame::arrow_launch(19), (45, 25));
+    }
+
+    #[test]
     fn a_release_after_a_same_tick_hit_does_not_shoot() {
         let (mut game, x, z) = bow_arena();
         draw_for(&mut game, BOW_FULL_DRAW_TICKS);
@@ -5663,6 +5682,19 @@ mod tests {
                     .contains("arrow")
             );
         }
+        let mut shooting = ArpgGame::from_save_state(mid_flight.clone()).unwrap();
+        let mut shot = ArpgGame::new_action(ActionKind::Shoot, &shooting.players[&1]);
+        shot.charge = BOW_FULL_DRAW_TICKS;
+        shooting.players.get_mut(&1).unwrap().action = Some(shot);
+        let mut dead_shot = shooting.save_state().unwrap();
+        dead_shot.players[0].health = 0;
+        assert!(
+            ArpgGame::from_save_state(dead_shot)
+                .unwrap_err()
+                .message()
+                .contains("loadout")
+        );
+
         let mut tampered = mid_flight;
         tampered.players[0].weapon = Weapon::SwordAndShield;
         tampered.players[0].draw_ticks = Some(3);

@@ -591,3 +591,17 @@ test("cancelling a held draw clears every device so the next press draws again",
     "drawBow",
   ]);
 });
+
+test("restoring a save mid-draw cancels the draw for this client", () => {
+  const { runtime } = harness();
+  const restored = new FakeGame(5);
+  restored.addPlayer(1);
+  runtime.restore({
+    game: restored,
+    controlledPlayerId: 1,
+    lastSequence: 3,
+    movement: [0, 0],
+    drawHeld: true,
+  });
+  expect(restored.commands).toEqual([{ playerId: 1, sequence: 4, payload: { type: "cancelBow" } }]);
+});

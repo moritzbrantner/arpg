@@ -839,6 +839,7 @@ function App() {
       lastSequence: savedPlayer.lastSequence ?? 0,
       movement: [savedPlayer.movement?.[0] ?? 0, savedPlayer.movement?.[1] ?? 0],
       guardHeld: savedPlayer.guard?.held === true,
+      drawHeld: savedPlayer.drawTicks != null,
     });
     initialRunSeedRef.current = null;
     leaveTrainingUrl();
