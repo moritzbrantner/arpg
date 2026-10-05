@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 use crate::{ActionKind, ComboInput};
 
 pub const CONTENT_FORMAT_VERSION: u16 = 1;
+/// Longest definition id; matches the browser projection's bound on published ids.
+pub const MAX_DEFINITION_ID_LENGTH: usize = 64;
 
 const BASE_BUNDLE: &str = include_str!("../content/base.json");
 
@@ -231,6 +233,27 @@ impl ContentBundle {
         }
         if self.counter_window_ticks == 0 || self.counter_window_ticks > 600 {
             fail("counterWindowTicks".into(), "must be within 1..=600");
+        }
+
+        // Definition ids are published to clients (for example as strike event definitions),
+        // so they must stay within what the browser projection admits.
+        let ids = self
+            .strikes
+            .iter()
+            .map(|strike| ("strikes", &strike.id))
+            .chain(self.actions.iter().map(|action| ("actions", &action.id)))
+            .chain(
+                self.monsters
+                    .iter()
+                    .map(|monster| ("monsters", &monster.id)),
+            );
+        for (collection, id) in ids {
+            if id.is_empty() || id.len() > MAX_DEFINITION_ID_LENGTH || !id.is_ascii() {
+                fail(
+                    format!("{collection} {id:?}"),
+                    "ids must be 1..=64 ASCII characters",
+                );
+            }
         }
 
         let mut strike_by_id = BTreeMap::new();
@@ -511,6 +534,9 @@ mod tests {
             two.iter()
                 .any(|error| error.contains("exactly one monster"))
         );
+
+        let long = errors(|bundle| bundle.strikes[0].id = "s".repeat(65));
+        assert!(long.iter().any(|error| error.contains("1..=64 ASCII")));
 
         let format = errors(|bundle| bundle.format_version = 99);
         assert!(
