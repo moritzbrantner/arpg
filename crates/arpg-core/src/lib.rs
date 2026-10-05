@@ -22,7 +22,8 @@ const PHYSICS_TICKS_PER_GAME_TICK: i32 = 1;
 pub const MAX_PLAYERS: usize = 4;
 pub const WORLD_UNITS_PER_METER: i32 = 100;
 pub const SAVE_STATE_SCHEMA_VERSION: u16 = 1;
-pub const SAVE_STATE_RULES_VERSION: u16 = 1;
+// 2: directional multi-target strike volumes and obstruction by fixed geometry.
+pub const SAVE_STATE_RULES_VERSION: u16 = 2;
 // physics-engine::World::step(1) integrates velocity as world units per simulation tick.
 // At 60 Hz and 100 world units per meter, 7 units/tick is 4.2 m/s rather than
 // the previous 260 units/tick (156 m/s).
@@ -3750,6 +3751,16 @@ mod tests {
 
         let mut save = game.save_state().unwrap();
         save.rules_version += 1;
+        assert!(
+            ArpgGame::from_save_state(save)
+                .unwrap_err()
+                .message()
+                .contains("unsupported ARPG save rules version")
+        );
+
+        // Saves from before directional strike volumes resolve melee differently.
+        let mut save = game.save_state().unwrap();
+        save.rules_version = 1;
         assert!(
             ArpgGame::from_save_state(save)
                 .unwrap_err()
