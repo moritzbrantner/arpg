@@ -12,11 +12,12 @@ const payload = {
   groundLoot: [],
   arrows: [],
   scenario: "dungeon",
+  contentRevision: "0123456789abcdef",
   strikeEvents: [],
   chests: [],
   interactionEvents: [],
 };
-const encode = (value) => JSON.stringify({ protocolVersion: 12, payload: value });
+const encode = (value) => JSON.stringify({ protocolVersion: 13, payload: value });
 
 test("admits bounded presentation data and rejects malformed vectors and collections", () => {
   expect(decodeSnapshot(encode(payload))).toEqual(payload);
@@ -126,4 +127,9 @@ test("admits chests and interaction results and rejects malformed ones", () => {
     { ...payload, interactionEvents: [{ ...refused, result: { kind: "refused", reason: "x" } }] },
   ])
     expect(() => decodeSnapshot(encode(candidate))).toThrow();
+});
+
+test("requires the authority's content revision", () => {
+  for (const contentRevision of [undefined, "", "XYZ", "0123456789abcdef0"])
+    expect(() => decodeSnapshot(encode({ ...payload, contentRevision }))).toThrow();
 });

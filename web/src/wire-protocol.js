@@ -1,6 +1,6 @@
-// Browser projection of the arpg-protocol v12 envelope. This adapter validates
+// Browser projection of the arpg-protocol v13 envelope. This adapter validates
 // only data consumed by presentation; gameplay rules remain in arpg-core.
-export const PROTOCOL_VERSION = 12;
+export const PROTOCOL_VERSION = 13;
 const MAX_SNAPSHOT_CHARACTERS = 65_535;
 const integer = (value) => Number.isSafeInteger(value);
 const nonNegative = (value) => integer(value) && value >= 0;
@@ -128,6 +128,8 @@ export function decodeSnapshot(encoded) {
         nonNegative(event?.order) && nonNegative(event.playerId) && interactionResult(event.result),
     ) &&
     scenarios.has(snapshot.scenario) &&
+    typeof snapshot.contentRevision === "string" &&
+    /^[0-9a-f]{16}$/.test(snapshot.contentRevision) &&
     list(
       "strikeEvents",
       (event) =>
