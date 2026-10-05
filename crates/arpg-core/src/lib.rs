@@ -1247,8 +1247,6 @@ impl ArpgGame {
             .find(|room| room.id == SCENARIO_ROOM)
             .map(RoomSnapshot::center)
             .ok_or_else(|| GameError::new("scenario room is missing"))?;
-        game.player_spawns = [(0, 0), (0, 90), (0, -90), (-90, 0)]
-            .map(|(dx, dz)| Vec3i::new(center_x + dx, PLAYER_Y, center_z + dz));
         let mut placed = 0;
         for monster in game
             .monsters
@@ -1274,13 +1272,20 @@ impl ArpgGame {
     fn with_scenario_layout(scenario: ScenarioId, run_seed: RunSeed) -> Result<Self, GameError> {
         let mut game = Self::new_with_seed(run_seed)?;
         game.scenario = scenario;
+        if scenario == ScenarioId::Dungeon {
+            return Ok(game);
+        }
+        let (center_x, center_z) = game
+            .rooms
+            .iter()
+            .find(|room| room.id == SCENARIO_ROOM)
+            .map(RoomSnapshot::center)
+            .ok_or_else(|| GameError::new("scenario room is missing"))?;
+        // Spawn points are layout: players joining a restored scenario arrive where they
+        // would have in the uninterrupted game.
+        game.player_spawns = [(0, 0), (0, 90), (0, -90), (-90, 0)]
+            .map(|(dx, dz)| Vec3i::new(center_x + dx, PLAYER_Y, center_z + dz));
         if let Some(offset) = scenario.pillar_offset() {
-            let (center_x, center_z) = game
-                .rooms
-                .iter()
-                .find(|room| room.id == SCENARIO_ROOM)
-                .map(RoomSnapshot::center)
-                .ok_or_else(|| GameError::new("scenario room is missing"))?;
             let index =
                 u64::try_from(game.static_colliders.len()).expect("collider count fits u64");
             let pillar = StaticColliderSnapshot {
@@ -6163,6 +6168,19 @@ mod tests {
         let mut long = reproduction;
         long.ticks = MAX_REPRODUCTION_TICKS + 1;
         assert!(replay_reproduction(&long).is_err());
+    }
+
+    #[test]
+    fn players_joining_a_restored_scenario_spawn_at_the_authored_points() {
+        let mut game = ArpgGame::new_scenario(ScenarioId::Enemy, 42).unwrap();
+        game.add_player(1).unwrap();
+        game.advance_tick().unwrap();
+        let mut restored = ArpgGame::from_save_state(game.save_state().unwrap()).unwrap();
+        game.add_player(2).unwrap();
+        restored.add_player(2).unwrap();
+        game.advance_tick().unwrap();
+        restored.advance_tick().unwrap();
+        assert_eq!(restored.snapshot().unwrap(), game.snapshot().unwrap());
     }
 
     #[test]

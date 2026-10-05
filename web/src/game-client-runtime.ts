@@ -190,8 +190,13 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
 
   const advance = (ticks: number) => {
     try {
-      for (let tick = 0; tick < ticks; tick += 1) game.advanceTick();
-      publishFromGame();
+      // Publish every tick: snapshots carry that tick's transient events (strikes,
+      // interactions), so batching ticks would silently drop them. Drawing stays
+      // coalesced per animation frame.
+      for (let tick = 0; tick < ticks; tick += 1) {
+        game.advanceTick();
+        publishFromGame();
+      }
     } catch (error) {
       fail(`Simulation stopped: ${error}`);
     }

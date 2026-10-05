@@ -637,3 +637,13 @@ test("training authorities are created from the named scenario", () => {
   ]);
   expect(local.getState().training).toBeNull();
 });
+
+test("accelerated training publishes every simulated tick", () => {
+  const { runtime, snapshots, tick } = harness();
+  runtime.startLocal({ seed: 1, training: true });
+  runtime.setTrainingSpeed(2);
+  const published = [];
+  snapshots.subscribe(() => published.push(snapshots.getSnapshot().tick));
+  tick(2);
+  expect(published).toEqual([1, 2, 3, 4]);
+});
