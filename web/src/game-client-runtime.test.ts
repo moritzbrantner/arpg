@@ -33,6 +33,7 @@ const snapshotJson = (tick, players = [1]) =>
       groundLoot: [],
       arrows: [],
       scenario: "dungeon",
+      contentRevision: "0123456789abcdef",
       strikeEvents: [],
       chests: [],
       interactionEvents: [],

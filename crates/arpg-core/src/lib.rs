@@ -9,6 +9,12 @@ use physics_engine::{
 };
 use serde::{Deserialize, Serialize};
 
+pub use content::{
+    CONTENT_FORMAT_VERSION, ContentBundle, ContentError, base_bundle, content_revision,
+};
+use content::{ComboTransition, StrikeDefinition, content};
+
+mod content;
 #[cfg(test)]
 mod physics_work;
 #[cfg(test)]
@@ -23,7 +29,7 @@ pub const TICK_HZ: u16 = 60;
 const PHYSICS_TICKS_PER_GAME_TICK: i32 = 1;
 pub const MAX_PLAYERS: usize = 4;
 pub const WORLD_UNITS_PER_METER: i32 = 100;
-pub const SAVE_STATE_SCHEMA_VERSION: u16 = 7;
+pub const SAVE_STATE_SCHEMA_VERSION: u16 = 8;
 // 2: directional multi-target strike volumes and obstruction by fixed geometry.
 // 3: directional shield guard, block and guard break.
 // 4: post-block counterattack opportunity.
@@ -48,28 +54,46 @@ const DOOR_BODY_BASE: u64 = 20_000;
 const GROUND_LOOT_ID_BASE: u64 = 30_000;
 const PLAYER_HALF_EXTENTS: Vec3i = Vec3i::new(30, 50, 30);
 const PLAYER_Y: i32 = 50;
+#[cfg(test)]
 const ATTACK_RANGE: i64 = 220;
+#[cfg(test)]
 const SECONDARY_ATTACK_RANGE: i64 = 150;
+#[cfg(test)]
 const SECONDARY_ATTACK_DAMAGE_NUMERATOR: u16 = 3;
+#[cfg(test)]
 const SECONDARY_ATTACK_DAMAGE_DENOMINATOR: u16 = 2;
+#[cfg(test)]
 const PRIMARY_WINDUP_TICKS: u8 = 5;
+#[cfg(test)]
 const PRIMARY_ACTIVE_TICKS: u8 = 1;
+#[cfg(test)]
 const PRIMARY_RECOVERY_TICKS: u8 = 8;
+#[cfg(test)]
 const SECONDARY_WINDUP_TICKS: u8 = 10;
+#[cfg(test)]
 const SECONDARY_ACTIVE_TICKS: u8 = 1;
+#[cfg(test)]
 const SECONDARY_RECOVERY_TICKS: u8 = 14;
+#[cfg(test)]
 const INTERACT_WINDUP_TICKS: u8 = 2;
+#[cfg(test)]
 const INTERACT_ACTIVE_TICKS: u8 = 1;
+#[cfg(test)]
 const INTERACT_RECOVERY_TICKS: u8 = 3;
 const INTERACT_RANGE: i64 = 160;
 const GROUND_LOOT_GOLD_AMOUNT: u32 = 10;
 /// One reward chest per combat room, opened once after the room's encounter is cleared.
 const CHEST_ID_BASE: u64 = 50_000;
 const CHEST_GOLD_AMOUNT: u32 = 25;
+#[cfg(test)]
 const MONSTER_ATTACK_RANGE: i64 = 180;
+#[cfg(test)]
 const MONSTER_ATTACK_DAMAGE: u16 = 10;
+#[cfg(test)]
 const MONSTER_ATTACK_WINDUP_TICKS: u8 = 18;
+#[cfg(test)]
 const MONSTER_ATTACK_ACTIVE_TICKS: u8 = 1;
+#[cfg(test)]
 const MONSTER_ATTACK_RECOVERY_TICKS: u8 = 30;
 const PLAYER_HURT_TICKS: u8 = 6;
 /// Ticks between pressing guard and the shield protecting.
@@ -79,40 +103,69 @@ pub const MAX_GUARD_POINTS: u16 = 100;
 const GUARD_REGEN_PER_TICK: u16 = 1;
 const GUARD_BLOCK_REACTION_TICKS: u8 = 8;
 const GUARD_BREAK_TICKS: u8 = 45;
+#[cfg(test)]
 const MONSTER_CLAW_GUARD_COST: u16 = 30;
 /// Ticks a successful block keeps the counter opportunity open (initial playtest proposal:
 /// about half a second at 60 Hz).
+#[cfg(test)]
 pub const COUNTER_WINDOW_TICKS: u64 = 30;
+#[cfg(test)]
 const COUNTER_WINDUP_TICKS: u8 = 3;
+#[cfg(test)]
 const COUNTER_ACTIVE_TICKS: u8 = 1;
+#[cfg(test)]
 const COUNTER_RECOVERY_TICKS: u8 = 10;
+#[cfg(test)]
 const COUNTER_RANGE: i64 = 200;
+#[cfg(test)]
 const COUNTER_DAMAGE_NUMERATOR: u16 = 2;
+#[cfg(test)]
 const COUNTER_DAMAGE_DENOMINATOR: u16 = 1;
+#[cfg(test)]
 const COUNTER_STAGGER_TICKS: u8 = 12;
+#[cfg(test)]
 const LIGHT_FOLLOW_UP_WINDUP_TICKS: u8 = 4;
+#[cfg(test)]
 const LIGHT_FOLLOW_UP_ACTIVE_TICKS: u8 = 1;
+#[cfg(test)]
 const LIGHT_FOLLOW_UP_RECOVERY_TICKS: u8 = 8;
+#[cfg(test)]
 const LIGHT_FINISHER_WINDUP_TICKS: u8 = 6;
+#[cfg(test)]
 const LIGHT_FINISHER_ACTIVE_TICKS: u8 = 1;
+#[cfg(test)]
 const LIGHT_FINISHER_RECOVERY_TICKS: u8 = 16;
+#[cfg(test)]
 const LIGHT_FINISHER_RANGE: i64 = 240;
+#[cfg(test)]
 const LIGHT_FINISHER_DAMAGE_NUMERATOR: u16 = 3;
+#[cfg(test)]
 const LIGHT_FINISHER_DAMAGE_DENOMINATOR: u16 = 2;
+#[cfg(test)]
 const LIGHT_FINISHER_STAGGER_TICKS: u8 = 10;
+#[cfg(test)]
 const HEAVY_FINISHER_WINDUP_TICKS: u8 = 8;
+#[cfg(test)]
 const HEAVY_FINISHER_ACTIVE_TICKS: u8 = 1;
+#[cfg(test)]
 const HEAVY_FINISHER_RECOVERY_TICKS: u8 = 18;
+#[cfg(test)]
 const HEAVY_FINISHER_RANGE: i64 = 180;
+#[cfg(test)]
 const HEAVY_FINISHER_DAMAGE_NUMERATOR: u16 = 2;
+#[cfg(test)]
 const HEAVY_FINISHER_DAMAGE_DENOMINATOR: u16 = 1;
+#[cfg(test)]
 const HEAVY_FINISHER_STAGGER_TICKS: u8 = 14;
 /// Draw ticks below which a release does not shoot.
 const BOW_MIN_DRAW_TICKS: u8 = 8;
 /// Draw ticks at which an arrow reaches full speed and damage.
 pub const BOW_FULL_DRAW_TICKS: u8 = 30;
+#[cfg(test)]
 const SHOOT_WINDUP_TICKS: u8 = 1;
+#[cfg(test)]
 const SHOOT_ACTIVE_TICKS: u8 = 1;
+#[cfg(test)]
 const SHOOT_RECOVERY_TICKS: u8 = 10;
 const ARROW_MIN_SPEED: i32 = 30;
 const ARROW_FULL_SPEED: i32 = 60;
@@ -128,30 +181,16 @@ const ARROW_ID_BASE: u64 = 1;
 /// Query-only hurt boxes for monsters, which are game-owned rather than physics bodies.
 const MONSTER_HURTBOX_BASE: u64 = 40_000;
 const MONSTER_HURTBOX_HALF_EXTENTS: Vec3i = Vec3i::new(40, 50, 40);
-/// Longest stagger any player strike applies; bounds restored monster reactions.
-const MAX_MONSTER_STAGGER_TICKS: u8 = {
-    let mut maximum = PRIMARY_STAGGER_TICKS;
-    if SECONDARY_STAGGER_TICKS > maximum {
-        maximum = SECONDARY_STAGGER_TICKS;
-    }
-    if COUNTER_STAGGER_TICKS > maximum {
-        maximum = COUNTER_STAGGER_TICKS;
-    }
-    if LIGHT_FINISHER_STAGGER_TICKS > maximum {
-        maximum = LIGHT_FINISHER_STAGGER_TICKS;
-    }
-    if HEAVY_FINISHER_STAGGER_TICKS > maximum {
-        maximum = HEAVY_FINISHER_STAGGER_TICKS;
-    }
-    maximum
-};
+#[cfg(test)]
 const PRIMARY_STAGGER_TICKS: u8 = 4;
+#[cfg(test)]
 const SECONDARY_STAGGER_TICKS: u8 = 8;
 const BASE_ATTACK_DAMAGE: u16 = 25;
 const ATTACK_DAMAGE_PER_LEVEL: u16 = 5;
 const BASE_MAX_HEALTH: u16 = 100;
 const MAX_HEALTH_PER_LEVEL: u16 = 10;
 const EXPERIENCE_PER_LEVEL: u32 = 100;
+#[cfg(test)]
 const MONSTER_EXPERIENCE_REWARD: u32 = 50;
 const DEFAULT_DUNGEON_SEED: RunSeed = 0xA420_0916;
 const ARENA_HALF_WIDTH: i32 = 3_000;
@@ -254,7 +293,7 @@ pub enum ArpgCommand {
     CancelBow,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ActionKind {
     PrimaryAttack,
@@ -466,97 +505,25 @@ pub enum ComboInput {
 /// are ignored. `requires_hit` transitions only commit when the predecessor's own strike
 /// connected (a blocked or obstructed strike does not count); otherwise the input is dropped
 /// and ordinary recovery continues.
-#[derive(Clone, Copy, Debug)]
-struct ComboTransition {
-    from: ActionKind,
-    input: ComboInput,
-    opens_at: u8,
-    closes_at: u8,
-    requires_hit: bool,
-    to: ActionKind,
-}
-
-const COMBO_TRANSITIONS: &[ComboTransition] = &[
-    ComboTransition {
-        from: ActionKind::PrimaryAttack,
-        input: ComboInput::Light,
-        opens_at: 2,
-        closes_at: PRIMARY_RECOVERY_TICKS,
-        requires_hit: false,
-        to: ActionKind::LightFollowUp,
-    },
-    ComboTransition {
-        from: ActionKind::LightFollowUp,
-        input: ComboInput::Light,
-        opens_at: 2,
-        closes_at: LIGHT_FOLLOW_UP_RECOVERY_TICKS,
-        requires_hit: false,
-        to: ActionKind::LightFinisher,
-    },
-    ComboTransition {
-        from: ActionKind::LightFollowUp,
-        input: ComboInput::Heavy,
-        opens_at: 2,
-        closes_at: LIGHT_FOLLOW_UP_RECOVERY_TICKS,
-        requires_hit: true,
-        to: ActionKind::HeavyFinisher,
-    },
-    // A counter may continue into the second light strike.
-    ComboTransition {
-        from: ActionKind::Counter,
-        input: ComboInput::Light,
-        opens_at: 2,
-        closes_at: COUNTER_RECOVERY_TICKS,
-        requires_hit: false,
-        to: ActionKind::LightFollowUp,
-    },
-];
-
 fn combo_transition(from: ActionKind, input: ComboInput) -> Option<ComboTransition> {
-    COMBO_TRANSITIONS
+    content()
+        .combos
         .iter()
         .copied()
         .find(|transition| transition.from == from && transition.input == input)
 }
 
 impl ActionKind {
-    const fn windup_ticks(self) -> u8 {
-        match self {
-            Self::PrimaryAttack => PRIMARY_WINDUP_TICKS,
-            Self::SecondaryAttack => SECONDARY_WINDUP_TICKS,
-            Self::Interact => INTERACT_WINDUP_TICKS,
-            Self::Counter => COUNTER_WINDUP_TICKS,
-            Self::LightFollowUp => LIGHT_FOLLOW_UP_WINDUP_TICKS,
-            Self::LightFinisher => LIGHT_FINISHER_WINDUP_TICKS,
-            Self::HeavyFinisher => HEAVY_FINISHER_WINDUP_TICKS,
-            Self::Shoot => SHOOT_WINDUP_TICKS,
-        }
+    fn windup_ticks(self) -> u8 {
+        content().action(self).windup_ticks
     }
 
-    const fn active_ticks(self) -> u8 {
-        match self {
-            Self::PrimaryAttack => PRIMARY_ACTIVE_TICKS,
-            Self::SecondaryAttack => SECONDARY_ACTIVE_TICKS,
-            Self::Interact => INTERACT_ACTIVE_TICKS,
-            Self::Counter => COUNTER_ACTIVE_TICKS,
-            Self::LightFollowUp => LIGHT_FOLLOW_UP_ACTIVE_TICKS,
-            Self::LightFinisher => LIGHT_FINISHER_ACTIVE_TICKS,
-            Self::HeavyFinisher => HEAVY_FINISHER_ACTIVE_TICKS,
-            Self::Shoot => SHOOT_ACTIVE_TICKS,
-        }
+    fn active_ticks(self) -> u8 {
+        content().action(self).active_ticks
     }
 
-    const fn recovery_ticks(self) -> u8 {
-        match self {
-            Self::PrimaryAttack => PRIMARY_RECOVERY_TICKS,
-            Self::SecondaryAttack => SECONDARY_RECOVERY_TICKS,
-            Self::Interact => INTERACT_RECOVERY_TICKS,
-            Self::Counter => COUNTER_RECOVERY_TICKS,
-            Self::LightFollowUp => LIGHT_FOLLOW_UP_RECOVERY_TICKS,
-            Self::LightFinisher => LIGHT_FINISHER_RECOVERY_TICKS,
-            Self::HeavyFinisher => HEAVY_FINISHER_RECOVERY_TICKS,
-            Self::Shoot => SHOOT_RECOVERY_TICKS,
-        }
+    fn recovery_ticks(self) -> u8 {
+        content().action(self).recovery_ticks
     }
 }
 
@@ -663,7 +630,7 @@ impl CounterOpportunity {
             blocked_monster_id,
             blocked_at_tick,
             usable_from_tick,
-            expires_at_tick: usable_from_tick + COUNTER_WINDOW_TICKS,
+            expires_at_tick: usable_from_tick + content().counter_window_ticks,
         }
     }
 
@@ -723,6 +690,8 @@ pub struct ArpgSnapshot {
     pub static_colliders: Vec<StaticColliderSnapshot>,
     pub arrows: Vec<ArrowSnapshot>,
     pub scenario: ScenarioId,
+    /// Revision of the content bundle this authority runs.
+    pub content_revision: String,
     /// Strikes resolved during the tick that produced this snapshot, in resolution order.
     /// Transient presentation evidence: not part of saves, so a freshly restored game
     /// publishes none until its next tick.
@@ -932,6 +901,8 @@ pub struct ArpgSaveState {
     pub scenario: ScenarioId,
     /// Ids of chests already opened.
     pub opened_chests: Vec<u64>,
+    /// Revision of the content bundle the authority ran; a different bundle is rejected.
+    pub content_revision: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -1037,7 +1008,8 @@ impl MonsterActionState {
             phase: self.phase,
             ticks_remaining: self.ticks_remaining,
             target_player_id: self.target_player_id,
-            range: i32::try_from(MONSTER_ATTACK_RANGE).expect("monster attack range must fit i32"),
+            range: i32::try_from(content().monster.strike.reach)
+                .expect("monster attack range must fit i32"),
         }
     }
 }
@@ -1098,84 +1070,6 @@ pub struct StrikeOutcome {
     pub target: StrikeTarget,
     pub result: StrikeResult,
 }
-
-/// Authored melee strike geometry on the gameplay plane.
-#[derive(Clone, Copy, Debug)]
-struct StrikeDefinition {
-    id: &'static str,
-    /// Maximum centre-to-centre reach in world units.
-    reach: i64,
-    /// Frontal strikes only contact targets within 60 degrees either side of the committed
-    /// facing; non-frontal strikes contact any eligible target within reach.
-    frontal: bool,
-    /// Maximum number of targets the strike connects with. Obstructed targets do not count.
-    max_targets: usize,
-    /// Whether a raised shield facing the attacker can intercept the strike.
-    blockable: bool,
-    /// Guard points a block of this strike costs.
-    guard_cost: u16,
-}
-
-/// Light sword swing: a wide sweep that connects with every eligible target in its arc.
-const SWORD_LIGHT_SWING: StrikeDefinition = StrikeDefinition {
-    id: "sword.lightSwing",
-    reach: ATTACK_RANGE,
-    frontal: true,
-    max_targets: usize::MAX,
-    blockable: true,
-    guard_cost: 0,
-};
-
-/// Heavy sword strike: a shorter committed thrust that connects with one target.
-const SWORD_HEAVY_THRUST: StrikeDefinition = StrikeDefinition {
-    id: "sword.heavyThrust",
-    reach: SECONDARY_ATTACK_RANGE,
-    frontal: true,
-    max_targets: 1,
-    blockable: true,
-    guard_cost: 0,
-};
-
-/// Counter slash: a fast single-target strike opened by a successful block. It uses the
-/// ordinary facing, reach and obstruction rules and can miss a retreating attacker.
-const COUNTER_SLASH: StrikeDefinition = StrikeDefinition {
-    id: "sword.counterSlash",
-    reach: COUNTER_RANGE,
-    frontal: true,
-    max_targets: 1,
-    blockable: true,
-    guard_cost: 0,
-};
-
-/// Light combo finisher: a wider sweep with longer reach.
-const SWORD_LIGHT_FINISHER: StrikeDefinition = StrikeDefinition {
-    id: "sword.lightFinisher",
-    reach: LIGHT_FINISHER_RANGE,
-    frontal: true,
-    max_targets: usize::MAX,
-    blockable: true,
-    guard_cost: 0,
-};
-
-/// Heavy combo finisher: a committed single-target thrust.
-const SWORD_HEAVY_FINISHER: StrikeDefinition = StrikeDefinition {
-    id: "sword.heavyFinisher",
-    reach: HEAVY_FINISHER_RANGE,
-    frontal: true,
-    max_targets: 1,
-    blockable: true,
-    guard_cost: 0,
-};
-
-/// Monster melee: strikes only its committed target, in any direction within reach.
-const MONSTER_CLAW: StrikeDefinition = StrikeDefinition {
-    id: "monster.claw",
-    reach: MONSTER_ATTACK_RANGE,
-    frontal: false,
-    max_targets: 1,
-    blockable: true,
-    guard_cost: MONSTER_CLAW_GUARD_COST,
-};
 
 #[derive(Clone, Copy, Debug)]
 struct PlayerState {
@@ -1503,6 +1397,7 @@ impl ArpgGame {
                 .filter(|chest| chest.opened)
                 .map(|chest| chest.id)
                 .collect(),
+            content_revision: content_revision().to_owned(),
         })
     }
 
@@ -1517,6 +1412,13 @@ impl ArpgGame {
             return Err(GameError::new(format!(
                 "unsupported ARPG save rules version {}; expected {}",
                 save.rules_version, SAVE_STATE_RULES_VERSION
+            )));
+        }
+        if save.content_revision != content_revision() {
+            return Err(GameError::new(format!(
+                "save was made with content revision {}; this authority runs {}",
+                save.content_revision,
+                content_revision()
             )));
         }
         if save.players.len() > MAX_PLAYERS {
@@ -1605,19 +1507,19 @@ impl ArpgGame {
         }
         let mut monster_states = BTreeMap::new();
         for monster in save.monsters {
-            if monster.health > 100 {
+            if monster.health > content().monster.health {
                 return Err(GameError::new(
                     "saved monster health exceeds authoritative maximum",
                 ));
             }
-            if monster.stagger_ticks_remaining > MAX_MONSTER_STAGGER_TICKS {
+            if monster.stagger_ticks_remaining > content().max_stagger_ticks() {
                 return Err(GameError::new("saved monster stagger reaction is invalid"));
             }
             if let Some(action) = monster.action {
                 let maximum_ticks = match action.phase {
-                    ActionPhase::Windup => MONSTER_ATTACK_WINDUP_TICKS,
-                    ActionPhase::Active => MONSTER_ATTACK_ACTIVE_TICKS,
-                    ActionPhase::Recovery => MONSTER_ATTACK_RECOVERY_TICKS,
+                    ActionPhase::Windup => content().monster.windup_ticks,
+                    ActionPhase::Active => content().monster.active_ticks,
+                    ActionPhase::Recovery => content().monster.recovery_ticks,
                 };
                 if action.ticks_remaining == 0
                     || action.ticks_remaining > maximum_ticks
@@ -2485,35 +2387,15 @@ impl ArpgGame {
                 .ok_or_else(|| GameError::new("attack references an unknown player"))?
                 .experience,
         );
-        let (definition, damage_numerator, damage_denominator, stagger_ticks) = match kind {
-            ActionKind::PrimaryAttack => (SWORD_LIGHT_SWING, 1, 1, PRIMARY_STAGGER_TICKS),
-            ActionKind::SecondaryAttack => (
-                SWORD_HEAVY_THRUST,
-                SECONDARY_ATTACK_DAMAGE_NUMERATOR,
-                SECONDARY_ATTACK_DAMAGE_DENOMINATOR,
-                SECONDARY_STAGGER_TICKS,
-            ),
-            ActionKind::Counter => (
-                COUNTER_SLASH,
-                COUNTER_DAMAGE_NUMERATOR,
-                COUNTER_DAMAGE_DENOMINATOR,
-                COUNTER_STAGGER_TICKS,
-            ),
-            ActionKind::LightFollowUp => (SWORD_LIGHT_SWING, 1, 1, PRIMARY_STAGGER_TICKS),
-            ActionKind::LightFinisher => (
-                SWORD_LIGHT_FINISHER,
-                LIGHT_FINISHER_DAMAGE_NUMERATOR,
-                LIGHT_FINISHER_DAMAGE_DENOMINATOR,
-                LIGHT_FINISHER_STAGGER_TICKS,
-            ),
-            ActionKind::HeavyFinisher => (
-                SWORD_HEAVY_FINISHER,
-                HEAVY_FINISHER_DAMAGE_NUMERATOR,
-                HEAVY_FINISHER_DAMAGE_DENOMINATOR,
-                HEAVY_FINISHER_STAGGER_TICKS,
-            ),
-            ActionKind::Interact | ActionKind::Shoot => return Ok(()),
+        let action = content().action(kind);
+        let Some(definition) = action.strike else {
+            return Ok(());
         };
+        let (damage_numerator, damage_denominator, stagger_ticks) = (
+            action.damage_numerator,
+            action.damage_denominator,
+            action.stagger_ticks,
+        );
         let attack_damage = Self::attack_damage_for_level(player_level)
             .saturating_mul(damage_numerator)
             / damage_denominator.max(1);
@@ -2588,7 +2470,7 @@ impl ArpgGame {
             action.connected = true;
         }
         for position in defeated_positions {
-            self.award_experience(player_id, MONSTER_EXPERIENCE_REWARD)?;
+            self.award_experience(player_id, content().monster.experience_reward)?;
             self.spawn_ground_loot(position)?;
         }
         self.reconcile_encounters()
@@ -2791,7 +2673,7 @@ impl ArpgGame {
         if defeated {
             // A departed shooter's arrow still kills, but nobody is credited.
             if self.players.contains_key(&arrow.owner_id) {
-                self.award_experience(arrow.owner_id, MONSTER_EXPERIENCE_REWARD)?;
+                self.award_experience(arrow.owner_id, content().monster.experience_reward)?;
             }
             self.spawn_ground_loot(position)?;
         }
@@ -2803,7 +2685,7 @@ impl ArpgGame {
         monster_id: u32,
         target_player_id: PlayerId,
     ) -> Result<(), GameError> {
-        self.resolve_monster_strike(monster_id, target_player_id, MONSTER_CLAW)
+        self.resolve_monster_strike(monster_id, target_player_id, content().monster.strike)
     }
 
     /// Resolves the shield before damage: a valid block or guard break never touches health.
@@ -2891,7 +2773,7 @@ impl ArpgGame {
                     result
                 } else {
                     let previous_health = player.health;
-                    player.health = player.health.saturating_sub(MONSTER_ATTACK_DAMAGE);
+                    player.health = player.health.saturating_sub(content().monster.damage);
                     player.hurt_ticks_remaining = PLAYER_HURT_TICKS;
                     player.action = None;
                     player.guard.stance = None;
@@ -2963,13 +2845,13 @@ impl ArpgGame {
                 match action.phase {
                     ActionPhase::Windup => {
                         action.phase = ActionPhase::Active;
-                        action.ticks_remaining = MONSTER_ATTACK_ACTIVE_TICKS;
+                        action.ticks_remaining = content().monster.active_ticks;
                         monster.action = Some(action);
                         hits.push((monster.id, action.target_player_id));
                     }
                     ActionPhase::Active => {
                         action.phase = ActionPhase::Recovery;
-                        action.ticks_remaining = MONSTER_ATTACK_RECOVERY_TICKS;
+                        action.ticks_remaining = content().monster.recovery_ticks;
                         monster.action = Some(action);
                     }
                     ActionPhase::Recovery => {
@@ -2979,7 +2861,7 @@ impl ArpgGame {
                 continue;
             }
 
-            let range_sq = MONSTER_ATTACK_RANGE * MONSTER_ATTACK_RANGE;
+            let range_sq = content().monster.strike.reach * content().monster.strike.reach;
             let target = targets
                 .iter()
                 .filter(|(_, room_id, _)| *room_id == monster.room_id)
@@ -2993,7 +2875,7 @@ impl ArpgGame {
             if let Some((_, target_player_id)) = target {
                 monster.action = Some(MonsterActionState {
                     phase: ActionPhase::Windup,
-                    ticks_remaining: MONSTER_ATTACK_WINDUP_TICKS,
+                    ticks_remaining: content().monster.windup_ticks,
                     target_player_id,
                 });
             }
@@ -3386,7 +3268,7 @@ impl AuthoritativeGame for ArpgGame {
         }));
 
         Ok(ArpgSnapshot {
-            schema_version: 14,
+            schema_version: 15,
             run_seed: self.run_seed,
             tick: self.tick,
             world_units_per_meter: WORLD_UNITS_PER_METER,
@@ -3424,6 +3306,7 @@ impl AuthoritativeGame for ArpgGame {
             static_colliders,
             arrows: self.arrows.clone(),
             scenario: self.scenario,
+            content_revision: content_revision().to_owned(),
             chests: self
                 .chests
                 .iter()
@@ -3659,7 +3542,7 @@ fn generated_monsters(rooms: &[RoomSnapshot], rng: &mut DungeonRng) -> Vec<Monst
                     room.max_z - ROOM_SPAWN_MARGIN,
                 ),
             ),
-            health: 100,
+            health: content().monster.health,
             action: None,
             stagger_ticks_remaining: 0,
         })
@@ -3775,6 +3658,10 @@ const fn array_to_vec(value: [i32; 3]) -> Vec3i {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn monster_claw() -> StrikeDefinition {
+        content().monster.strike
+    }
 
     #[test]
     fn command_sequence_must_be_non_zero() {
@@ -4877,7 +4764,7 @@ mod tests {
 
     fn claw(game: &mut ArpgGame, monster_id: u32) -> StrikeResult {
         game.strike_outcomes.clear();
-        game.resolve_monster_strike(monster_id, 1, MONSTER_CLAW)
+        game.resolve_monster_strike(monster_id, 1, monster_claw())
             .unwrap();
         assert_eq!(game.strike_outcomes.len(), 1);
         game.strike_outcomes[0].result
@@ -5029,8 +4916,8 @@ mod tests {
         raise_guard_fully(&mut game);
         game.players.get_mut(&1).unwrap().guard.points = 50;
         game.strike_outcomes.clear();
-        game.resolve_monster_strike(1, 1, MONSTER_CLAW).unwrap();
-        game.resolve_monster_strike(2, 1, MONSTER_CLAW).unwrap();
+        game.resolve_monster_strike(1, 1, monster_claw()).unwrap();
+        game.resolve_monster_strike(2, 1, monster_claw()).unwrap();
         assert_eq!(
             targets(&game.strike_outcomes),
             [
@@ -5049,7 +4936,7 @@ mod tests {
         let unblockable = StrikeDefinition {
             id: "test.unblockable",
             blockable: false,
-            ..MONSTER_CLAW
+            ..monster_claw()
         };
         game.resolve_monster_strike(1, 1, unblockable).unwrap();
         assert_eq!(game.strike_outcomes[0].result, CLAW_HIT);
@@ -6712,6 +6599,185 @@ mod tests {
         }
     }
 
+    /// The extracted base content must reproduce the previous hard-coded tuning exactly; the
+    /// constants below are the pre-extraction values kept as an independent reference.
+    #[test]
+    fn base_content_reproduces_the_previous_tuning() {
+        let expected = [
+            (
+                ActionKind::PrimaryAttack,
+                (
+                    PRIMARY_WINDUP_TICKS,
+                    PRIMARY_ACTIVE_TICKS,
+                    PRIMARY_RECOVERY_TICKS,
+                ),
+                Some((ATTACK_RANGE, usize::MAX)),
+                (1, 1, PRIMARY_STAGGER_TICKS),
+            ),
+            (
+                ActionKind::SecondaryAttack,
+                (
+                    SECONDARY_WINDUP_TICKS,
+                    SECONDARY_ACTIVE_TICKS,
+                    SECONDARY_RECOVERY_TICKS,
+                ),
+                Some((SECONDARY_ATTACK_RANGE, 1)),
+                (
+                    SECONDARY_ATTACK_DAMAGE_NUMERATOR,
+                    SECONDARY_ATTACK_DAMAGE_DENOMINATOR,
+                    SECONDARY_STAGGER_TICKS,
+                ),
+            ),
+            (
+                ActionKind::Interact,
+                (
+                    INTERACT_WINDUP_TICKS,
+                    INTERACT_ACTIVE_TICKS,
+                    INTERACT_RECOVERY_TICKS,
+                ),
+                None,
+                (0, 1, 0),
+            ),
+            (
+                ActionKind::Counter,
+                (
+                    COUNTER_WINDUP_TICKS,
+                    COUNTER_ACTIVE_TICKS,
+                    COUNTER_RECOVERY_TICKS,
+                ),
+                Some((COUNTER_RANGE, 1)),
+                (
+                    COUNTER_DAMAGE_NUMERATOR,
+                    COUNTER_DAMAGE_DENOMINATOR,
+                    COUNTER_STAGGER_TICKS,
+                ),
+            ),
+            (
+                ActionKind::LightFollowUp,
+                (
+                    LIGHT_FOLLOW_UP_WINDUP_TICKS,
+                    LIGHT_FOLLOW_UP_ACTIVE_TICKS,
+                    LIGHT_FOLLOW_UP_RECOVERY_TICKS,
+                ),
+                Some((ATTACK_RANGE, usize::MAX)),
+                (1, 1, PRIMARY_STAGGER_TICKS),
+            ),
+            (
+                ActionKind::LightFinisher,
+                (
+                    LIGHT_FINISHER_WINDUP_TICKS,
+                    LIGHT_FINISHER_ACTIVE_TICKS,
+                    LIGHT_FINISHER_RECOVERY_TICKS,
+                ),
+                Some((LIGHT_FINISHER_RANGE, usize::MAX)),
+                (
+                    LIGHT_FINISHER_DAMAGE_NUMERATOR,
+                    LIGHT_FINISHER_DAMAGE_DENOMINATOR,
+                    LIGHT_FINISHER_STAGGER_TICKS,
+                ),
+            ),
+            (
+                ActionKind::HeavyFinisher,
+                (
+                    HEAVY_FINISHER_WINDUP_TICKS,
+                    HEAVY_FINISHER_ACTIVE_TICKS,
+                    HEAVY_FINISHER_RECOVERY_TICKS,
+                ),
+                Some((HEAVY_FINISHER_RANGE, 1)),
+                (
+                    HEAVY_FINISHER_DAMAGE_NUMERATOR,
+                    HEAVY_FINISHER_DAMAGE_DENOMINATOR,
+                    HEAVY_FINISHER_STAGGER_TICKS,
+                ),
+            ),
+            (
+                ActionKind::Shoot,
+                (SHOOT_WINDUP_TICKS, SHOOT_ACTIVE_TICKS, SHOOT_RECOVERY_TICKS),
+                None,
+                (0, 1, 0),
+            ),
+        ];
+        for (kind, timings, strike, damage) in expected {
+            let action = content().action(kind);
+            assert_eq!(
+                (
+                    action.windup_ticks,
+                    action.active_ticks,
+                    action.recovery_ticks
+                ),
+                timings,
+                "{kind:?}"
+            );
+            assert_eq!(
+                action
+                    .strike
+                    .map(|strike| (strike.reach, strike.max_targets)),
+                strike,
+                "{kind:?}"
+            );
+            assert_eq!(
+                (
+                    action.damage_numerator,
+                    action.damage_denominator,
+                    action.stagger_ticks
+                ),
+                damage,
+                "{kind:?}"
+            );
+        }
+        let monster = content().monster;
+        assert_eq!(
+            (
+                monster.health,
+                monster.strike.reach,
+                monster.damage,
+                monster.experience_reward
+            ),
+            (
+                100,
+                MONSTER_ATTACK_RANGE,
+                MONSTER_ATTACK_DAMAGE,
+                MONSTER_EXPERIENCE_REWARD
+            )
+        );
+        assert_eq!(
+            (
+                monster.windup_ticks,
+                monster.active_ticks,
+                monster.recovery_ticks
+            ),
+            (
+                MONSTER_ATTACK_WINDUP_TICKS,
+                MONSTER_ATTACK_ACTIVE_TICKS,
+                MONSTER_ATTACK_RECOVERY_TICKS
+            )
+        );
+        assert_eq!(monster.strike.guard_cost, MONSTER_CLAW_GUARD_COST);
+        assert!(!monster.strike.frontal && monster.strike.blockable);
+        assert_eq!(content().counter_window_ticks, COUNTER_WINDOW_TICKS);
+        assert_eq!(content().combos.len(), 4);
+        assert_eq!(content().max_stagger_ticks(), HEAVY_FINISHER_STAGGER_TICKS);
+    }
+
+    #[test]
+    fn saves_from_another_content_revision_are_rejected() {
+        let mut game = ArpgGame::new_with_seed(42).unwrap();
+        game.add_player(1).unwrap();
+        let mut save = game.save_state().unwrap();
+        assert_eq!(save.content_revision, content_revision());
+        assert_eq!(
+            game.snapshot().unwrap().content_revision,
+            content_revision()
+        );
+        save.content_revision = "0000000000000000".into();
+        assert!(
+            ArpgGame::from_save_state(save)
+                .unwrap_err()
+                .message()
+                .contains("content revision")
+        );
+    }
+
     #[test]
     fn generated_rooms_are_large_enough_for_arpg_combat() {
         for seed in 0..64 {
@@ -6814,7 +6880,7 @@ mod tests {
         game.add_player(1).unwrap();
         let snapshot = game.snapshot().unwrap();
         let generated = generate_dungeon(snapshot.run_seed);
-        assert_eq!(snapshot.schema_version, 14);
+        assert_eq!(snapshot.schema_version, 15);
         assert_eq!(snapshot.run_seed, 0xDEAD_BEEF);
         assert_eq!(game.run_seed(), snapshot.run_seed);
         assert_eq!(snapshot.rooms, generated.rooms);
