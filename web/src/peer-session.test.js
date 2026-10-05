@@ -37,7 +37,7 @@ function sessionFixture(role = "guest") {
 }
 
 const snapshot = JSON.stringify({
-  protocolVersion: 10,
+  protocolVersion: 11,
   payload: {
     tick: 1,
     runSeed: 42,
@@ -48,6 +48,8 @@ const snapshot = JSON.stringify({
     staticColliders: [],
     groundLoot: [],
     arrows: [],
+    scenario: "dungeon",
+    strikeEvents: [],
   },
 });
 

@@ -16,6 +16,7 @@ import {
   PlayerHud,
   CombatActions,
   TrainingDiagnostics,
+  StrikeTimeline,
   TrainingTick,
   GameSummary,
 } from "./snapshot-views.jsx";
@@ -61,6 +62,8 @@ import {
   parseRunSeed,
   readTrainingRequest,
   withTrainingRequest,
+  DEFAULT_SCENARIO,
+  SCENARIOS,
 } from "./training-arena.js";
 import { createGameClientRuntime } from "./game-client-runtime.ts";
 import { createActiveCueTracker } from "./frame-cues.js";
@@ -431,7 +434,10 @@ function App() {
   const [runtime] = useState(() =>
     createGameClientRuntime({
       snapshots: snapshotStore,
-      createGame: (seed) => new WasmGame(seed),
+      createGame: (seed, scenario) =>
+        scenario && scenario !== DEFAULT_SCENARIO
+          ? WasmGame.newScenario(scenario, seed)
+          : new WasmGame(seed),
       createPeerSession: (apiBase) => new DemoLobbySession({ apiBase, topology: "host" }),
       attachPeerSession: attachPeerGameSession,
       createDedicatedSession: (endpoint) => new DedicatedGameSession({ endpoint }),
@@ -451,6 +457,7 @@ function App() {
   const [inWorld, setInWorld] = useState(false);
   const [savedGameAvailable, setSavedGameAvailable] = useState(() => hasPersistedSaveDocument());
   const [trainingSeedDraft, setTrainingSeedDraft] = useState(String(initialRequest.training.seed));
+  const [trainingFixture, setTrainingFixture] = useState(initialRequest.training.fixture);
   const [selectedCharacterId, setSelectedCharacterId] = useState(() => loadSelectedCharacterId());
   const [profile, setProfile] = useState(() =>
     loadProfile((profile) => validateRegistry(inputRegistry, profile).valid),
@@ -543,12 +550,13 @@ function App() {
     history.replaceState(null, "", withTrainingRequest(location.href, false, 0));
   };
 
-  const startTraining = (seed) => {
+  const startTraining = (seed, fixture = trainingFixture) => {
     resetTouchVisual();
-    runtime.startLocal({ seed, training: true });
+    runtime.startLocal({ seed, training: true, scenario: fixture });
     initialRunSeedRef.current = null;
     setTrainingSeedDraft(String(seed));
-    history.replaceState(null, "", withTrainingRequest(location.href, true, seed));
+    setTrainingFixture(fixture);
+    history.replaceState(null, "", withTrainingRequest(location.href, true, seed, fixture));
   };
 
   const enterTrainingArena = (candidateSeed = trainingSeedDraft) => {
@@ -635,12 +643,17 @@ function App() {
         setReady(true);
         if (initialTrainingRef.current.requested) {
           const seed = initialRunSeedRef.current ?? DEFAULT_TRAINING_SEED;
-          runtime.startLocal({ seed, training: true });
+          const { fixture, unknownFixture } = initialTrainingRef.current;
+          runtime.startLocal({ seed, training: true, scenario: fixture });
           initialRunSeedRef.current = null;
           setTrainingSeedDraft(String(seed));
           setInWorld(true);
-          history.replaceState(null, "", withTrainingRequest(location.href, true, seed));
-          setStatus("Training arena");
+          history.replaceState(null, "", withTrainingRequest(location.href, true, seed, fixture));
+          setStatus(
+            unknownFixture
+              ? `Unknown scenario "${unknownFixture}"; using the generated dungeon`
+              : "Training arena",
+          );
         } else {
           setStatus("Select a character");
         }
@@ -1104,6 +1117,24 @@ function App() {
             </label>
           </div>
 
+          <label className="training-scenario">
+            <span>Scenario</span>
+            <select
+              value={trainingFixture}
+              onChange={(event) => {
+                const seed = parseRunSeed(trainingSeedDraft) ?? DEFAULT_TRAINING_SEED;
+                startTraining(seed, event.target.value);
+                setStatus(`Training scenario · ${event.target.value} · seed ${seed}`);
+              }}
+            >
+              {SCENARIOS.map((option) => (
+                <option key={option.id} value={option.id}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+
           <div className="training-seed">
             <label>
               <span>Seed</span>
@@ -1137,6 +1168,7 @@ function App() {
           </div>
 
           <TrainingDiagnostics store={snapshotStore} playerId={playerId} />
+          <StrikeTimeline store={snapshotStore} />
         </aside>
       )}
 

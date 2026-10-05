@@ -29,6 +29,8 @@ export type ClientLifecycle =
 export interface TrainingState {
   paused: boolean;
   speed: number;
+  // Named arpg-core workbench scenario the authority was created from.
+  scenario: string;
 }
 
 export interface ClientState {
@@ -80,7 +82,7 @@ export interface SnapshotSink {
 
 export interface GameClientRuntimeOptions {
   snapshots: SnapshotSink;
-  createGame(seed: number): WasmGameLike;
+  createGame(seed: number, scenario?: string): WasmGameLike;
   createPeerSession(apiBase: string): PeerSessionLike;
   attachPeerSession(options: {
     session: PeerSessionLike;
@@ -188,8 +190,13 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
 
   const advance = (ticks: number) => {
     try {
-      for (let tick = 0; tick < ticks; tick += 1) game.advanceTick();
-      publishFromGame();
+      // Publish every tick: snapshots carry that tick's transient events (strikes,
+      // interactions), so batching ticks would silently drop them. Drawing stays
+      // coalesced per animation frame.
+      for (let tick = 0; tick < ticks; tick += 1) {
+        game.advanceTick();
+        publishFromGame();
+      }
     } catch (error) {
       fail(`Simulation stopped: ${error}`);
     }
@@ -250,8 +257,8 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
     return generation;
   };
 
-  const newAuthority = (seed: number) => {
-    const next = options.createGame(seed);
+  const newAuthority = (seed: number, scenario?: string) => {
+    const next = options.createGame(seed, scenario);
     next.addPlayer(1);
     return next;
   };
@@ -303,12 +310,16 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
     hasTickLoop: () => timer !== null,
     hasAuthority: () => game !== null,
 
-    startLocal({ seed, training = false }: { seed?: number; training?: boolean } = {}) {
+    startLocal({
+      seed,
+      training = false,
+      scenario,
+    }: { seed?: number; training?: boolean; scenario?: string } = {}) {
       if (disposed()) return;
-      const next = newAuthority(seed ?? options.freshRunSeed());
+      const next = newAuthority(seed ?? options.freshRunSeed(), training ? scenario : undefined);
       installLocalAuthority(next, {
         playerId: 1,
-        training: training ? { paused: false, speed: 1 } : null,
+        training: training ? { paused: false, speed: 1, scenario: scenario ?? "dungeon" } : null,
       });
     },
 

@@ -1,4 +1,4 @@
-import { useSyncExternalStore } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 
 export function useSnapshot(store) {
   return useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
@@ -204,6 +204,61 @@ export function CombatActions({
 export function TrainingTick({ store }) {
   const snapshot = useSnapshot(store);
   return <span>Tick {snapshot?.tick ?? 0}</span>;
+}
+
+const TIMELINE_LIMIT = 8;
+
+function describeParty(party) {
+  return `${party.kind} ${party.id}`;
+}
+
+function describeResult(result) {
+  if (result.kind === "hit") return `hit ${result.damage}${result.defeated ? " · defeated" : ""}`;
+  if (result.kind === "blocked") return `blocked · guard −${result.guardDamage}`;
+  if (result.kind === "guardBroken") return "guard broken";
+  return result.kind;
+}
+
+// Bounded, tick-stamped log of authoritative strike outcomes. It is evidence from the
+// simulation, not a renderer animation; restarting the simulation clears it.
+export function StrikeTimeline({ store }) {
+  const [entries, setEntries] = useState([]);
+  useEffect(() => {
+    let lastTick = -1;
+    return store.subscribe(() => {
+      const snapshot = store.getSnapshot();
+      if (!snapshot) return;
+      const restarted = snapshot.tick < lastTick;
+      lastTick = snapshot.tick;
+      const events = snapshot.strikeEvents ?? [];
+      if (!restarted && events.length === 0) return;
+      setEntries((current) =>
+        [
+          ...events.map((event, index) => ({
+            key: `${snapshot.tick}-${index}`,
+            text: `tick ${snapshot.tick} · ${event.definition} · ${describeParty(
+              event.source,
+            )} → ${describeParty(event.target)} · ${describeResult(event.result)}`,
+          })),
+          ...(restarted ? [] : current),
+        ].slice(0, TIMELINE_LIMIT),
+      );
+    });
+  }, [store]);
+  return (
+    <section className="strike-timeline" aria-label="Strike timeline">
+      <h2>Strikes</h2>
+      {entries.length === 0 ? (
+        <p>No strikes yet</p>
+      ) : (
+        <ol>
+          {entries.map((entry) => (
+            <li key={entry.key}>{entry.text}</li>
+          ))}
+        </ol>
+      )}
+    </section>
+  );
 }
 
 export function TrainingDiagnostics({ store, playerId }) {

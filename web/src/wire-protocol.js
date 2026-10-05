@@ -1,6 +1,6 @@
-// Browser projection of the arpg-protocol v10 envelope. This adapter validates
+// Browser projection of the arpg-protocol v11 envelope. This adapter validates
 // only data consumed by presentation; gameplay rules remain in arpg-core.
-export const PROTOCOL_VERSION = 10;
+export const PROTOCOL_VERSION = 11;
 const MAX_SNAPSHOT_CHARACTERS = 65_535;
 const integer = (value) => Number.isSafeInteger(value);
 const nonNegative = (value) => integer(value) && value >= 0;
@@ -18,6 +18,17 @@ const kinds = new Set([
   "shoot",
 ]);
 const weapons = new Set(["swordAndShield", "bow"]);
+const scenarios = new Set([
+  "dungeon",
+  "dummy",
+  "enemy",
+  "obstructed",
+  "archery",
+  "archeryObstructed",
+]);
+const parties = new Set(["player", "monster"]);
+const strikeResults = new Set(["hit", "blocked", "guardBroken", "obstructed"]);
+const party = (value) => parties.has(value?.kind) && nonNegative(value.id);
 const comboInputs = new Set(["light", "heavy"]);
 const playerReactions = new Set(["hurt", "blocked", "guardBroken"]);
 const guardPhases = new Set(["raising", "raised"]);
@@ -89,6 +100,17 @@ export function decodeSnapshot(encoded) {
         ) &&
         weapons.has(player.weapon) &&
         optional(player.drawTicks, nonNegative),
+    ) &&
+    scenarios.has(snapshot.scenario) &&
+    list(
+      "strikeEvents",
+      (event) =>
+        party(event?.source) &&
+        party(event.target) &&
+        nonNegative(event.strikeTick) &&
+        typeof event.definition === "string" &&
+        event.definition.length <= 64 &&
+        strikeResults.has(event.result?.kind),
     ) &&
     list(
       "arrows",

@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use arpg_core::{ArpgGame, ArpgSaveState, AuthoritativeGame, PlayerCommand};
+use arpg_core::{ArpgGame, ArpgSaveState, AuthoritativeGame, PlayerCommand, ScenarioId};
 use arpg_protocol::{JsonProtocol, WireProtocol};
 use wasm_bindgen::prelude::*;
 
@@ -16,6 +16,17 @@ impl WasmGame {
     pub fn new(run_seed: u32) -> Result<WasmGame, JsValue> {
         Ok(Self {
             game: ArpgGame::new_with_seed(run_seed).map_err(js_error)?,
+            protocol: JsonProtocol,
+        })
+    }
+
+    /// The generated dungeon for `run_seed` arranged as the named workbench scenario.
+    #[wasm_bindgen(js_name = newScenario)]
+    pub fn new_scenario(scenario: &str, run_seed: u32) -> Result<WasmGame, JsValue> {
+        let scenario = ScenarioId::parse(scenario)
+            .ok_or_else(|| js_error(format!("unknown scenario {scenario:?}")))?;
+        Ok(Self {
+            game: ArpgGame::new_scenario(scenario, run_seed).map_err(js_error)?,
             protocol: JsonProtocol,
         })
     }

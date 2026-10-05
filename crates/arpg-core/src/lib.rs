@@ -23,7 +23,7 @@ pub const TICK_HZ: u16 = 60;
 const PHYSICS_TICKS_PER_GAME_TICK: i32 = 1;
 pub const MAX_PLAYERS: usize = 4;
 pub const WORLD_UNITS_PER_METER: i32 = 100;
-pub const SAVE_STATE_SCHEMA_VERSION: u16 = 5;
+pub const SAVE_STATE_SCHEMA_VERSION: u16 = 6;
 // 2: directional multi-target strike volumes and obstruction by fixed geometry.
 // 3: directional shield guard, block and guard break.
 // 4: post-block counterattack opportunity.
@@ -276,6 +276,156 @@ pub enum Weapon {
     #[default]
     SwordAndShield,
     Bow,
+}
+
+/// A named, deterministic workbench scenario. Every scenario is the normal generated dungeon
+/// for its seed plus an exact placement in the first combat room (room 2): the player at the
+/// room centre facing +x and the room's generated monster at an authored offset, with an
+/// optional authored pillar. Scenarios never add rules; they only arrange the real runtime.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ScenarioId {
+    /// The ordinary generated dungeon.
+    #[default]
+    Dungeon,
+    /// A target just outside the monster's own reach but inside the light swing.
+    Dummy,
+    /// An enemy inside its attack reach, for shield, block and counter work.
+    Enemy,
+    /// The dummy behind a pillar, for obstructed strikes.
+    Obstructed,
+    /// A distant target for bow shots.
+    Archery,
+    /// The distant target behind a pillar, for arrows stopped by walls.
+    ArcheryObstructed,
+}
+
+impl ScenarioId {
+    pub const ALL: [Self; 6] = [
+        Self::Dungeon,
+        Self::Dummy,
+        Self::Enemy,
+        Self::Obstructed,
+        Self::Archery,
+        Self::ArcheryObstructed,
+    ];
+
+    /// The URL/query name, identical to the serialised form.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Dungeon => "dungeon",
+            Self::Dummy => "dummy",
+            Self::Enemy => "enemy",
+            Self::Obstructed => "obstructed",
+            Self::Archery => "archery",
+            Self::ArcheryObstructed => "archeryObstructed",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|scenario| scenario.name() == name)
+    }
+
+    /// Offset of the room's first generated monster from the room centre.
+    const fn target_offset(self) -> Option<i32> {
+        match self {
+            Self::Dungeon => None,
+            Self::Dummy | Self::Obstructed => Some(200),
+            Self::Enemy => Some(150),
+            Self::Archery | Self::ArcheryObstructed => Some(500),
+        }
+    }
+
+    /// Offset of an authored pillar between player and target.
+    const fn pillar_offset(self) -> Option<i32> {
+        match self {
+            Self::Obstructed => Some(110),
+            Self::ArcheryObstructed => Some(250),
+            _ => None,
+        }
+    }
+}
+
+/// One recorded command of a reproduction: applied before the tick numbered `tick` runs.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReproductionCommand {
+    pub tick: u64,
+    pub player_id: PlayerId,
+    pub sequence: u32,
+    pub command: ArpgCommand,
+}
+
+/// Portable reproduction input: scenario, seed, players and the exact accepted command
+/// sequence. `replay_reproduction` runs it headlessly on the normal runtime.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Reproduction {
+    pub scenario: ScenarioId,
+    pub seed: RunSeed,
+    pub players: Vec<PlayerId>,
+    pub ticks: u64,
+    pub commands: Vec<ReproductionCommand>,
+}
+
+/// Maximum ticks a reproduction may request (ten minutes at 60 Hz).
+pub const MAX_REPRODUCTION_TICKS: u64 = 36_000;
+
+/// Replays `reproduction` headlessly and returns the snapshot after every tick.
+pub fn replay_reproduction(reproduction: &Reproduction) -> Result<Vec<ArpgSnapshot>, GameError> {
+    if reproduction.ticks > MAX_REPRODUCTION_TICKS {
+        return Err(GameError::new(
+            "reproduction is longer than the supported bound",
+        ));
+    }
+    if reproduction
+        .commands
+        .windows(2)
+        .any(|pair| pair[0].tick > pair[1].tick)
+    {
+        return Err(GameError::new(
+            "reproduction commands must be in tick order",
+        ));
+    }
+    let mut game = ArpgGame::new_scenario(reproduction.scenario, reproduction.seed)?;
+    for &player in &reproduction.players {
+        game.add_player(player)?;
+    }
+    let mut commands = reproduction.commands.iter().peekable();
+    let mut snapshots = Vec::with_capacity(usize::try_from(reproduction.ticks).unwrap_or(0));
+    for tick in 0..reproduction.ticks {
+        while let Some(recorded) = commands.next_if(|recorded| recorded.tick == tick) {
+            game.apply_command(PlayerCommand::new(
+                recorded.player_id,
+                recorded.sequence,
+                recorded.command,
+            )?)?;
+        }
+        game.advance_tick()?;
+        snapshots.push(game.snapshot()?);
+    }
+    if commands.next().is_some() {
+        return Err(GameError::new(
+            "reproduction has commands after its last tick",
+        ));
+    }
+    Ok(snapshots)
+}
+
+const SCENARIO_ROOM: RoomId = 2;
+const SCENARIO_PILLAR_HALF_EXTENTS: Vec3i = Vec3i::new(20, WALL_HALF_HEIGHT, 60);
+
+/// One resolved strike as published in a snapshot for diagnostics and feedback.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StrikeEventSnapshot {
+    pub source: StrikeSource,
+    pub strike_tick: u64,
+    pub definition: String,
+    pub target: StrikeTarget,
+    pub result: StrikeResult,
 }
 
 /// One authoritative arrow in flight.
@@ -566,6 +716,11 @@ pub struct ArpgSnapshot {
     pub ground_loot: Vec<GroundLootSnapshot>,
     pub static_colliders: Vec<StaticColliderSnapshot>,
     pub arrows: Vec<ArrowSnapshot>,
+    pub scenario: ScenarioId,
+    /// Strikes resolved during the tick that produced this snapshot, in resolution order.
+    /// Transient presentation evidence: not part of saves, so a freshly restored game
+    /// publishes none until its next tick.
+    pub strike_events: Vec<StrikeEventSnapshot>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -687,6 +842,7 @@ pub struct ArpgSaveState {
     pub next_ground_loot_id: GroundLootId,
     pub arrows: Vec<ArrowSnapshot>,
     pub next_arrow_id: u64,
+    pub scenario: ScenarioId,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -798,14 +954,16 @@ impl MonsterActionState {
 }
 
 /// Who performed a strike.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "id", rename_all = "camelCase")]
 pub enum StrikeSource {
     Player(PlayerId),
     Monster(u32),
 }
 
 /// What a strike contacted. Ordering is the stable identity tie-break for equal distances.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "id", rename_all = "camelCase")]
 pub enum StrikeTarget {
     Player(PlayerId),
     Monster(u32),
@@ -820,7 +978,12 @@ pub struct StrikeId {
     pub tick: u64,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum StrikeResult {
     /// The strike connected and dealt `damage`; `defeated` reports a killing blow.
     Hit { damage: u16, defeated: bool },
@@ -1015,6 +1178,7 @@ pub struct ArpgGame {
     strike_outcomes: Vec<StrikeOutcome>,
     arrows: Vec<ArrowSnapshot>,
     next_arrow_id: u64,
+    scenario: ScenarioId,
 }
 
 impl Default for ArpgGame {
@@ -1067,7 +1231,83 @@ impl ArpgGame {
             strike_outcomes: Vec::new(),
             arrows: Vec::new(),
             next_arrow_id: ARROW_ID_BASE,
+            scenario: ScenarioId::Dungeon,
         })
+    }
+
+    /// The generated dungeon for `run_seed` arranged as `scenario`.
+    pub fn new_scenario(scenario: ScenarioId, run_seed: RunSeed) -> Result<Self, GameError> {
+        let mut game = Self::with_scenario_layout(scenario, run_seed)?;
+        let Some(target_offset) = scenario.target_offset() else {
+            return Ok(game);
+        };
+        let (center_x, center_z) = game
+            .rooms
+            .iter()
+            .find(|room| room.id == SCENARIO_ROOM)
+            .map(RoomSnapshot::center)
+            .ok_or_else(|| GameError::new("scenario room is missing"))?;
+        let mut placed = 0;
+        for monster in game
+            .monsters
+            .iter_mut()
+            .filter(|monster| monster.room_id == SCENARIO_ROOM)
+        {
+            // The first monster is the authored target; any others wait in a far corner.
+            monster.position = if placed == 0 {
+                Vec3i::new(center_x + target_offset, PLAYER_Y, center_z)
+            } else {
+                Vec3i::new(center_x - 600, PLAYER_Y, center_z + 300 - 120 * placed)
+            };
+            placed += 1;
+        }
+        if placed == 0 {
+            return Err(GameError::new("scenario room has no monster"));
+        }
+        Ok(game)
+    }
+
+    /// The generated dungeon plus the scenario's fixed geometry (no placements). Saves
+    /// restore through this so authored pillars come back while positions come from the save.
+    fn with_scenario_layout(scenario: ScenarioId, run_seed: RunSeed) -> Result<Self, GameError> {
+        let mut game = Self::new_with_seed(run_seed)?;
+        game.scenario = scenario;
+        if scenario == ScenarioId::Dungeon {
+            return Ok(game);
+        }
+        let (center_x, center_z) = game
+            .rooms
+            .iter()
+            .find(|room| room.id == SCENARIO_ROOM)
+            .map(RoomSnapshot::center)
+            .ok_or_else(|| GameError::new("scenario room is missing"))?;
+        // Spawn points are layout: players joining a restored scenario arrive where they
+        // would have in the uninterrupted game.
+        game.player_spawns = [(0, 0), (0, 90), (0, -90), (-90, 0)]
+            .map(|(dx, dz)| Vec3i::new(center_x + dx, PLAYER_Y, center_z + dz));
+        if let Some(offset) = scenario.pillar_offset() {
+            let index =
+                u64::try_from(game.static_colliders.len()).expect("collider count fits u64");
+            let pillar = StaticColliderSnapshot {
+                id: STATIC_BODY_BASE + index,
+                position: [center_x + offset, PLAYER_Y, center_z],
+                half_extents: vec_to_array(SCENARIO_PILLAR_HALF_EXTENTS),
+                kind: StaticColliderKind::Pillar,
+            };
+            game.world
+                .add_body(RigidBody::fixed(
+                    BodyId(pillar.id),
+                    array_to_vec(pillar.position),
+                    SCENARIO_PILLAR_HALF_EXTENTS,
+                ))
+                .map_err(physics_error)?;
+            game.static_colliders.push(pillar);
+        }
+        Ok(game)
+    }
+
+    pub fn scenario(&self) -> ScenarioId {
+        self.scenario
     }
 
     pub fn run_seed(&self) -> RunSeed {
@@ -1146,6 +1386,7 @@ impl ArpgGame {
             next_ground_loot_id: self.next_ground_loot_id,
             arrows: self.arrows.clone(),
             next_arrow_id: self.next_arrow_id,
+            scenario: self.scenario,
         })
     }
 
@@ -1166,7 +1407,7 @@ impl ArpgGame {
             return Err(GameError::new("save contains too many players"));
         }
 
-        let mut game = Self::new_with_seed(save.run_seed)?;
+        let mut game = Self::with_scenario_layout(save.scenario, save.run_seed)?;
         game.tick = save.tick;
 
         if save.rooms.len() != game.rooms.len() {
@@ -2905,7 +3146,7 @@ impl AuthoritativeGame for ArpgGame {
         }));
 
         Ok(ArpgSnapshot {
-            schema_version: 12,
+            schema_version: 13,
             run_seed: self.run_seed,
             tick: self.tick,
             world_units_per_meter: WORLD_UNITS_PER_METER,
@@ -2942,6 +3183,18 @@ impl AuthoritativeGame for ArpgGame {
                 .collect(),
             static_colliders,
             arrows: self.arrows.clone(),
+            scenario: self.scenario,
+            strike_events: self
+                .strike_outcomes
+                .iter()
+                .map(|outcome| StrikeEventSnapshot {
+                    source: outcome.strike.source,
+                    strike_tick: outcome.strike.tick,
+                    definition: outcome.definition.to_owned(),
+                    target: outcome.target,
+                    result: outcome.result,
+                })
+                .collect(),
         })
     }
 }
@@ -4897,7 +5150,10 @@ mod tests {
             game.monsters[0].stagger_ticks_remaining,
             COUNTER_STAGGER_TICKS
         );
-        let restored = ArpgGame::from_save_state(game.save_state().unwrap()).unwrap();
+        let mut restored = ArpgGame::from_save_state(game.save_state().unwrap()).unwrap();
+        // Strike events belong to the tick that produced them and are not saved.
+        game.advance_tick().unwrap();
+        restored.advance_tick().unwrap();
         assert_eq!(restored.snapshot().unwrap(), game.snapshot().unwrap());
     }
 
@@ -5738,6 +5994,217 @@ mod tests {
         );
     }
 
+    fn scenario_player_events(
+        scenario: ScenarioId,
+        commands: &[(u64, ArpgCommand)],
+        ticks: u64,
+    ) -> Vec<StrikeEventSnapshot> {
+        let reproduction = Reproduction {
+            scenario,
+            seed: 42,
+            players: vec![1],
+            ticks,
+            commands: commands
+                .iter()
+                .enumerate()
+                .map(|(index, &(tick, command))| ReproductionCommand {
+                    tick,
+                    player_id: 1,
+                    sequence: u32::try_from(index + 1).unwrap(),
+                    command,
+                })
+                .collect(),
+        };
+        replay_reproduction(&reproduction)
+            .unwrap()
+            .into_iter()
+            .flat_map(|snapshot| snapshot.strike_events)
+            .collect()
+    }
+
+    #[test]
+    fn every_scenario_arranges_the_real_runtime_for_many_seeds() {
+        for scenario in ScenarioId::ALL {
+            assert_eq!(ScenarioId::parse(scenario.name()), Some(scenario));
+            assert_eq!(
+                serde_json::to_value(scenario).unwrap(),
+                serde_json::json!(scenario.name())
+            );
+            for seed in [0, 42, 0xdead_beef, 0xa420_0916] {
+                let mut game = ArpgGame::new_scenario(scenario, seed).unwrap();
+                game.add_player(1).unwrap();
+                game.advance_tick().unwrap();
+                let snapshot = game.snapshot().unwrap();
+                assert_eq!(snapshot.scenario, scenario);
+                let Some(offset) = scenario.target_offset() else {
+                    assert_eq!(snapshot, {
+                        let mut plain = ArpgGame::new_with_seed(seed).unwrap();
+                        plain.add_player(1).unwrap();
+                        plain.advance_tick().unwrap();
+                        plain.snapshot().unwrap()
+                    });
+                    continue;
+                };
+                let room = snapshot.rooms.iter().find(|room| room.id == 2).unwrap();
+                assert_eq!(
+                    room.encounter_state,
+                    RoomEncounterState::Active,
+                    "{scenario:?}/{seed}"
+                );
+                let (x, z) = room.center();
+                assert_eq!(snapshot.players[0].position, [x, PLAYER_Y, z]);
+                let target = snapshot
+                    .monsters
+                    .iter()
+                    .find(|monster| monster.room_id == 2)
+                    .unwrap();
+                assert_eq!(target.position, [x + offset, PLAYER_Y, z]);
+                let pillars = snapshot
+                    .static_colliders
+                    .iter()
+                    .filter(|collider| collider.kind == StaticColliderKind::Pillar)
+                    .count();
+                assert_eq!(pillars, usize::from(scenario.pillar_offset().is_some()));
+            }
+        }
+        assert_eq!(ScenarioId::parse("nonsense"), None);
+    }
+
+    #[test]
+    fn scenarios_demonstrate_melee_reach_obstruction_and_monster_attacks() {
+        let swing = [(0, ArpgCommand::PrimaryAttack)];
+        let hits = scenario_player_events(ScenarioId::Dummy, &swing, 10);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].definition, "sword.lightSwing");
+        assert!(matches!(hits[0].result, StrikeResult::Hit { .. }));
+
+        let blocked = scenario_player_events(ScenarioId::Obstructed, &swing, 10);
+        assert_eq!(blocked.len(), 1);
+        assert_eq!(blocked[0].result, StrikeResult::Obstructed);
+
+        let empty = scenario_player_events(
+            ScenarioId::Dummy,
+            &[
+                (0, ArpgCommand::SetMovement { x: -1, z: 0 }),
+                (1, ArpgCommand::PrimaryAttack),
+            ],
+            10,
+        );
+        assert!(
+            empty.is_empty(),
+            "an unaimed swing away from the dummy whiffs"
+        );
+
+        let enemy = scenario_player_events(ScenarioId::Enemy, &[], 30);
+        assert!(enemy.iter().any(|event| {
+            event.source == StrikeSource::Monster(event_monster(&enemy))
+                && event.definition == "monster.claw"
+        }));
+    }
+
+    fn event_monster(events: &[StrikeEventSnapshot]) -> u32 {
+        events
+            .iter()
+            .find_map(|event| match event.source {
+                StrikeSource::Monster(id) => Some(id),
+                StrikeSource::Player(_) => None,
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn archery_scenarios_hit_and_stop_at_the_pillar() {
+        let shot = [
+            (
+                0,
+                ArpgCommand::EquipWeapon {
+                    weapon: Weapon::Bow,
+                },
+            ),
+            (0, ArpgCommand::DrawBow),
+            (31, ArpgCommand::ReleaseBow),
+        ];
+        let hit = scenario_player_events(ScenarioId::Archery, &shot, 60);
+        assert_eq!(hit.len(), 1);
+        assert_eq!(hit[0].definition, "bow.arrow");
+        assert!(scenario_player_events(ScenarioId::ArcheryObstructed, &shot, 60).is_empty());
+    }
+
+    #[test]
+    fn reproductions_replay_identically_and_reject_malformed_input() {
+        let reproduction = Reproduction {
+            scenario: ScenarioId::Enemy,
+            seed: 7,
+            players: vec![1, 2],
+            ticks: 120,
+            commands: vec![
+                ReproductionCommand {
+                    tick: 3,
+                    player_id: 1,
+                    sequence: 1,
+                    command: ArpgCommand::SetGuard { raised: true },
+                },
+                ReproductionCommand {
+                    tick: 40,
+                    player_id: 2,
+                    sequence: 1,
+                    command: ArpgCommand::PrimaryAttack,
+                },
+            ],
+        };
+        let encoded = serde_json::to_string(&reproduction).unwrap();
+        let decoded: Reproduction = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, reproduction);
+        let first = replay_reproduction(&reproduction).unwrap();
+        assert_eq!(first.len(), 120);
+        assert_eq!(first, replay_reproduction(&decoded).unwrap());
+
+        let mut late = reproduction.clone();
+        late.commands[1].tick = 500;
+        assert!(replay_reproduction(&late).is_err());
+        let mut unordered = reproduction.clone();
+        unordered.commands.swap(0, 1);
+        assert!(replay_reproduction(&unordered).is_err());
+        let mut long = reproduction;
+        long.ticks = MAX_REPRODUCTION_TICKS + 1;
+        assert!(replay_reproduction(&long).is_err());
+    }
+
+    #[test]
+    fn players_joining_a_restored_scenario_spawn_at_the_authored_points() {
+        let mut game = ArpgGame::new_scenario(ScenarioId::Enemy, 42).unwrap();
+        game.add_player(1).unwrap();
+        game.advance_tick().unwrap();
+        let mut restored = ArpgGame::from_save_state(game.save_state().unwrap()).unwrap();
+        game.add_player(2).unwrap();
+        restored.add_player(2).unwrap();
+        game.advance_tick().unwrap();
+        restored.advance_tick().unwrap();
+        assert_eq!(restored.snapshot().unwrap(), game.snapshot().unwrap());
+    }
+
+    #[test]
+    fn scenario_saves_restore_their_authored_geometry() {
+        let mut game = ArpgGame::new_scenario(ScenarioId::Obstructed, 42).unwrap();
+        game.add_player(1).unwrap();
+        for _ in 0..5 {
+            game.advance_tick().unwrap();
+        }
+        let save = game.save_state().unwrap();
+        assert_eq!(save.scenario, ScenarioId::Obstructed);
+        let mut restored = ArpgGame::from_save_state(save).unwrap();
+        game.apply_command(PlayerCommand::new(1, 1, ArpgCommand::PrimaryAttack).unwrap())
+            .unwrap();
+        restored
+            .apply_command(PlayerCommand::new(1, 1, ArpgCommand::PrimaryAttack).unwrap())
+            .unwrap();
+        for _ in 0..12 {
+            game.advance_tick().unwrap();
+            restored.advance_tick().unwrap();
+            assert_eq!(restored.snapshot().unwrap(), game.snapshot().unwrap());
+        }
+    }
+
     #[test]
     fn generated_rooms_are_large_enough_for_arpg_combat() {
         for seed in 0..64 {
@@ -5840,7 +6307,7 @@ mod tests {
         game.add_player(1).unwrap();
         let snapshot = game.snapshot().unwrap();
         let generated = generate_dungeon(snapshot.run_seed);
-        assert_eq!(snapshot.schema_version, 12);
+        assert_eq!(snapshot.schema_version, 13);
         assert_eq!(snapshot.run_seed, 0xDEAD_BEEF);
         assert_eq!(game.run_seed(), snapshot.run_seed);
         assert_eq!(snapshot.rooms, generated.rooms);
