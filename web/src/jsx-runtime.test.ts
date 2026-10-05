@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { transformWithEsbuild } from "vite";
+import { transformWithOxc } from "vite";
 import viteConfig from "../vite.config.js";
 
 describe("vendored React components", () => {
@@ -12,11 +12,7 @@ describe("vendored React components", () => {
       }
     `;
 
-    const transformed = await transformWithEsbuild(
-      source,
-      "settings-editor.tsx",
-      viteConfig.esbuild,
-    );
+    const transformed = await transformWithOxc(source, "settings-editor.tsx", viteConfig.oxc);
 
     expect(transformed.code).toContain("react/jsx-runtime");
     expect(transformed.code).not.toContain("React.createElement");
