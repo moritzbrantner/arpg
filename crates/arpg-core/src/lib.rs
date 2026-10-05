@@ -23,11 +23,12 @@ pub const TICK_HZ: u16 = 60;
 const PHYSICS_TICKS_PER_GAME_TICK: i32 = 1;
 pub const MAX_PLAYERS: usize = 4;
 pub const WORLD_UNITS_PER_METER: i32 = 100;
-pub const SAVE_STATE_SCHEMA_VERSION: u16 = 3;
+pub const SAVE_STATE_SCHEMA_VERSION: u16 = 4;
 // 2: directional multi-target strike volumes and obstruction by fixed geometry.
 // 3: directional shield guard, block and guard break.
 // 4: post-block counterattack opportunity.
-pub const SAVE_STATE_RULES_VERSION: u16 = 4;
+// 5: authored light/heavy combo transitions.
+pub const SAVE_STATE_RULES_VERSION: u16 = 5;
 // physics-engine::World::step(1) integrates velocity as world units per simulation tick.
 // At 60 Hz and 100 world units per meter, 7 units/tick is 4.2 m/s rather than
 // the previous 260 units/tick (156 m/s).
@@ -84,6 +85,23 @@ const COUNTER_RANGE: i64 = 200;
 const COUNTER_DAMAGE_NUMERATOR: u16 = 2;
 const COUNTER_DAMAGE_DENOMINATOR: u16 = 1;
 const COUNTER_STAGGER_TICKS: u8 = 12;
+const LIGHT_FOLLOW_UP_WINDUP_TICKS: u8 = 4;
+const LIGHT_FOLLOW_UP_ACTIVE_TICKS: u8 = 1;
+const LIGHT_FOLLOW_UP_RECOVERY_TICKS: u8 = 8;
+const LIGHT_FINISHER_WINDUP_TICKS: u8 = 6;
+const LIGHT_FINISHER_ACTIVE_TICKS: u8 = 1;
+const LIGHT_FINISHER_RECOVERY_TICKS: u8 = 16;
+const LIGHT_FINISHER_RANGE: i64 = 240;
+const LIGHT_FINISHER_DAMAGE_NUMERATOR: u16 = 3;
+const LIGHT_FINISHER_DAMAGE_DENOMINATOR: u16 = 2;
+const LIGHT_FINISHER_STAGGER_TICKS: u8 = 10;
+const HEAVY_FINISHER_WINDUP_TICKS: u8 = 8;
+const HEAVY_FINISHER_ACTIVE_TICKS: u8 = 1;
+const HEAVY_FINISHER_RECOVERY_TICKS: u8 = 18;
+const HEAVY_FINISHER_RANGE: i64 = 180;
+const HEAVY_FINISHER_DAMAGE_NUMERATOR: u16 = 2;
+const HEAVY_FINISHER_DAMAGE_DENOMINATOR: u16 = 1;
+const HEAVY_FINISHER_STAGGER_TICKS: u8 = 14;
 /// Longest stagger any player strike applies; bounds restored monster reactions.
 const MAX_MONSTER_STAGGER_TICKS: u8 = {
     let mut maximum = PRIMARY_STAGGER_TICKS;
@@ -92,6 +110,12 @@ const MAX_MONSTER_STAGGER_TICKS: u8 = {
     }
     if COUNTER_STAGGER_TICKS > maximum {
         maximum = COUNTER_STAGGER_TICKS;
+    }
+    if LIGHT_FINISHER_STAGGER_TICKS > maximum {
+        maximum = LIGHT_FINISHER_STAGGER_TICKS;
+    }
+    if HEAVY_FINISHER_STAGGER_TICKS > maximum {
+        maximum = HEAVY_FINISHER_STAGGER_TICKS;
     }
     maximum
 };
@@ -202,6 +226,83 @@ pub enum ActionKind {
     Interact,
     /// Fast punishing strike available only through a post-block counter opportunity.
     Counter,
+    /// Second light strike of the sword combo.
+    LightFollowUp,
+    /// Third light strike: wider, harder finisher.
+    LightFinisher,
+    /// Heavy finisher branch after a connecting second light strike.
+    HeavyFinisher,
+}
+
+/// Which attack input continues a combo.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ComboInput {
+    Light,
+    Heavy,
+}
+
+/// One authored combo transition.
+///
+/// Recovery ticks are counted from the first recovery tick (elapsed 0). An attack input
+/// received from the start of the predecessor's active phase until `opens_at` is buffered
+/// (at most one, the first one wins); an input received in the half-open transition interval
+/// `[opens_at, closes_at)` commits immediately, and a buffered input commits on the tick the
+/// interval opens. Inputs during wind-up, after `closes_at` or without a matching transition
+/// are ignored. `requires_hit` transitions only commit when the predecessor's own strike
+/// connected (a blocked or obstructed strike does not count); otherwise the input is dropped
+/// and ordinary recovery continues.
+#[derive(Clone, Copy, Debug)]
+struct ComboTransition {
+    from: ActionKind,
+    input: ComboInput,
+    opens_at: u8,
+    closes_at: u8,
+    requires_hit: bool,
+    to: ActionKind,
+}
+
+const COMBO_TRANSITIONS: &[ComboTransition] = &[
+    ComboTransition {
+        from: ActionKind::PrimaryAttack,
+        input: ComboInput::Light,
+        opens_at: 2,
+        closes_at: PRIMARY_RECOVERY_TICKS,
+        requires_hit: false,
+        to: ActionKind::LightFollowUp,
+    },
+    ComboTransition {
+        from: ActionKind::LightFollowUp,
+        input: ComboInput::Light,
+        opens_at: 2,
+        closes_at: LIGHT_FOLLOW_UP_RECOVERY_TICKS,
+        requires_hit: false,
+        to: ActionKind::LightFinisher,
+    },
+    ComboTransition {
+        from: ActionKind::LightFollowUp,
+        input: ComboInput::Heavy,
+        opens_at: 2,
+        closes_at: LIGHT_FOLLOW_UP_RECOVERY_TICKS,
+        requires_hit: true,
+        to: ActionKind::HeavyFinisher,
+    },
+    // A counter may continue into the second light strike.
+    ComboTransition {
+        from: ActionKind::Counter,
+        input: ComboInput::Light,
+        opens_at: 2,
+        closes_at: COUNTER_RECOVERY_TICKS,
+        requires_hit: false,
+        to: ActionKind::LightFollowUp,
+    },
+];
+
+fn combo_transition(from: ActionKind, input: ComboInput) -> Option<ComboTransition> {
+    COMBO_TRANSITIONS
+        .iter()
+        .copied()
+        .find(|transition| transition.from == from && transition.input == input)
 }
 
 impl ActionKind {
@@ -211,6 +312,9 @@ impl ActionKind {
             Self::SecondaryAttack => SECONDARY_WINDUP_TICKS,
             Self::Interact => INTERACT_WINDUP_TICKS,
             Self::Counter => COUNTER_WINDUP_TICKS,
+            Self::LightFollowUp => LIGHT_FOLLOW_UP_WINDUP_TICKS,
+            Self::LightFinisher => LIGHT_FINISHER_WINDUP_TICKS,
+            Self::HeavyFinisher => HEAVY_FINISHER_WINDUP_TICKS,
         }
     }
 
@@ -220,6 +324,9 @@ impl ActionKind {
             Self::SecondaryAttack => SECONDARY_ACTIVE_TICKS,
             Self::Interact => INTERACT_ACTIVE_TICKS,
             Self::Counter => COUNTER_ACTIVE_TICKS,
+            Self::LightFollowUp => LIGHT_FOLLOW_UP_ACTIVE_TICKS,
+            Self::LightFinisher => LIGHT_FINISHER_ACTIVE_TICKS,
+            Self::HeavyFinisher => HEAVY_FINISHER_ACTIVE_TICKS,
         }
     }
 
@@ -229,6 +336,9 @@ impl ActionKind {
             Self::SecondaryAttack => SECONDARY_RECOVERY_TICKS,
             Self::Interact => INTERACT_RECOVERY_TICKS,
             Self::Counter => COUNTER_RECOVERY_TICKS,
+            Self::LightFollowUp => LIGHT_FOLLOW_UP_RECOVERY_TICKS,
+            Self::LightFinisher => LIGHT_FINISHER_RECOVERY_TICKS,
+            Self::HeavyFinisher => HEAVY_FINISHER_RECOVERY_TICKS,
         }
     }
 }
@@ -248,6 +358,10 @@ pub struct PlayerActionSnapshot {
     pub phase: ActionPhase,
     pub ticks_remaining: u8,
     pub facing: [i8; 2],
+    /// Whether this action's own strike hit a target (combo hit confirmation).
+    pub connected: bool,
+    /// The single buffered combo input waiting for its transition interval.
+    pub buffered: Option<ComboInput>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -575,6 +689,8 @@ struct ActionState {
     ticks_remaining: u8,
     facing_x: i8,
     facing_z: i8,
+    connected: bool,
+    buffered: Option<ComboInput>,
 }
 
 impl ActionState {
@@ -584,6 +700,8 @@ impl ActionState {
             phase: self.phase,
             ticks_remaining: self.ticks_remaining,
             facing: [self.facing_x, self.facing_z],
+            connected: self.connected,
+            buffered: self.buffered,
         }
     }
 }
@@ -696,6 +814,26 @@ const SWORD_HEAVY_THRUST: StrikeDefinition = StrikeDefinition {
 const COUNTER_SLASH: StrikeDefinition = StrikeDefinition {
     id: "sword.counterSlash",
     reach: COUNTER_RANGE,
+    frontal: true,
+    max_targets: 1,
+    blockable: true,
+    guard_cost: 0,
+};
+
+/// Light combo finisher: a wider sweep with longer reach.
+const SWORD_LIGHT_FINISHER: StrikeDefinition = StrikeDefinition {
+    id: "sword.lightFinisher",
+    reach: LIGHT_FINISHER_RANGE,
+    frontal: true,
+    max_targets: usize::MAX,
+    blockable: true,
+    guard_cost: 0,
+};
+
+/// Heavy combo finisher: a committed single-target thrust.
+const SWORD_HEAVY_FINISHER: StrikeDefinition = StrikeDefinition {
+    id: "sword.heavyFinisher",
+    reach: HEAVY_FINISHER_RANGE,
     frontal: true,
     max_targets: 1,
     blockable: true,
@@ -1130,6 +1268,8 @@ impl ArpgGame {
                     ticks_remaining: action.ticks_remaining,
                     facing_x: action.facing[0],
                     facing_z: action.facing[1],
+                    connected: action.connected,
+                    buffered: action.buffered,
                 }),
                 hurt_ticks_remaining: player.hurt_ticks_remaining,
                 guard: player.guard,
@@ -1271,18 +1411,35 @@ impl ArpgGame {
         if action.ticks_remaining == 0 || action.ticks_remaining > maximum_ticks {
             return Err(GameError::new("saved player action timing is invalid"));
         }
+        let strikes = !matches!(action.kind, ActionKind::Interact);
+        if action.connected && (!strikes || action.phase == ActionPhase::Windup) {
+            return Err(GameError::new(
+                "saved player action hit confirmation is invalid",
+            ));
+        }
+        if let Some(input) = action.buffered {
+            let buffered_legally = combo_transition(action.kind, input).is_some_and(|transition| {
+                action.phase == ActionPhase::Active
+                    || (action.phase == ActionPhase::Recovery
+                        && action.kind.recovery_ticks() - action.ticks_remaining
+                            < transition.opens_at)
+            });
+            if !buffered_legally {
+                return Err(GameError::new("saved player combo buffer is invalid"));
+            }
+        }
         Ok(())
+    }
+
+    /// Strike outcomes resolved during the most recent tick, in resolution order.
+    pub fn strike_outcomes(&self) -> &[StrikeOutcome] {
+        &self.strike_outcomes
     }
 
     /// Number of physics-engine ticks stepped by this game since construction.
     ///
     /// Performance evidence uses this operation count to detect regressions
     /// where one gameplay tick begins stepping physics more than once.
-    /// Strike outcomes resolved during the most recent tick, in resolution order.
-    pub fn strike_outcomes(&self) -> &[StrikeOutcome] {
-        &self.strike_outcomes
-    }
-
     pub fn physics_steps(&self) -> u64 {
         self.physics_steps
     }
@@ -1467,14 +1624,77 @@ impl ArpgGame {
         }
         // Committing to an action lowers the shield; a held guard rises again afterwards.
         state.guard.stance = None;
-        state.action = Some(ActionState {
+        state.action = Some(Self::new_action(kind, state));
+        Ok(())
+    }
+
+    fn new_action(kind: ActionKind, state: &PlayerState) -> ActionState {
+        ActionState {
             kind,
             phase: ActionPhase::Windup,
             ticks_remaining: kind.windup_ticks(),
             facing_x: state.facing_x,
             facing_z: state.facing_z,
-        });
-        Ok(())
+            connected: false,
+            buffered: None,
+        }
+    }
+
+    /// Applies an attack input to an action in progress under the combo transition table.
+    fn combo_input(state: &mut PlayerState, input: ComboInput) {
+        let Some(mut action) = state.action else {
+            return;
+        };
+        let Some(transition) = combo_transition(action.kind, input) else {
+            return;
+        };
+        match action.phase {
+            ActionPhase::Windup => {}
+            ActionPhase::Active => {
+                action.buffered.get_or_insert(input);
+                state.action = Some(action);
+            }
+            ActionPhase::Recovery => {
+                let elapsed = action.kind.recovery_ticks() - action.ticks_remaining;
+                if elapsed < transition.opens_at {
+                    action.buffered.get_or_insert(input);
+                    state.action = Some(action);
+                } else if elapsed < transition.closes_at
+                    && (!transition.requires_hit || action.connected)
+                {
+                    state.action = Some(Self::new_action(transition.to, state));
+                }
+            }
+        }
+    }
+
+    /// Commits a buffered combo input on the tick its transition interval opens.
+    fn commit_buffered_combo(state: &mut PlayerState) {
+        let Some(action) = state.action else {
+            return;
+        };
+        let Some(input) = action.buffered else {
+            return;
+        };
+        if action.phase != ActionPhase::Recovery {
+            return;
+        }
+        let Some(transition) = combo_transition(action.kind, input) else {
+            return;
+        };
+        let elapsed = action.kind.recovery_ticks() - action.ticks_remaining;
+        if elapsed < transition.opens_at {
+            return;
+        }
+        state.action = if transition.requires_hit && !action.connected {
+            // The branch was not earned: drop the intent and keep recovering.
+            Some(ActionState {
+                buffered: None,
+                ..action
+            })
+        } else {
+            Some(Self::new_action(transition.to, state))
+        };
     }
 
     fn target_is_in_front(facing_x: i8, facing_z: i8, dx: i64, dz: i64) -> bool {
@@ -1632,6 +1852,19 @@ impl ArpgGame {
                 COUNTER_DAMAGE_DENOMINATOR,
                 COUNTER_STAGGER_TICKS,
             ),
+            ActionKind::LightFollowUp => (SWORD_LIGHT_SWING, 1, 1, PRIMARY_STAGGER_TICKS),
+            ActionKind::LightFinisher => (
+                SWORD_LIGHT_FINISHER,
+                LIGHT_FINISHER_DAMAGE_NUMERATOR,
+                LIGHT_FINISHER_DAMAGE_DENOMINATOR,
+                LIGHT_FINISHER_STAGGER_TICKS,
+            ),
+            ActionKind::HeavyFinisher => (
+                SWORD_HEAVY_FINISHER,
+                HEAVY_FINISHER_DAMAGE_NUMERATOR,
+                HEAVY_FINISHER_DAMAGE_DENOMINATOR,
+                HEAVY_FINISHER_STAGGER_TICKS,
+            ),
             ActionKind::Interact => return Ok(()),
         };
         let attack_damage = Self::attack_damage_for_level(player_level)
@@ -1695,6 +1928,17 @@ impl ArpgGame {
                 result,
             });
         }
+        let connected = self.strike_outcomes.iter().any(|outcome| {
+            outcome.strike == strike && matches!(outcome.result, StrikeResult::Hit { .. })
+        });
+        if connected
+            && let Some(action) = self
+                .players
+                .get_mut(&player_id)
+                .and_then(|state| state.action.as_mut())
+        {
+            action.connected = true;
+        }
         for position in defeated_positions {
             self.award_experience(player_id, MONSTER_EXPERIENCE_REWARD)?;
             self.spawn_ground_loot(position)?;
@@ -1716,6 +1960,7 @@ impl ArpgGame {
                 if action.ticks_remaining > 1 {
                     action.ticks_remaining -= 1;
                     state.action = Some(action);
+                    Self::commit_buffered_combo(state);
                     None
                 } else {
                     match action.phase {
@@ -1729,6 +1974,7 @@ impl ArpgGame {
                             action.phase = ActionPhase::Recovery;
                             action.ticks_remaining = action.kind.recovery_ticks();
                             state.action = Some(action);
+                            Self::commit_buffered_combo(state);
                             None
                         }
                         ActionPhase::Recovery => {
@@ -1742,7 +1988,10 @@ impl ArpgGame {
                 match kind {
                     ActionKind::PrimaryAttack
                     | ActionKind::SecondaryAttack
-                    | ActionKind::Counter => {
+                    | ActionKind::Counter
+                    | ActionKind::LightFollowUp
+                    | ActionKind::LightFinisher
+                    | ActionKind::HeavyFinisher => {
                         self.resolve_attack(player_id, kind, facing_x, facing_z)?;
                     }
                     ActionKind::Interact => self.resolve_interaction(player_id)?,
@@ -2127,7 +2376,9 @@ impl AuthoritativeGame for ArpgGame {
                     .get_mut(&command.player_id)
                     .expect("player existence checked");
                 let counter = state.counter.filter(|counter| counter.usable_at(tick));
-                if counter.is_some() && state.health > 0 && state.action.is_none() {
+                if state.health > 0 && state.action.is_some() {
+                    Self::combo_input(state, ComboInput::Light);
+                } else if counter.is_some() && state.health > 0 && state.action.is_none() {
                     // Starting the counter atomically consumes the opportunity.
                     state.counter = None;
                     self.start_action(command.player_id, ActionKind::Counter)?
@@ -2136,7 +2387,15 @@ impl AuthoritativeGame for ArpgGame {
                 }
             }
             ArpgCommand::SecondaryAttack => {
-                self.start_action(command.player_id, ActionKind::SecondaryAttack)?
+                let state = self
+                    .players
+                    .get_mut(&command.player_id)
+                    .expect("player existence checked");
+                if state.health > 0 && state.action.is_some() {
+                    Self::combo_input(state, ComboInput::Heavy);
+                } else {
+                    self.start_action(command.player_id, ActionKind::SecondaryAttack)?
+                }
             }
             ArpgCommand::Interact => self.start_action(command.player_id, ActionKind::Interact)?,
             ArpgCommand::SetGuard { raised } => {
@@ -2254,7 +2513,7 @@ impl AuthoritativeGame for ArpgGame {
         }));
 
         Ok(ArpgSnapshot {
-            schema_version: 10,
+            schema_version: 11,
             run_seed: self.run_seed,
             tick: self.tick,
             world_units_per_meter: WORLD_UNITS_PER_METER,
@@ -4143,6 +4402,8 @@ mod tests {
             ticks_remaining: 1,
             facing_x: 1,
             facing_z: 0,
+            connected: false,
+            buffered: None,
         });
         command(&mut game, ArpgCommand::PrimaryAttack);
         assert_eq!(action_kind(&game), Some(ActionKind::Interact));
@@ -4283,6 +4544,318 @@ mod tests {
         }
     }
 
+    fn current_action(game: &ArpgGame) -> Option<ActionState> {
+        game.players.get(&1).unwrap().action
+    }
+
+    /// Advances until the player's action is `kind` in recovery with `elapsed` recovery ticks.
+    fn advance_to_recovery(game: &mut ArpgGame, kind: ActionKind, elapsed: u8) {
+        for _ in 0..200 {
+            if let Some(action) = current_action(game)
+                && action.kind == kind
+                && action.phase == ActionPhase::Recovery
+                && kind.recovery_ticks() - action.ticks_remaining == elapsed
+            {
+                return;
+            }
+            game.advance_tick().unwrap();
+        }
+        panic!("never reached {kind:?} recovery tick {elapsed}");
+    }
+
+    fn advance_to_phase(game: &mut ArpgGame, kind: ActionKind, phase: ActionPhase) {
+        for _ in 0..200 {
+            if current_action(game)
+                .is_some_and(|action| action.kind == kind && action.phase == phase)
+            {
+                return;
+            }
+            game.advance_tick().unwrap();
+        }
+        panic!("never reached {kind:?} {phase:?}");
+    }
+
+    fn combo_arena(target: bool) -> ArpgGame {
+        let (mut game, x, z) = strike_arena();
+        // A sturdy target ahead, or one far behind that keeps the encounter active.
+        place_monster(&mut game, 1, if target { x + 120 } else { x - 600 }, z);
+        game.monsters[0].health = 1_000;
+        game
+    }
+
+    fn player_definitions(game: &mut ArpgGame) -> Vec<&'static str> {
+        let mut definitions = Vec::new();
+        while current_action(game).is_some() {
+            game.advance_tick().unwrap();
+            definitions.extend(
+                game.strike_outcomes()
+                    .iter()
+                    .filter(|outcome| outcome.strike.source == StrikeSource::Player(1))
+                    .map(|outcome| outcome.definition),
+            );
+        }
+        definitions
+    }
+
+    #[test]
+    fn light_light_light_chains_into_the_finisher() {
+        let mut game = combo_arena(true);
+        command(&mut game, ArpgCommand::PrimaryAttack);
+        advance_to_recovery(&mut game, ActionKind::PrimaryAttack, 2);
+        command(&mut game, ArpgCommand::PrimaryAttack);
+        assert_eq!(action_kind(&game), Some(ActionKind::LightFollowUp));
+        advance_to_recovery(&mut game, ActionKind::LightFollowUp, 3);
+        command(&mut game, ArpgCommand::PrimaryAttack);
+        assert_eq!(action_kind(&game), Some(ActionKind::LightFinisher));
+        assert_eq!(player_definitions(&mut game), ["sword.lightFinisher"]);
+        // The chain ends with the finisher; the next press starts over.
+        command(&mut game, ArpgCommand::PrimaryAttack);
+        assert_eq!(action_kind(&game), Some(ActionKind::PrimaryAttack));
+    }
+
+    #[test]
+    fn light_light_heavy_finisher_requires_the_second_strike_to_connect() {
+        let mut game = combo_arena(true);
+        command(&mut game, ArpgCommand::PrimaryAttack);
+        advance_to_recovery(&mut game, ActionKind::PrimaryAttack, 2);
+        command(&mut game, ArpgCommand::PrimaryAttack);
+        advance_to_recovery(&mut game, ActionKind::LightFollowUp, 2);
+        assert!(current_action(&game).unwrap().connected);
+        command(&mut game, ArpgCommand::SecondaryAttack);
+        assert_eq!(action_kind(&game), Some(ActionKind::HeavyFinisher));
+        assert_eq!(player_definitions(&mut game), ["sword.heavyFinisher"]);
+
+        let mut whiff = combo_arena(false);
+        command(&mut whiff, ArpgCommand::PrimaryAttack);
+        advance_to_recovery(&mut whiff, ActionKind::PrimaryAttack, 2);
+        command(&mut whiff, ArpgCommand::PrimaryAttack);
+        advance_to_recovery(&mut whiff, ActionKind::LightFollowUp, 2);
+        assert!(!current_action(&whiff).unwrap().connected);
+        command(&mut whiff, ArpgCommand::SecondaryAttack);
+        assert_eq!(
+            action_kind(&whiff),
+            Some(ActionKind::LightFollowUp),
+            "no hit, no heavy branch"
+        );
+        command(&mut whiff, ArpgCommand::PrimaryAttack);
+        assert_eq!(
+            action_kind(&whiff),
+            Some(ActionKind::LightFinisher),
+            "whiffs may continue light"
+        );
+    }
+
+    #[test]
+    fn transition_interval_boundaries_are_half_open_and_early_inputs_buffer() {
+        // Pressing at recovery tick `elapsed` of the opening light strike (recovery 8).
+        for (elapsed, expected) in [
+            (0, ActionKind::PrimaryAttack),
+            (1, ActionKind::PrimaryAttack),
+            (2, ActionKind::LightFollowUp),
+            (7, ActionKind::LightFollowUp),
+        ] {
+            let mut game = combo_arena(false);
+            command(&mut game, ArpgCommand::PrimaryAttack);
+            advance_to_recovery(&mut game, ActionKind::PrimaryAttack, elapsed);
+            command(&mut game, ArpgCommand::PrimaryAttack);
+            assert_eq!(
+                action_kind(&game),
+                Some(expected),
+                "pressed at recovery {elapsed}"
+            );
+            if elapsed < 2 {
+                assert_eq!(
+                    current_action(&game).unwrap().buffered,
+                    Some(ComboInput::Light)
+                );
+                advance_to_recovery(&mut game, ActionKind::PrimaryAttack, 1);
+                game.advance_tick().unwrap();
+                assert_eq!(
+                    action_kind(&game),
+                    Some(ActionKind::LightFollowUp),
+                    "a buffered input commits as the interval opens"
+                );
+                assert_eq!(current_action(&game).unwrap().buffered, None);
+            }
+        }
+
+        // After the interval the opener has ended and a press starts over.
+        let mut game = combo_arena(false);
+        command(&mut game, ArpgCommand::PrimaryAttack);
+        advance_to_recovery(&mut game, ActionKind::PrimaryAttack, 7);
+        game.advance_tick().unwrap();
+        assert_eq!(action_kind(&game), None);
+        command(&mut game, ArpgCommand::PrimaryAttack);
+        assert_eq!(action_kind(&game), Some(ActionKind::PrimaryAttack));
+    }
+
+    #[test]
+    fn wind_up_presses_are_ignored_and_spam_keeps_one_intent() {
+        let mut game = combo_arena(false);
+        command(&mut game, ArpgCommand::PrimaryAttack);
+        command(&mut game, ArpgCommand::PrimaryAttack);
+        assert_eq!(
+            current_action(&game).unwrap().buffered,
+            None,
+            "wind-up press ignored"
+        );
+
+        advance_to_phase(&mut game, ActionKind::PrimaryAttack, ActionPhase::Active);
+        for _ in 0..5 {
+            command(&mut game, ArpgCommand::PrimaryAttack);
+            command(&mut game, ArpgCommand::SecondaryAttack);
+        }
+        assert_eq!(
+            current_action(&game).unwrap().buffered,
+            Some(ComboInput::Light)
+        );
+        advance_to_phase(&mut game, ActionKind::LightFollowUp, ActionPhase::Windup);
+        assert_eq!(current_action(&game).unwrap().buffered, None);
+        // The follow-up then runs its full course with no hidden queued successor.
+        while current_action(&game).is_some() {
+            assert_ne!(action_kind(&game), Some(ActionKind::LightFinisher));
+            game.advance_tick().unwrap();
+        }
+    }
+
+    #[test]
+    fn an_unearned_buffered_heavy_branch_is_dropped_at_the_interval() {
+        let mut game = combo_arena(false);
+        command(&mut game, ArpgCommand::PrimaryAttack);
+        advance_to_recovery(&mut game, ActionKind::PrimaryAttack, 2);
+        command(&mut game, ArpgCommand::PrimaryAttack);
+        advance_to_phase(&mut game, ActionKind::LightFollowUp, ActionPhase::Active);
+        command(&mut game, ArpgCommand::SecondaryAttack);
+        assert_eq!(
+            current_action(&game).unwrap().buffered,
+            Some(ComboInput::Heavy)
+        );
+        advance_to_recovery(&mut game, ActionKind::LightFollowUp, 2);
+        let action = current_action(&game).unwrap();
+        assert_eq!(
+            (action.kind, action.buffered),
+            (ActionKind::LightFollowUp, None)
+        );
+    }
+
+    #[test]
+    fn same_tick_inputs_resolve_in_sequence_order() {
+        for (first, second, expected) in [
+            (
+                ArpgCommand::SecondaryAttack,
+                ArpgCommand::PrimaryAttack,
+                ActionKind::HeavyFinisher,
+            ),
+            (
+                ArpgCommand::PrimaryAttack,
+                ArpgCommand::SecondaryAttack,
+                ActionKind::LightFinisher,
+            ),
+        ] {
+            let mut game = combo_arena(true);
+            command(&mut game, ArpgCommand::PrimaryAttack);
+            advance_to_recovery(&mut game, ActionKind::PrimaryAttack, 2);
+            command(&mut game, ArpgCommand::PrimaryAttack);
+            advance_to_recovery(&mut game, ActionKind::LightFollowUp, 2);
+            command(&mut game, first);
+            command(&mut game, second);
+            let action = current_action(&game).unwrap();
+            assert_eq!((action.kind, action.phase), (expected, ActionPhase::Windup));
+            assert_eq!(
+                action.buffered, None,
+                "the second input hits the successor's wind-up"
+            );
+        }
+    }
+
+    #[test]
+    fn heavy_openers_and_interactions_have_no_light_combo() {
+        let mut game = combo_arena(false);
+        command(&mut game, ArpgCommand::SecondaryAttack);
+        advance_to_recovery(&mut game, ActionKind::SecondaryAttack, 3);
+        command(&mut game, ArpgCommand::PrimaryAttack);
+        assert_eq!(action_kind(&game), Some(ActionKind::SecondaryAttack));
+    }
+
+    #[test]
+    fn interruption_and_death_clear_the_chain() {
+        let mut game = combo_arena(false);
+        command(&mut game, ArpgCommand::PrimaryAttack);
+        advance_to_phase(&mut game, ActionKind::PrimaryAttack, ActionPhase::Active);
+        command(&mut game, ArpgCommand::PrimaryAttack);
+        place_monster(&mut game, 2, 0, 0);
+        let (x, z) = {
+            let position = game
+                .world
+                .body(ArpgGame::player_body_id(1))
+                .unwrap()
+                .position();
+            (position.x, position.z)
+        };
+        game.monsters[1].position = Vec3i::new(x - 100, PLAYER_Y, z);
+        game.monsters[1].room_id = STRIKE_ROOM;
+        assert_eq!(claw(&mut game, 2), CLAW_HIT);
+        assert_eq!(current_action(&game).map(|action| action.kind), None);
+        game.advance_tick().unwrap();
+        game.advance_tick().unwrap();
+        assert_eq!(
+            action_kind(&game),
+            None,
+            "the buffered successor died with the action"
+        );
+    }
+
+    #[test]
+    fn a_counter_continues_into_the_declared_follow_up() {
+        let (mut game, _, _) = blocked_once(120);
+        command(&mut game, ArpgCommand::PrimaryAttack);
+        assert_eq!(action_kind(&game), Some(ActionKind::Counter));
+        advance_to_recovery(&mut game, ActionKind::Counter, 2);
+        command(&mut game, ArpgCommand::PrimaryAttack);
+        assert_eq!(action_kind(&game), Some(ActionKind::LightFollowUp));
+    }
+
+    #[test]
+    fn saving_mid_chain_with_a_buffered_input_continues_identically() {
+        let mut game = ArpgGame::new_with_seed(42).unwrap();
+        game.add_player(1).unwrap();
+        game.apply_command(PlayerCommand::new(1, 1, ArpgCommand::PrimaryAttack).unwrap())
+            .unwrap();
+        advance_to_phase(&mut game, ActionKind::PrimaryAttack, ActionPhase::Active);
+        game.apply_command(PlayerCommand::new(1, 2, ArpgCommand::PrimaryAttack).unwrap())
+            .unwrap();
+        assert!(current_action(&game).unwrap().buffered.is_some());
+        let save = game.save_state().unwrap();
+        let mut restored = ArpgGame::from_save_state(save.clone()).unwrap();
+        for _ in 0..30 {
+            game.advance_tick().unwrap();
+            restored.advance_tick().unwrap();
+            assert_eq!(restored.snapshot().unwrap(), game.snapshot().unwrap());
+        }
+
+        let mut tampered = save.clone();
+        let action = tampered.players[0].action.as_mut().unwrap();
+        action.buffered = Some(ComboInput::Heavy);
+        assert!(
+            ArpgGame::from_save_state(tampered)
+                .unwrap_err()
+                .message()
+                .contains("combo")
+        );
+        let mut tampered = save;
+        let action = tampered.players[0].action.as_mut().unwrap();
+        action.phase = ActionPhase::Windup;
+        action.ticks_remaining = 1;
+        action.buffered = None;
+        action.connected = true;
+        assert!(
+            ArpgGame::from_save_state(tampered)
+                .unwrap_err()
+                .message()
+                .contains("hit confirmation")
+        );
+    }
+
     #[test]
     fn generated_rooms_are_large_enough_for_arpg_combat() {
         for seed in 0..64 {
@@ -4385,7 +4958,7 @@ mod tests {
         game.add_player(1).unwrap();
         let snapshot = game.snapshot().unwrap();
         let generated = generate_dungeon(snapshot.run_seed);
-        assert_eq!(snapshot.schema_version, 10);
+        assert_eq!(snapshot.schema_version, 11);
         assert_eq!(snapshot.run_seed, 0xDEAD_BEEF);
         assert_eq!(game.run_seed(), snapshot.run_seed);
         assert_eq!(snapshot.rooms, generated.rooms);

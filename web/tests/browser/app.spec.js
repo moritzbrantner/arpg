@@ -161,3 +161,43 @@ test("holding guard raises the authoritative shield and releasing lowers it", as
   await expect(guard).not.toHaveAttribute("data-guard", /.+/);
   await page.keyboard.up("f");
 });
+
+test("timed attacks chain into the light combo and a missed window starts over", async ({
+  page,
+  appUrl,
+}) => {
+  await page.goto(`${appUrl}?scenario=training&seed=42`);
+  await page.getByRole("button", { name: "Pause", exact: true }).click();
+  const step = page.getByRole("button", { name: "Step", exact: true });
+  const diagnostics = page.locator(".training-diagnostics");
+  // Commands apply immediately; the paused view updates on the next simulation step.
+  const pressAndStep = async () => {
+    await page.evaluate(() => document.activeElement?.blur());
+    await page.keyboard.press("Space");
+    await step.click();
+  };
+  const stepUntil = async (text) => {
+    for (let tick = 0; tick < 40; tick += 1) {
+      if ((await diagnostics.textContent()).includes(text)) return;
+      await step.click();
+    }
+    throw new Error(`never reached ${text}`);
+  };
+
+  await pressAndStep();
+  await expect(diagnostics).toContainText("primaryAttack · windup");
+  // Recovery tick 2 of the opener (8 recovery ticks) opens the follow-up interval.
+  await stepUntil("primaryAttack · recovery · 6t");
+  await pressAndStep();
+  await expect(diagnostics).toContainText("lightFollowUp · windup");
+  await stepUntil("lightFollowUp · recovery · 6t");
+  await pressAndStep();
+  await expect(diagnostics).toContainText("lightFinisher · windup");
+
+  // Missing the interval: once the opener has recovered, a press starts over.
+  await stepUntil("idle");
+  await pressAndStep();
+  await stepUntil("idle");
+  await pressAndStep();
+  await expect(diagnostics).toContainText("primaryAttack · windup");
+});
