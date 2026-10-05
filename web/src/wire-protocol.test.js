@@ -13,8 +13,10 @@ const payload = {
   arrows: [],
   scenario: "dungeon",
   strikeEvents: [],
+  chests: [],
+  interactionEvents: [],
 };
-const encode = (value) => JSON.stringify({ protocolVersion: 11, payload: value });
+const encode = (value) => JSON.stringify({ protocolVersion: 12, payload: value });
 
 test("admits bounded presentation data and rejects malformed vectors and collections", () => {
   expect(decodeSnapshot(encode(payload))).toEqual(payload);
@@ -61,6 +63,7 @@ const player = {
   },
   weapon: "bow",
   drawTicks: 12,
+  interaction: { kind: "available", target: { kind: "chest", id: 50002 } },
 };
 
 test("admits shield guard state and rejects malformed guard data", () => {
@@ -77,6 +80,8 @@ test("admits shield guard state and rejects malformed guard data", () => {
     { ...player, action: { ...player.action, connected: undefined } },
     { ...player, weapon: "spear" },
     { ...player, drawTicks: -1 },
+    { ...player, interaction: { kind: "available", target: { kind: "door", id: 1 } } },
+    { ...player, interaction: { kind: "unavailable", reason: "tooTired" } },
   ])
     expect(() => decodeSnapshot(encode({ ...payload, players: [candidate] }))).toThrow();
 });
@@ -98,6 +103,25 @@ test("admits workbench scenario and strike events and rejects malformed ones", (
     { ...payload, strikeEvents: [{ ...event, source: { kind: "ghost", id: 1 } }] },
     { ...payload, strikeEvents: [{ ...event, result: { kind: "parried" } }] },
     { ...payload, strikeEvents: [{ ...event, definition: "x".repeat(65) }] },
+  ])
+    expect(() => decodeSnapshot(encode(candidate))).toThrow();
+});
+
+test("admits chests and interaction results and rejects malformed ones", () => {
+  const chest = { id: 50002, roomId: 2, position: [0, 50, 0], opened: false, available: true };
+  const picked = {
+    playerId: 1,
+    result: { kind: "pickedUp", target: { kind: "loot", id: 30000 }, gold: 10 },
+  };
+  const refused = { playerId: 2, result: { kind: "refused", reason: "chestLocked" } };
+  const decoded = decodeSnapshot(
+    encode({ ...payload, chests: [chest], interactionEvents: [picked, refused] }),
+  );
+  expect(decoded.interactionEvents).toHaveLength(2);
+  for (const candidate of [
+    { ...payload, chests: [{ ...chest, opened: "yes" }] },
+    { ...payload, interactionEvents: [{ ...picked, result: { ...picked.result, gold: -1 } }] },
+    { ...payload, interactionEvents: [{ ...refused, result: { kind: "refused", reason: "x" } }] },
   ])
     expect(() => decodeSnapshot(encode(candidate))).toThrow();
 });

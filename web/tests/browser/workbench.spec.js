@@ -7,7 +7,7 @@ async function openScenario(page, appUrl, fixture) {
   await page.getByRole("button", { name: "Pause", exact: true }).click();
   await page.evaluate(() => document.activeElement?.blur());
   const step = page.getByRole("button", { name: "Step", exact: true });
-  const timeline = page.getByRole("region", { name: "Strike timeline" });
+  const timeline = page.getByRole("region", { name: "Event timeline" });
   const diagnostics = page.locator(".training-diagnostics");
   const steps = async (count) => {
     for (let tick = 0; tick < count; tick += 1) await step.click();
@@ -48,7 +48,7 @@ test("melee scenarios show a forward hit, an aimed-away whiff and a blocked stri
   await page.keyboard.up("a");
   await whiff.press("Space");
   await whiff.stepUntil(whiff.diagnostics, "primaryAttack · recovery");
-  await expect(whiff.timeline).toContainText("No strikes yet");
+  await expect(whiff.timeline).toContainText("No events yet");
 
   const blocked = await openScenario(page, appUrl, "obstructed");
   await blocked.press("Space");
@@ -97,6 +97,31 @@ test("archery scenarios show an arrow hit and an arrow stopped by a pillar", asy
     await range.stepUntil(range.diagnostics, "Arrows1");
     await range.stepUntil(range.diagnostics, "Arrows0");
     if (hits) await expect(range.timeline).toContainText("bow.arrow · player 1 → monster 1 · hit");
-    else await expect(range.timeline).toContainText("No strikes yet");
+    else await expect(range.timeline).toContainText("No events yet");
   }
+});
+
+test("a defeated dummy drops gold that the authority prompts for and pays once", async ({
+  page,
+  appUrl,
+}) => {
+  const arena = await openScenario(page, appUrl, "dummy");
+  for (let swing = 0; swing < 4; swing += 1) {
+    await arena.press("Space");
+    await arena.steps(1);
+    await arena.stepUntil(arena.diagnostics, "Player actionidle");
+  }
+  await expect(arena.timeline).toContainText("defeated");
+  // Walk towards the drop until the authority offers it.
+  const hud = page.getByRole("region", { name: "Player status" });
+  await page.keyboard.down("d");
+  await arena.stepUntil(hud, "E · Pick up gold");
+  await page.keyboard.up("d");
+  await arena.steps(2);
+  await arena.press("e");
+  await arena.stepUntil(arena.timeline, "picked up loot");
+  await expect(hud).toContainText("Gold 10");
+  await arena.stepUntil(arena.diagnostics, "Player actionidle");
+  await arena.press("e");
+  await arena.stepUntil(arena.timeline, "interact refused · nothingInRange");
 });
