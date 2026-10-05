@@ -24,11 +24,13 @@ const snapshotJson = (tick, players = [1]) =>
         gold: 0,
         guardPoints: 100,
         maxGuardPoints: 100,
+        weapon: "swordAndShield",
       })),
       monsters: [],
       rooms: [],
       staticColliders: [],
       groundLoot: [],
+      arrows: [],
     },
   });
 
@@ -537,4 +539,69 @@ test("restoring a save that held guard releases it for this client", () => {
   expect(restored.commands).toEqual([
     { playerId: 1, sequence: 4, payload: { type: "setGuard", raised: false } },
   ]);
+});
+
+test("a held bow draw shoots on release and is cancelled, never fired, on focus loss", () => {
+  const { runtime, games } = harness();
+  runtime.startLocal({ seed: 1 });
+  runtime.setBowDraw("keyboard", true);
+  runtime.setBowDraw("keyboard", true);
+  runtime.setBowDraw("keyboard", false);
+  runtime.setBowDraw("keyboard", false);
+  runtime.setBowDraw("keyboard", true);
+  runtime.releaseInput();
+  runtime.setBowDraw("keyboard", false);
+  expect(games[0].commands.map((command) => command.payload.type)).toEqual([
+    "drawBow",
+    "releaseBow",
+    "drawBow",
+    "cancelBow",
+  ]);
+});
+
+test("bow holds are tracked per device and interrupted holds cancel", () => {
+  const { runtime, games } = harness();
+  runtime.startLocal({ seed: 1 });
+  runtime.setBowDraw("keyboard", true);
+  runtime.setBowDraw("touch", true);
+  runtime.setBowDraw("touch", false);
+  runtime.setBowDraw("keyboard", false);
+  runtime.setBowDraw("touch", true);
+  runtime.setBowDraw("touch", false, { interrupted: true });
+  runtime.setBowDraw("touch", false);
+  expect(games[0].commands.map((command) => command.payload.type)).toEqual([
+    "drawBow",
+    "releaseBow",
+    "drawBow",
+    "cancelBow",
+  ]);
+});
+
+test("cancelling a held draw clears every device so the next press draws again", () => {
+  const { runtime, games } = harness();
+  runtime.startLocal({ seed: 1 });
+  runtime.setBowDraw("keyboard", true);
+  runtime.cancelBowDraw();
+  runtime.cancelBowDraw();
+  runtime.setBowDraw("keyboard", false);
+  runtime.setBowDraw("keyboard", true);
+  expect(games[0].commands.map((command) => command.payload.type)).toEqual([
+    "drawBow",
+    "cancelBow",
+    "drawBow",
+  ]);
+});
+
+test("restoring a save mid-draw cancels the draw for this client", () => {
+  const { runtime } = harness();
+  const restored = new FakeGame(5);
+  restored.addPlayer(1);
+  runtime.restore({
+    game: restored,
+    controlledPlayerId: 1,
+    lastSequence: 3,
+    movement: [0, 0],
+    drawHeld: true,
+  });
+  expect(restored.commands).toEqual([{ playerId: 1, sequence: 4, payload: { type: "cancelBow" } }]);
 });

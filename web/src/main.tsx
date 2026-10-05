@@ -86,6 +86,7 @@ const inputRegistry = {
     ["game.secondaryAttack", "Heavy attack", "KeyQ", "never", "Combat"],
     ["game.interact", "Interact / pick up", "KeyE", "never", "Interaction"],
     ["game.guard", "Raise shield (hold)", "KeyF", "never", "Combat"],
+    ["game.switchWeapon", "Switch sword / bow", "KeyX", "never", "Combat"],
   ]
     .map(([id, title, code, repeatPolicy, category]) => ({
       id,
@@ -274,8 +275,26 @@ function buildFrame(snapshot, focusPlayerId, width, height, focusPlayerAccent = 
             },
           ]
         : [];
+      const bow =
+        player.weapon === "bow"
+          ? [
+              {
+                id: `player-bow-${player.id}`,
+                geometry: { kind: "box", size: [0.06, 0.7, 0.06] },
+                color: player.drawTicks != null ? "#f5df9b" : "#9d8060",
+                transform: {
+                  translation: [
+                    position[0] + facingX * (player.drawTicks != null ? 0.5 : 0.36),
+                    Math.max(position[1], 0.5),
+                    position[2] + facingZ * (player.drawTicks != null ? 0.5 : 0.36),
+                  ],
+                },
+              },
+            ]
+          : [];
       return [
         ...shield,
+        ...bow,
         {
           id: `player-${player.id}`,
           geometry: { kind: "cylinder", radius: 0.3, height: 1 },
@@ -295,6 +314,19 @@ function buildFrame(snapshot, focusPlayerId, width, height, focusPlayerAccent = 
           },
         },
       ];
+    }),
+    ...(snapshot.arrows ?? []).map((arrow) => {
+      const translation = arrow.position.map((value) => value / scale);
+      const yaw = Math.atan2(arrow.velocity[0], arrow.velocity[2]);
+      return {
+        id: `arrow-${arrow.id}`,
+        geometry: { kind: "box", size: [0.04, 0.04, 0.5] },
+        color: "#e8dcc0",
+        transform: {
+          translation: [translation[0], Math.max(translation[1], 0.55), translation[2]],
+          rotationQuaternion: [0, Math.sin(yaw / 2), 0, Math.cos(yaw / 2)],
+        },
+      };
     }),
     ...snapshot.monsters
       .filter((monster) => monster.alive)
@@ -488,6 +520,24 @@ function App() {
     if (!playerId || !currentPlayer()?.alive) return;
     runtime.dispatch({ type });
   };
+
+  // Reads the focused player from the runtime, so long-lived input handlers never hold a
+  // stale player id.
+  const focusedPlayer = useCallback(() => {
+    const id = runtime.getState().playerId;
+    return snapshotStore.getSnapshot()?.players.find((player) => player.id === id) ?? null;
+  }, [runtime, snapshotStore]);
+
+  const switchWeapon = useCallback(() => {
+    const player = focusedPlayer();
+    if (!player?.alive) return;
+    // Switching never fires: any held draw is cancelled first.
+    runtime.cancelBowDraw();
+    runtime.dispatch({
+      type: "equipWeapon",
+      weapon: player.weapon === "bow" ? "swordAndShield" : "bow",
+    });
+  }, [focusedPlayer, runtime]);
 
   const leaveTrainingUrl = () => {
     history.replaceState(null, "", withTrainingRequest(location.href, false, 0));
@@ -689,6 +739,19 @@ function App() {
           return;
         }
         if (settingsOpen) return;
+        // Always forward a release so a draw held across a weapon switch cannot stick.
+        if (dispatch.action === "game.primaryAttack" && dispatch.phase === "release") {
+          runtime.setBowDraw("keyboard", false);
+          return;
+        }
+        if (dispatch.action === "game.primaryAttack" && focusedPlayer()?.weapon === "bow") {
+          if (dispatch.phase === "press") runtime.setBowDraw("keyboard", true);
+          return;
+        }
+        if (dispatch.action === "game.switchWeapon") {
+          if (dispatch.phase === "press") switchWeapon();
+          return;
+        }
         const combatCommand = {
           "game.primaryAttack": "primaryAttack",
           "game.secondaryAttack": "secondaryAttack",
@@ -718,7 +781,7 @@ function App() {
       stopPropagation: true,
     });
     return detach;
-  }, [ready, inWorld, profile, settingsOpen, runtime]);
+  }, [ready, inWorld, profile, settingsOpen, runtime, focusedPlayer, switchWeapon]);
 
   const updateProfile = (next) => {
     if (!persistStoredValue(PROFILE_KEY, JSON.stringify(next)))
@@ -776,6 +839,7 @@ function App() {
       lastSequence: savedPlayer.lastSequence ?? 0,
       movement: [savedPlayer.movement?.[0] ?? 0, savedPlayer.movement?.[1] ?? 0],
       guardHeld: savedPlayer.guard?.held === true,
+      drawHeld: savedPlayer.drawTicks != null,
     });
     initialRunSeedRef.current = null;
     leaveTrainingUrl();
@@ -1104,6 +1168,10 @@ function App() {
           playerId={playerId}
           triggerCombatAction={triggerCombatAction}
           setTouchGuard={(held) => runtime.setGuard("touch", held)}
+          setTouchDraw={(held, interrupted = false) =>
+            runtime.setBowDraw("touch", held, { interrupted })
+          }
+          switchWeapon={switchWeapon}
         />
       )}
 

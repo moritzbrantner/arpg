@@ -1,6 +1,6 @@
-// Browser projection of the arpg-protocol v9 envelope. This adapter validates
+// Browser projection of the arpg-protocol v10 envelope. This adapter validates
 // only data consumed by presentation; gameplay rules remain in arpg-core.
-export const PROTOCOL_VERSION = 9;
+export const PROTOCOL_VERSION = 10;
 const MAX_SNAPSHOT_CHARACTERS = 65_535;
 const integer = (value) => Number.isSafeInteger(value);
 const nonNegative = (value) => integer(value) && value >= 0;
@@ -15,7 +15,9 @@ const kinds = new Set([
   "lightFollowUp",
   "lightFinisher",
   "heavyFinisher",
+  "shoot",
 ]);
+const weapons = new Set(["swordAndShield", "bow"]);
 const comboInputs = new Set(["light", "heavy"]);
 const playerReactions = new Set(["hurt", "blocked", "guardBroken"]);
 const guardPhases = new Set(["raising", "raised"]);
@@ -64,7 +66,8 @@ export function decodeSnapshot(encoded) {
             kinds.has(value.kind) &&
             vector(value.facing, 2) &&
             typeof value.connected === "boolean" &&
-            optional(value.buffered, (input) => comboInputs.has(input)),
+            optional(value.buffered, (input) => comboInputs.has(input)) &&
+            nonNegative(value.charge),
         ) &&
         optional(
           player.reaction,
@@ -83,7 +86,18 @@ export function decodeSnapshot(encoded) {
             nonNegative(value?.usableFromTick) &&
             nonNegative(value.expiresAtTick) &&
             value.usableFromTick < value.expiresAtTick,
-        ),
+        ) &&
+        weapons.has(player.weapon) &&
+        optional(player.drawTicks, nonNegative),
+    ) &&
+    list(
+      "arrows",
+      (arrow) =>
+        nonNegative(arrow?.id) &&
+        nonNegative(arrow.ownerId) &&
+        vector(arrow.position, 3) &&
+        vector(arrow.velocity, 3) &&
+        nonNegative(arrow.ticksRemaining),
     ) &&
     list(
       "monsters",

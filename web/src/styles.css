@@ -1043,11 +1043,26 @@ select {
   .hud p {
     font-size: 0.78rem;
   }
+  /* Five controls wrap into rows beside the movement stick instead of overflowing. */
   .combat-actions {
-    gap: 0.55rem;
+    flex-wrap: wrap-reverse;
+    justify-content: flex-end;
+    gap: 0.4rem;
+    max-width: calc(
+      100% - clamp(6rem, 26vw, 8.75rem) - 2.5rem - env(safe-area-inset-left) -
+        env(safe-area-inset-right)
+    );
+  }
+  .virtual-stick {
+    width: clamp(6rem, 26vw, 8.75rem);
   }
   .combat-action {
-    width: clamp(4.5rem, 18vw, 5.5rem);
+    width: clamp(3.25rem, 15vw, 5.5rem);
+    padding: 0.2rem;
+  }
+  .combat-action strong {
+    font-size: clamp(0.66rem, 2.9vw, 0.88rem);
+    letter-spacing: 0;
   }
   .combat-action span {
     display: none;
@@ -1252,4 +1267,20 @@ select {
 .counter-prompt {
   color: #f5df9b;
   font-weight: 700;
+}
+
+.combat-action-swap {
+  border-color: #8a7a9c;
+  background: #3a3248e8;
+}
+.combat-action-primary[data-draw="drawing"] {
+  box-shadow:
+    0 0 0 3px #f5df9b,
+    0 0.4rem 1.5rem #0008;
+}
+.progression {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.2rem 0.75rem;
 }

@@ -201,3 +201,66 @@ test("timed attacks chain into the light combo and a missed window starts over",
   await pressAndStep();
   await expect(diagnostics).toContainText("primaryAttack · windup");
 });
+
+test("the bow draws while held, shoots one arrow on release and cancels on blur", async ({
+  page,
+  appUrl,
+}) => {
+  await page.goto(`${appUrl}?scenario=training&seed=42`);
+  const draw = page.getByRole("button", { name: "Draw bow", exact: true });
+  const arrows = page.locator(".training-diagnostics div").filter({ hasText: "Arrows" });
+  await page.getByRole("button", { name: "Switch to bow", exact: true }).waitFor();
+  await page.evaluate(() => document.activeElement?.blur());
+  await page.keyboard.press("x");
+  await expect(draw).toBeVisible();
+
+  await page.keyboard.down("Space");
+  await expect(draw).toHaveAttribute("data-draw", "drawing");
+  await page.waitForTimeout(600);
+  await page.keyboard.up("Space");
+  await expect(arrows).toContainText("Arrows1");
+  await expect(arrows).toContainText("Arrows0", { timeout: 5_000 });
+
+  await page.keyboard.down("Space");
+  await expect(draw).toHaveAttribute("data-draw", "drawing");
+  await page.waitForTimeout(600);
+  await page.evaluate(() => window.dispatchEvent(new Event("blur")));
+  await expect(draw).not.toHaveAttribute("data-draw", /.+/);
+  await page.keyboard.up("Space");
+  await page.waitForTimeout(300);
+  await expect(arrows).toContainText("Arrows0");
+});
+
+test("all combat controls stay reachable on the narrowest phones", async ({ browser, appUrl }) => {
+  for (const width of [320, 360, 390]) {
+    const context = await browser.newContext({
+      viewport: { width, height: 640 },
+      hasTouch: true,
+      isMobile: true,
+    });
+    const page = await context.newPage();
+    try {
+      await page.goto(`${appUrl}?scenario=training&seed=42`);
+      const controls = page.getByRole("region", { name: "Combat actions" }).getByRole("button");
+      await expect(controls).toHaveCount(5);
+      const stick = await page.getByRole("group", { name: "Movement joystick" }).boundingBox();
+      const boxes = [];
+      for (const control of await controls.all()) boxes.push(await control.boundingBox());
+      for (const box of boxes) {
+        expect(box.x).toBeGreaterThanOrEqual(0);
+        expect(box.x + box.width).toBeLessThanOrEqual(width);
+        expect(box.x).toBeGreaterThanOrEqual(stick.x + stick.width);
+      }
+      for (const [index, box] of boxes.entries())
+        for (const other of boxes.slice(index + 1))
+          expect(
+            box.x + box.width <= other.x ||
+              other.x + other.width <= box.x ||
+              box.y + box.height <= other.y ||
+              other.y + other.height <= box.y,
+          ).toBe(true);
+    } finally {
+      await context.close();
+    }
+  }
+});

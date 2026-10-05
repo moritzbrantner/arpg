@@ -106,6 +106,8 @@ export interface RestoredGame {
   movement: [number, number];
   // Whether the saved authority still holds the guard; this client holds nothing yet.
   guardHeld?: boolean;
+  // Whether the saved authority is mid-draw; this client holds no draw yet.
+  drawHeld?: boolean;
 }
 
 const textEncoder = new TextEncoder();
@@ -146,6 +148,9 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
   let movement = idleMovement();
   // Every device currently holding guard; the authority sees one held flag.
   const guardSources = new Set<GuardSource>();
+  // Every device currently holding the bow draw. The last deliberate release shoots; an
+  // interrupted hold (pointer cancel, focus loss) only cancels.
+  const drawSources = new Set<GuardSource>();
 
   const update = (patch: Partial<ClientState>) => {
     let changed = false;
@@ -225,6 +230,7 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
     trainingCarry = 0;
     movement = idleMovement();
     guardSources.clear();
+    drawSources.clear();
   };
 
   // Replaces the current source. The returned token identifies the new generation.
@@ -314,6 +320,7 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
       lastSequence,
       movement: [x, z],
       guardHeld = false,
+      drawHeld = false,
     }: RestoredGame) {
       if (disposed()) {
         next.free?.();
@@ -324,6 +331,8 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
       movement.lastX = x;
       movement.lastZ = z;
       if (guardHeld) dispatch({ type: "setGuard", raised: false });
+      // A restored draw nobody is holding is lowered, never fired.
+      if (drawHeld) dispatch({ type: "cancelBow" });
     },
 
     async hostPeer(apiBase: string) {
@@ -484,6 +493,25 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
       if (isHeld !== wasHeld) dispatch({ type: "setGuard", raised: isHeld });
     },
 
+    // Held bow draw per device: the first hold draws; releasing the last hold shoots
+    // (the authority ignores short draws) or, when `interrupted`, cancels without shooting.
+    setBowDraw(source: GuardSource, held: boolean, { interrupted = false } = {}) {
+      if (held) {
+        if (drawSources.size === 0) dispatch({ type: "drawBow" });
+        drawSources.add(source);
+        return;
+      }
+      if (!drawSources.delete(source) || drawSources.size > 0) return;
+      dispatch({ type: interrupted ? "cancelBow" : "releaseBow" });
+    },
+
+    // Drops every held bow draw without shooting (weapon switches, menus).
+    cancelBowDraw() {
+      if (drawSources.size === 0) return;
+      drawSources.clear();
+      dispatch({ type: "cancelBow" });
+    },
+
     releaseInput() {
       movement.forward = false;
       movement.backward = false;
@@ -495,6 +523,11 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
       if (guardSources.size > 0) {
         guardSources.clear();
         dispatch({ type: "setGuard", raised: false });
+      }
+      // Losing focus or opening a menu must never fire a drawn bow.
+      if (drawSources.size > 0) {
+        drawSources.clear();
+        dispatch({ type: "cancelBow" });
       }
     },
 
