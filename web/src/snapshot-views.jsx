@@ -250,15 +250,21 @@ export function StrikeTimeline({ store }) {
       if (!snapshot) return;
       const restarted = snapshot.tick < lastTick;
       lastTick = snapshot.tick;
+      // The authority numbers every event of a tick; show them in that order.
       const lines = [
-        ...(snapshot.strikeEvents ?? []).map(
-          (event) =>
-            `${event.definition} · ${describeParty(event.source)} → ${describeParty(
-              event.target,
-            )} · ${describeResult(event.result)}`,
-        ),
-        ...(snapshot.interactionEvents ?? []).map(describeInteraction),
-      ];
+        ...(snapshot.strikeEvents ?? []).map((event) => ({
+          order: event.order,
+          text: `${event.definition} · ${describeParty(event.source)} → ${describeParty(
+            event.target,
+          )} · ${describeResult(event.result)}`,
+        })),
+        ...(snapshot.interactionEvents ?? []).map((event) => ({
+          order: event.order,
+          text: describeInteraction(event),
+        })),
+      ]
+        .sort((left, right) => left.order - right.order)
+        .map((line) => line.text);
       if (!restarted && lines.length === 0) return;
       setEntries((current) =>
         [

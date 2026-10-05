@@ -425,6 +425,8 @@ const SCENARIO_PILLAR_HALF_EXTENTS: Vec3i = Vec3i::new(20, WALL_HALF_HEIGHT, 60)
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StrikeEventSnapshot {
+    /// Position among every event (strikes and interactions) resolved in the same tick.
+    pub order: u32,
     pub source: StrikeSource,
     pub strike_tick: u64,
     pub definition: String,
@@ -858,6 +860,8 @@ pub enum InteractionRefusal {
     ChestLocked,
     /// Everything within reach is behind fixed geometry.
     Obstructed,
+    /// The player is mid-action (or defeated) and cannot start an interaction now.
+    Busy,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -896,6 +900,8 @@ pub enum InteractionPrompt {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InteractionEventSnapshot {
+    /// Position among every event (strikes and interactions) resolved in the same tick.
+    pub order: u32,
     pub player_id: PlayerId,
     pub result: InteractionResult,
 }
@@ -1085,6 +1091,8 @@ pub enum StrikeResult {
 /// parallel path per weapon.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StrikeOutcome {
+    /// Position among every event (strikes and interactions) resolved in the same tick.
+    pub order: u32,
     pub strike: StrikeId,
     pub definition: &'static str,
     pub target: StrikeTarget,
@@ -2265,6 +2273,18 @@ impl ArpgGame {
         Ok(())
     }
 
+    /// Next ordinal in this tick's shared strike/interaction event order.
+    fn next_event_order(&self) -> u32 {
+        u32::try_from(self.strike_outcomes.len() + self.interaction_events.len())
+            .expect("per-tick event count fits u32")
+    }
+
+    fn push_strike_outcome(&mut self, outcome: StrikeOutcome) {
+        let order = self.next_event_order();
+        self.strike_outcomes
+            .push(StrikeOutcome { order, ..outcome });
+    }
+
     fn room_cleared(&self, room_id: RoomId) -> bool {
         self.rooms
             .iter()
@@ -2379,8 +2399,12 @@ impl ArpgGame {
                 .ok_or_else(|| GameError::new("interaction references an unknown player"))?;
             player.gold = player.gold.saturating_add(gold);
         }
-        self.interaction_events
-            .push(InteractionEventSnapshot { player_id, result });
+        let order = self.next_event_order();
+        self.interaction_events.push(InteractionEventSnapshot {
+            order,
+            player_id,
+            result,
+        });
         Ok(())
     }
 
@@ -2544,7 +2568,8 @@ impl ArpgGame {
                     defeated,
                 }
             };
-            self.strike_outcomes.push(StrikeOutcome {
+            self.push_strike_outcome(StrikeOutcome {
+                order: 0,
                 strike,
                 definition: definition.id,
                 target,
@@ -2752,17 +2777,16 @@ impl ArpgGame {
         }
         let defeated = monster.health == 0;
         let position = monster.position;
-        self.strike_outcomes.push(StrikeOutcome {
+        let damage = previous_health - monster.health;
+        self.push_strike_outcome(StrikeOutcome {
+            order: 0,
             strike: StrikeId {
                 source: StrikeSource::Player(arrow.owner_id),
                 tick: arrow.launched_at_tick,
             },
             definition: "bow.arrow",
             target: StrikeTarget::Monster(monster_id),
-            result: StrikeResult::Hit {
-                damage: previous_health - monster.health,
-                defeated,
-            },
+            result: StrikeResult::Hit { damage, defeated },
         });
         if defeated {
             // A departed shooter's arrow still kills, but nobody is credited.
@@ -2889,7 +2913,8 @@ impl ArpgGame {
                     StrikeResult::Obstructed => {}
                 }
             }
-            self.strike_outcomes.push(StrikeOutcome {
+            self.push_strike_outcome(StrikeOutcome {
+                order: 0,
                 strike,
                 definition: definition.id,
                 target,
@@ -3337,9 +3362,15 @@ impl AuthoritativeGame for ArpgGame {
                     counter: state.counter,
                     weapon: state.weapon,
                     draw_ticks: state.draw_ticks,
-                    interaction: match self.interaction_choice(body.position())? {
-                        Ok(target) => InteractionPrompt::Available { target },
-                        Err(reason) => InteractionPrompt::Unavailable { reason },
+                    interaction: if state.health == 0 || state.action.is_some() {
+                        InteractionPrompt::Unavailable {
+                            reason: InteractionRefusal::Busy,
+                        }
+                    } else {
+                        match self.interaction_choice(body.position())? {
+                            Ok(target) => InteractionPrompt::Available { target },
+                            Err(reason) => InteractionPrompt::Unavailable { reason },
+                        }
                     },
                 })
             })
@@ -3406,6 +3437,7 @@ impl AuthoritativeGame for ArpgGame {
                 .strike_outcomes
                 .iter()
                 .map(|outcome| StrikeEventSnapshot {
+                    order: outcome.order,
                     source: outcome.strike.source,
                     strike_tick: outcome.strike.tick,
                     definition: outcome.definition.to_owned(),
@@ -6606,7 +6638,8 @@ mod tests {
             events[0],
             InteractionEventSnapshot {
                 player_id: 1,
-                result: InteractionResult::PickedUp { .. }
+                result: InteractionResult::PickedUp { .. },
+                ..
             }
         ));
         assert_eq!(
@@ -6619,6 +6652,47 @@ mod tests {
             game.players[&1].gold + game.players[&2].gold,
             GROUND_LOOT_GOLD_AMOUNT
         );
+    }
+
+    #[test]
+    fn prompts_are_busy_mid_action_and_events_share_one_tick_order() {
+        let (mut game, x, z) = strike_arena();
+        game.add_player(2).unwrap();
+        move_player(&mut game, 2, x, z + 300);
+        place_monster(&mut game, 1, x + 100, z);
+        game.ground_loot.push(GroundLootState {
+            id: GROUND_LOOT_ID_BASE,
+            position: Vec3i::new(x, PLAYER_Y, z + 340),
+            kind: LootKind::Gold,
+            amount: GROUND_LOOT_GOLD_AMOUNT,
+        });
+        // Player 1 attacks; player 2 interacts so both resolve in the same tick.
+        game.apply_command(PlayerCommand::new(1, 1, ArpgCommand::PrimaryAttack).unwrap())
+            .unwrap();
+        for _ in 0..(PRIMARY_WINDUP_TICKS - INTERACT_WINDUP_TICKS) {
+            game.advance_tick().unwrap();
+        }
+        game.apply_command(PlayerCommand::new(2, 1, ArpgCommand::Interact).unwrap())
+            .unwrap();
+        assert_eq!(
+            game.snapshot().unwrap().players[1].interaction,
+            InteractionPrompt::Unavailable {
+                reason: InteractionRefusal::Busy
+            }
+        );
+        let mut both = None;
+        for _ in 0..10 {
+            game.advance_tick().unwrap();
+            let snapshot = game.snapshot().unwrap();
+            if !snapshot.strike_events.is_empty() && !snapshot.interaction_events.is_empty() {
+                both = Some(snapshot);
+                break;
+            }
+        }
+        let snapshot = both.expect("a strike and an interaction in the same tick");
+        // Players resolve in id order: player 1's strike, then player 2's pickup.
+        assert_eq!(snapshot.strike_events[0].order, 0);
+        assert_eq!(snapshot.interaction_events[0].order, 1);
     }
 
     #[test]

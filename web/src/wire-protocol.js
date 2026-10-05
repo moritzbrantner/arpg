@@ -30,7 +30,7 @@ const parties = new Set(["player", "monster"]);
 const strikeResults = new Set(["hit", "blocked", "guardBroken", "obstructed"]);
 const party = (value) => parties.has(value?.kind) && nonNegative(value.id);
 const interactionTargets = new Set(["loot", "chest"]);
-const interactionRefusals = new Set(["nothingInRange", "chestLocked", "obstructed"]);
+const interactionRefusals = new Set(["nothingInRange", "chestLocked", "obstructed", "busy"]);
 const interactionTarget = (value) => interactionTargets.has(value?.kind) && nonNegative(value.id);
 const interactionPrompt = (value) =>
   (value?.kind === "available" && interactionTarget(value.target)) ||
@@ -124,13 +124,15 @@ export function decodeSnapshot(encoded) {
     ) &&
     list(
       "interactionEvents",
-      (event) => nonNegative(event?.playerId) && interactionResult(event.result),
+      (event) =>
+        nonNegative(event?.order) && nonNegative(event.playerId) && interactionResult(event.result),
     ) &&
     scenarios.has(snapshot.scenario) &&
     list(
       "strikeEvents",
       (event) =>
-        party(event?.source) &&
+        nonNegative(event?.order) &&
+        party(event.source) &&
         party(event.target) &&
         nonNegative(event.strikeTick) &&
         typeof event.definition === "string" &&

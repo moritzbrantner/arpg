@@ -88,6 +88,7 @@ test("admits shield guard state and rejects malformed guard data", () => {
 
 test("admits workbench scenario and strike events and rejects malformed ones", () => {
   const event = {
+    order: 0,
     source: { kind: "player", id: 1 },
     strikeTick: 4,
     definition: "sword.lightSwing",
@@ -110,10 +111,11 @@ test("admits workbench scenario and strike events and rejects malformed ones", (
 test("admits chests and interaction results and rejects malformed ones", () => {
   const chest = { id: 50002, roomId: 2, position: [0, 50, 0], opened: false, available: true };
   const picked = {
+    order: 0,
     playerId: 1,
     result: { kind: "pickedUp", target: { kind: "loot", id: 30000 }, gold: 10 },
   };
-  const refused = { playerId: 2, result: { kind: "refused", reason: "chestLocked" } };
+  const refused = { order: 1, playerId: 2, result: { kind: "refused", reason: "busy" } };
   const decoded = decodeSnapshot(
     encode({ ...payload, chests: [chest], interactionEvents: [picked, refused] }),
   );
