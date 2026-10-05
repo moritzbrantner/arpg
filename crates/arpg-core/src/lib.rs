@@ -4,7 +4,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 
-use physics_engine::{BodyId, RigidBody, Vec3i, World, WorldConfig};
+use physics_engine::{
+    BodyId, BodyKind, Ray, RigidBody, SUBTICKS_PER_TICK, Vec3i, World, WorldConfig,
+};
 use serde::{Deserialize, Serialize};
 
 #[cfg(test)]
@@ -22,7 +24,8 @@ const PHYSICS_TICKS_PER_GAME_TICK: i32 = 1;
 pub const MAX_PLAYERS: usize = 4;
 pub const WORLD_UNITS_PER_METER: i32 = 100;
 pub const SAVE_STATE_SCHEMA_VERSION: u16 = 1;
-pub const SAVE_STATE_RULES_VERSION: u16 = 1;
+// 2: directional multi-target strike volumes and obstruction by fixed geometry.
+pub const SAVE_STATE_RULES_VERSION: u16 = 2;
 // physics-engine::World::step(1) integrates velocity as world units per simulation tick.
 // At 60 Hz and 100 world units per meter, 7 units/tick is 4.2 m/s rather than
 // the previous 260 units/tick (156 m/s).
@@ -464,6 +467,86 @@ impl MonsterActionState {
     }
 }
 
+/// Who performed a strike.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum StrikeSource {
+    Player(PlayerId),
+    Monster(u32),
+}
+
+/// What a strike contacted. Ordering is the stable identity tie-break for equal distances.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum StrikeTarget {
+    Player(PlayerId),
+    Monster(u32),
+}
+
+/// Stable identity of one strike: its source and the tick on which its active window opened.
+/// A source performs at most one action at a time, so this pair is unique and targets are
+/// deduplicated per strike rather than per rendered frame or active tick.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct StrikeId {
+    pub source: StrikeSource,
+    pub tick: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StrikeResult {
+    /// The strike connected and dealt `damage`; `defeated` reports a killing blow.
+    Hit { damage: u16, defeated: bool },
+    /// The target was inside the strike volume but fixed geometry (a wall, pillar or closed
+    /// door) lies between attacker and target.
+    Obstructed,
+}
+
+/// One reasoned strike outcome. Player and monster melee share this result path; later
+/// projectile, block and guard-break outcomes extend `StrikeResult` rather than adding a
+/// parallel path per weapon.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StrikeOutcome {
+    pub strike: StrikeId,
+    pub definition: &'static str,
+    pub target: StrikeTarget,
+    pub result: StrikeResult,
+}
+
+/// Authored melee strike geometry on the gameplay plane.
+#[derive(Clone, Copy, Debug)]
+struct StrikeDefinition {
+    id: &'static str,
+    /// Maximum centre-to-centre reach in world units.
+    reach: i64,
+    /// Frontal strikes only contact targets within 60 degrees either side of the committed
+    /// facing; non-frontal strikes contact any eligible target within reach.
+    frontal: bool,
+    /// Maximum number of targets the strike connects with. Obstructed targets do not count.
+    max_targets: usize,
+}
+
+/// Light sword swing: a wide sweep that connects with every eligible target in its arc.
+const SWORD_LIGHT_SWING: StrikeDefinition = StrikeDefinition {
+    id: "sword.lightSwing",
+    reach: ATTACK_RANGE,
+    frontal: true,
+    max_targets: usize::MAX,
+};
+
+/// Heavy sword strike: a shorter committed thrust that connects with one target.
+const SWORD_HEAVY_THRUST: StrikeDefinition = StrikeDefinition {
+    id: "sword.heavyThrust",
+    reach: SECONDARY_ATTACK_RANGE,
+    frontal: true,
+    max_targets: 1,
+};
+
+/// Monster melee: strikes only its committed target, in any direction within reach.
+const MONSTER_CLAW: StrikeDefinition = StrikeDefinition {
+    id: "monster.claw",
+    reach: MONSTER_ATTACK_RANGE,
+    frontal: false,
+    max_targets: 1,
+};
+
 #[derive(Clone, Copy, Debug)]
 struct PlayerState {
     movement_x: i8,
@@ -549,6 +632,7 @@ pub struct ArpgGame {
     ground_loot: Vec<GroundLootState>,
     next_ground_loot_id: GroundLootId,
     static_colliders: Vec<StaticColliderSnapshot>,
+    strike_outcomes: Vec<StrikeOutcome>,
 }
 
 impl Default for ArpgGame {
@@ -598,6 +682,7 @@ impl ArpgGame {
             ground_loot: Vec::new(),
             next_ground_loot_id: GROUND_LOOT_ID_BASE,
             static_colliders,
+            strike_outcomes: Vec::new(),
         })
     }
 
@@ -980,6 +1065,11 @@ impl ArpgGame {
     ///
     /// Performance evidence uses this operation count to detect regressions
     /// where one gameplay tick begins stepping physics more than once.
+    /// Strike outcomes resolved during the most recent tick, in resolution order.
+    pub fn strike_outcomes(&self) -> &[StrikeOutcome] {
+        &self.strike_outcomes
+    }
+
     pub fn physics_steps(&self) -> u64 {
         self.physics_steps
     }
@@ -1168,6 +1258,65 @@ impl ArpgGame {
         Ok(())
     }
 
+    /// Orders the eligible candidates inside a strike volume nearest-first (stable target
+    /// identity breaks ties) and resolves obstruction for each until `max_targets` connect.
+    fn strike_contacts(
+        &self,
+        definition: StrikeDefinition,
+        origin: Vec3i,
+        facing: (i8, i8),
+        candidates: impl IntoIterator<Item = (StrikeTarget, Vec3i)>,
+    ) -> Result<Vec<(StrikeTarget, bool)>, GameError> {
+        let reach_sq = definition.reach * definition.reach;
+        let mut inside = candidates
+            .into_iter()
+            .filter_map(|(target, position)| {
+                let dx = i64::from(position.x - origin.x);
+                let dz = i64::from(position.z - origin.z);
+                let distance_sq = dx * dx + dz * dz;
+                let in_arc =
+                    !definition.frontal || Self::target_is_in_front(facing.0, facing.1, dx, dz);
+                (distance_sq <= reach_sq && in_arc).then_some((distance_sq, target, position))
+            })
+            .collect::<Vec<_>>();
+        inside.sort_unstable_by_key(|(distance_sq, target, _)| (*distance_sq, *target));
+
+        let mut contacts = Vec::new();
+        let mut connected = 0;
+        for (_, target, position) in inside {
+            if connected == definition.max_targets {
+                break;
+            }
+            let obstructed = self.strike_obstructed(origin, position)?;
+            if !obstructed {
+                connected += 1;
+            }
+            contacts.push((target, obstructed));
+        }
+        Ok(contacts)
+    }
+
+    /// Whether fixed geometry (walls, pillars, closed doors) lies on the segment from the
+    /// attacker to the target, using the physics-engine ray query over the current world.
+    fn strike_obstructed(&self, origin: Vec3i, target: Vec3i) -> Result<bool, GameError> {
+        let direction = Vec3i::new(target.x - origin.x, 0, target.z - origin.z);
+        if direction == Vec3i::ZERO {
+            return Ok(false);
+        }
+        let hits = self
+            .world
+            .ray_cast(Ray::new(origin, direction), 1)
+            .map_err(physics_error)?;
+        // Players are dynamic bodies; only fixed geometry blocks a strike.
+        Ok(hits.iter().any(|hit| {
+            hit.time.subticks() < SUBTICKS_PER_TICK
+                && self
+                    .world
+                    .body(hit.body)
+                    .is_some_and(|body| body.kind() == BodyKind::Fixed)
+        }))
+    }
+
     fn resolve_attack(
         &mut self,
         player_id: PlayerId,
@@ -1186,10 +1335,10 @@ impl ArpgGame {
                 .ok_or_else(|| GameError::new("attack references an unknown player"))?
                 .experience,
         );
-        let (range, damage_numerator, damage_denominator, stagger_ticks) = match kind {
-            ActionKind::PrimaryAttack => (ATTACK_RANGE, 1, 1, PRIMARY_STAGGER_TICKS),
+        let (definition, damage_numerator, damage_denominator, stagger_ticks) = match kind {
+            ActionKind::PrimaryAttack => (SWORD_LIGHT_SWING, 1, 1, PRIMARY_STAGGER_TICKS),
             ActionKind::SecondaryAttack => (
-                SECONDARY_ATTACK_RANGE,
+                SWORD_HEAVY_THRUST,
                 SECONDARY_ATTACK_DAMAGE_NUMERATOR,
                 SECONDARY_ATTACK_DAMAGE_DENOMINATOR,
                 SECONDARY_STAGGER_TICKS,
@@ -1205,32 +1354,59 @@ impl ArpgGame {
             .filter(|room| room.encounter_state == RoomEncounterState::Active)
             .map(|room| room.id)
             .collect::<BTreeSet<_>>();
-        let range_sq = range * range;
-        let target = self
+        let candidates = self
             .monsters
-            .iter_mut()
+            .iter()
             .filter(|monster| monster.health > 0 && active_rooms.contains(&monster.room_id))
-            .filter_map(|monster| {
-                let dx = i64::from(monster.position.x - player_position.x);
-                let dz = i64::from(monster.position.z - player_position.z);
-                let distance_sq = dx * dx + dz * dz;
-                (distance_sq <= range_sq && Self::target_is_in_front(facing_x, facing_z, dx, dz))
-                    .then_some((distance_sq, monster.id, monster))
-            })
-            .min_by_key(|(distance_sq, id, _)| (*distance_sq, *id));
-
-        let killed_position = if let Some((_, _, monster)) = target {
-            let previous_health = monster.health;
-            monster.health = monster.health.saturating_sub(attack_damage);
-            if monster.health > 0 {
-                monster.stagger_ticks_remaining = stagger_ticks;
-                monster.action = None;
-            }
-            (previous_health > 0 && monster.health == 0).then_some(monster.position)
-        } else {
-            None
+            .map(|monster| (StrikeTarget::Monster(monster.id), monster.position))
+            .collect::<Vec<_>>();
+        let contacts = self.strike_contacts(
+            definition,
+            player_position,
+            (facing_x, facing_z),
+            candidates,
+        )?;
+        let strike = StrikeId {
+            source: StrikeSource::Player(player_id),
+            tick: self.tick,
         };
-        if let Some(position) = killed_position {
+
+        let mut defeated_positions = Vec::new();
+        for (target, obstructed) in contacts {
+            let StrikeTarget::Monster(monster_id) = target else {
+                continue;
+            };
+            let result = if obstructed {
+                StrikeResult::Obstructed
+            } else {
+                let monster = self
+                    .monsters
+                    .iter_mut()
+                    .find(|monster| monster.id == monster_id)
+                    .ok_or_else(|| GameError::new("strike references an unknown monster"))?;
+                let previous_health = monster.health;
+                monster.health = monster.health.saturating_sub(attack_damage);
+                if monster.health > 0 {
+                    monster.stagger_ticks_remaining = stagger_ticks;
+                    monster.action = None;
+                }
+                let defeated = previous_health > 0 && monster.health == 0;
+                if defeated {
+                    defeated_positions.push(monster.position);
+                }
+                StrikeResult::Hit {
+                    damage: previous_health - monster.health,
+                    defeated,
+                }
+            };
+            self.strike_outcomes.push(StrikeOutcome {
+                strike,
+                definition: definition.id,
+                target,
+                result,
+            });
+        }
+        for position in defeated_positions {
             self.award_experience(player_id, MONSTER_EXPERIENCE_REWARD)?;
             self.spawn_ground_loot(position)?;
         }
@@ -1313,19 +1489,40 @@ impl ArpgGame {
             return Ok(());
         }
 
-        let dx = i64::from(target_position.x - monster_position.x);
-        let dz = i64::from(target_position.z - monster_position.z);
-        if dx * dx + dz * dz > MONSTER_ATTACK_RANGE * MONSTER_ATTACK_RANGE {
-            return Ok(());
+        let contacts = self.strike_contacts(
+            MONSTER_CLAW,
+            monster_position,
+            (0, 0),
+            [(StrikeTarget::Player(target_player_id), target_position)],
+        )?;
+        let strike = StrikeId {
+            source: StrikeSource::Monster(monster_id),
+            tick: self.tick,
+        };
+        for (target, obstructed) in contacts {
+            let result = if obstructed {
+                StrikeResult::Obstructed
+            } else {
+                let player = self
+                    .players
+                    .get_mut(&target_player_id)
+                    .ok_or_else(|| GameError::new("monster attack references an unknown player"))?;
+                let previous_health = player.health;
+                player.health = player.health.saturating_sub(MONSTER_ATTACK_DAMAGE);
+                player.hurt_ticks_remaining = PLAYER_HURT_TICKS;
+                player.action = None;
+                StrikeResult::Hit {
+                    damage: previous_health - player.health,
+                    defeated: player.health == 0,
+                }
+            };
+            self.strike_outcomes.push(StrikeOutcome {
+                strike,
+                definition: MONSTER_CLAW.id,
+                target,
+                result,
+            });
         }
-
-        let player = self
-            .players
-            .get_mut(&target_player_id)
-            .ok_or_else(|| GameError::new("monster attack references an unknown player"))?;
-        player.health = player.health.saturating_sub(MONSTER_ATTACK_DAMAGE);
-        player.hurt_ticks_remaining = PLAYER_HURT_TICKS;
-        player.action = None;
         Ok(())
     }
 
@@ -1586,6 +1783,7 @@ impl AuthoritativeGame for ArpgGame {
     }
 
     fn advance_tick(&mut self) -> Result<(), GameError> {
+        self.strike_outcomes.clear();
         for player in self.players.values_mut() {
             player.hurt_ticks_remaining = player.hurt_ticks_remaining.saturating_sub(1);
         }
@@ -2744,6 +2942,380 @@ mod tests {
         );
     }
 
+    const STRIKE_ROOM: RoomId = 2;
+
+    /// Player 1 at the centre of an active combat room facing +x, with every generated
+    /// monster removed so fixtures place exactly the targets they describe.
+    fn strike_arena() -> (ArpgGame, i32, i32) {
+        let mut game = ArpgGame::new_with_seed(42).unwrap();
+        let (center_x, center_z) = game
+            .rooms
+            .iter()
+            .find(|room| room.id == STRIKE_ROOM)
+            .unwrap()
+            .center();
+        game.player_spawns[0] = Vec3i::new(center_x, PLAYER_Y, center_z);
+        game.add_player(1).unwrap();
+        game.reconcile_encounters().unwrap();
+        assert_eq!(
+            game.rooms
+                .iter()
+                .find(|room| room.id == STRIKE_ROOM)
+                .unwrap()
+                .encounter_state,
+            RoomEncounterState::Active
+        );
+        game.monsters.clear();
+        (game, center_x, center_z)
+    }
+
+    fn place_monster(game: &mut ArpgGame, id: u32, x: i32, z: i32) {
+        game.monsters.push(MonsterState {
+            id,
+            room_id: STRIKE_ROOM,
+            position: Vec3i::new(x, PLAYER_Y, z),
+            health: 100,
+            action: None,
+            stagger_ticks_remaining: 0,
+        });
+    }
+
+    fn place_blocker(game: &mut ArpgGame, index: u64, x: i32, z: i32, half_extents: Vec3i) {
+        game.world
+            .add_body(RigidBody::fixed(
+                BodyId(STATIC_BODY_BASE + 900 + index),
+                Vec3i::new(x, PLAYER_Y, z),
+                half_extents,
+            ))
+            .unwrap();
+    }
+
+    fn monster_health(game: &ArpgGame, id: u32) -> u16 {
+        game.monsters
+            .iter()
+            .find(|monster| monster.id == id)
+            .unwrap()
+            .health
+    }
+
+    /// Runs one player action to completion and returns the strike outcomes it produced.
+    fn strike(game: &mut ArpgGame, sequence: u32, command: ArpgCommand) -> Vec<StrikeOutcome> {
+        game.apply_command(PlayerCommand::new(1, sequence, command).unwrap())
+            .unwrap();
+        let mut outcomes = Vec::new();
+        while game.players.get(&1).unwrap().action.is_some() {
+            game.advance_tick().unwrap();
+            outcomes.extend(
+                game.strike_outcomes()
+                    .iter()
+                    .filter(|outcome| outcome.strike.source == StrikeSource::Player(1)),
+            );
+        }
+        outcomes
+    }
+
+    fn targets(outcomes: &[StrikeOutcome]) -> Vec<(StrikeTarget, StrikeResult)> {
+        outcomes
+            .iter()
+            .map(|outcome| (outcome.target, outcome.result))
+            .collect()
+    }
+
+    const LIGHT_HIT: StrikeResult = StrikeResult::Hit {
+        damage: BASE_ATTACK_DAMAGE,
+        defeated: false,
+    };
+
+    #[test]
+    fn light_swing_hits_every_target_in_front_and_nothing_behind_or_beside() {
+        let (mut game, x, z) = strike_arena();
+        place_monster(&mut game, 1, x + 100, z);
+        place_monster(&mut game, 2, x + 150, z + 60);
+        place_monster(&mut game, 3, x - 100, z);
+        place_monster(&mut game, 4, x, z + 100);
+        place_monster(&mut game, 5, x, z - 100);
+
+        let outcomes = strike(&mut game, 1, ArpgCommand::PrimaryAttack);
+        assert_eq!(
+            targets(&outcomes),
+            [
+                (StrikeTarget::Monster(1), LIGHT_HIT),
+                (StrikeTarget::Monster(2), LIGHT_HIT),
+            ]
+        );
+        assert!(outcomes.iter().all(|outcome| {
+            outcome.definition == "sword.lightSwing"
+                && outcome.strike.source == StrikeSource::Player(1)
+        }));
+        for id in [3, 4, 5] {
+            assert_eq!(monster_health(&game, id), 100);
+        }
+    }
+
+    #[test]
+    fn heavy_thrust_connects_with_one_target_by_distance_then_identity() {
+        let (mut game, x, z) = strike_arena();
+        place_monster(&mut game, 8, x + 120, z + 20);
+        place_monster(&mut game, 7, x + 120, z - 20);
+        place_monster(&mut game, 6, x + 140, z);
+
+        let outcomes = strike(&mut game, 1, ArpgCommand::SecondaryAttack);
+        let heavy_damage = BASE_ATTACK_DAMAGE * SECONDARY_ATTACK_DAMAGE_NUMERATOR
+            / SECONDARY_ATTACK_DAMAGE_DENOMINATOR;
+        assert_eq!(
+            targets(&outcomes),
+            [(
+                StrikeTarget::Monster(7),
+                StrikeResult::Hit {
+                    damage: heavy_damage,
+                    defeated: false
+                }
+            )]
+        );
+        assert_eq!(outcomes[0].definition, "sword.heavyThrust");
+        assert_eq!(monster_health(&game, 8), 100);
+        assert_eq!(monster_health(&game, 6), 100);
+    }
+
+    #[test]
+    fn strike_reach_and_arc_boundaries_are_inclusive() {
+        let (mut game, x, z) = strike_arena();
+        // Reach is centre-to-centre; 60 degrees either side holds when 3·dx² ≥ dz².
+        place_monster(&mut game, 1, x + 220, z);
+        place_monster(&mut game, 2, x + 100, z + 173);
+        place_monster(&mut game, 3, x + 100, z - 173);
+        place_monster(&mut game, 4, x + 221, z);
+        place_monster(&mut game, 5, x + 100, z + 174);
+        place_monster(&mut game, 6, x, z);
+
+        let mut hit = targets(&strike(&mut game, 1, ArpgCommand::PrimaryAttack))
+            .into_iter()
+            .map(|(target, _)| target)
+            .collect::<Vec<_>>();
+        hit.sort();
+        assert_eq!(
+            hit,
+            [1, 2, 3, 6].map(StrikeTarget::Monster),
+            "overlapping, reach-edge and arc-edge targets are hit; just outside is not"
+        );
+    }
+
+    #[test]
+    fn strike_volume_matches_an_analytic_reference_across_a_grid() {
+        for (facing, seed_offset) in [((1, 0), 0), ((0, -1), 1), ((-1, 1), 2)] {
+            let (mut game, x, z) = strike_arena();
+            game.players.get_mut(&1).unwrap().facing_x = facing.0;
+            game.players.get_mut(&1).unwrap().facing_z = facing.1;
+            let mut expected = Vec::new();
+            let mut id = 0;
+            for dx in (-260..=260).step_by(40) {
+                for dz in (-260..=260).step_by(40) {
+                    id += 1;
+                    place_monster(&mut game, id, x + dx + seed_offset, z + dz);
+                    let (dx, dz) = (i64::from(dx + seed_offset), i64::from(dz));
+                    let (fx, fz) = (i64::from(facing.0), i64::from(facing.1));
+                    let distance_sq = dx * dx + dz * dz;
+                    let along = dx * fx + dz * fz;
+                    let across = dx * fz - dz * fx;
+                    // Inside 60° of facing: positive projection and |across| ≤ √3·along.
+                    let in_arc =
+                        distance_sq == 0 || (along > 0 && across * across <= 3 * along * along);
+                    if distance_sq <= ATTACK_RANGE * ATTACK_RANGE && in_arc {
+                        expected.push((distance_sq, id));
+                    }
+                }
+            }
+            expected.sort_unstable();
+            let outcomes = strike(&mut game, 1, ArpgCommand::PrimaryAttack);
+            assert!(outcomes.iter().all(|outcome| outcome.result == LIGHT_HIT));
+            assert_eq!(
+                outcomes
+                    .iter()
+                    .map(|outcome| outcome.target)
+                    .collect::<Vec<_>>(),
+                expected
+                    .iter()
+                    .map(|&(_, id)| StrikeTarget::Monster(id))
+                    .collect::<Vec<_>>(),
+                "facing {facing:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_swings_and_targets_leaving_before_the_active_window_miss() {
+        let (mut game, x, z) = strike_arena();
+        // Behind the player and beyond its own reach, keeping the encounter active.
+        place_monster(&mut game, 1, x - 250, z);
+        assert!(strike(&mut game, 1, ArpgCommand::PrimaryAttack).is_empty());
+
+        game.monsters[0].position.x = x + 100;
+        game.apply_command(PlayerCommand::new(1, 2, ArpgCommand::PrimaryAttack).unwrap())
+            .unwrap();
+        game.advance_tick().unwrap();
+        game.monsters[0].position.x = x + 300;
+        while game.players.get(&1).unwrap().action.is_some() {
+            game.advance_tick().unwrap();
+            assert!(game.strike_outcomes().is_empty());
+        }
+        assert_eq!(monster_health(&game, 1), 100);
+
+        game.monsters[0].position.x = x + 100;
+        assert_eq!(strike(&mut game, 3, ArpgCommand::PrimaryAttack).len(), 1);
+    }
+
+    #[test]
+    fn targets_moving_into_the_volume_before_the_active_window_are_hit() {
+        let (mut game, x, z) = strike_arena();
+        place_monster(&mut game, 1, x + 400, z);
+        game.apply_command(PlayerCommand::new(1, 1, ArpgCommand::PrimaryAttack).unwrap())
+            .unwrap();
+        game.advance_tick().unwrap();
+        game.monsters[0].position.x = x + 100;
+        let mut outcomes = Vec::new();
+        while game.players.get(&1).unwrap().action.is_some() {
+            game.advance_tick().unwrap();
+            outcomes.extend_from_slice(game.strike_outcomes());
+        }
+        assert_eq!(targets(&outcomes), [(StrikeTarget::Monster(1), LIGHT_HIT)]);
+    }
+
+    #[test]
+    fn dead_and_dormant_targets_are_not_eligible() {
+        let (mut game, x, z) = strike_arena();
+        place_monster(&mut game, 1, x + 100, z);
+        game.monsters[0].health = 0;
+        place_monster(&mut game, 2, x + 120, z);
+        game.monsters[1].room_id = STRIKE_ROOM + 1;
+        assert!(strike(&mut game, 1, ArpgCommand::PrimaryAttack).is_empty());
+        assert_eq!(monster_health(&game, 2), 100);
+    }
+
+    #[test]
+    fn each_strike_hits_a_target_once_and_repeated_strikes_have_distinct_ids() {
+        let (mut game, x, z) = strike_arena();
+        place_monster(&mut game, 1, x + 100, z);
+        let first = strike(&mut game, 1, ArpgCommand::PrimaryAttack);
+        let second = strike(&mut game, 2, ArpgCommand::PrimaryAttack);
+        assert_eq!(first.len(), 1);
+        assert_eq!(second.len(), 1);
+        assert_ne!(first[0].strike, second[0].strike);
+        assert_eq!(monster_health(&game, 1), 100 - 2 * BASE_ATTACK_DAMAGE);
+    }
+
+    #[test]
+    fn walls_obstruct_strikes_without_consuming_the_target_limit() {
+        let (mut game, x, z) = strike_arena();
+        place_monster(&mut game, 1, x + 120, z);
+        place_monster(&mut game, 2, x + 130, z + 60);
+        place_blocker(
+            &mut game,
+            0,
+            x + 70,
+            z,
+            Vec3i::new(10, WALL_HALF_HEIGHT, 15),
+        );
+
+        let outcomes = strike(&mut game, 1, ArpgCommand::SecondaryAttack);
+        assert_eq!(outcomes.len(), 2);
+        assert_eq!(
+            (outcomes[0].target, outcomes[0].result),
+            (StrikeTarget::Monster(1), StrikeResult::Obstructed)
+        );
+        assert_eq!(outcomes[1].target, StrikeTarget::Monster(2));
+        assert!(matches!(outcomes[1].result, StrikeResult::Hit { .. }));
+        assert_eq!(monster_health(&game, 1), 100);
+    }
+
+    #[test]
+    fn high_id_player_bodies_never_obstruct_strikes() {
+        let mut game = ArpgGame::new_with_seed(42).unwrap();
+        let (x, z) = game
+            .rooms
+            .iter()
+            .find(|room| room.id == STRIKE_ROOM)
+            .unwrap()
+            .center();
+        // Player 10_000's body id lands in the fixed-collider id range.
+        game.player_spawns[0] = Vec3i::new(x, PLAYER_Y, z);
+        game.add_player(10_000).unwrap();
+        game.reconcile_encounters().unwrap();
+        game.monsters.clear();
+        place_monster(&mut game, 1, x + 100, z);
+        game.apply_command(PlayerCommand::new(10_000, 1, ArpgCommand::PrimaryAttack).unwrap())
+            .unwrap();
+        let mut outcomes = Vec::new();
+        while game.players.get(&10_000).unwrap().action.is_some() {
+            game.advance_tick().unwrap();
+            outcomes.extend_from_slice(game.strike_outcomes());
+        }
+        assert_eq!(targets(&outcomes), [(StrikeTarget::Monster(1), LIGHT_HIT)]);
+    }
+
+    #[test]
+    fn closed_doors_obstruct_strikes() {
+        let (mut game, _, _) = strike_arena();
+        let door = game
+            .doors
+            .iter()
+            .find(|door| door.locked && (door.room_a == STRIKE_ROOM || door.room_b == STRIKE_ROOM))
+            .unwrap()
+            .clone();
+        let (room_x, room_z) = game
+            .rooms
+            .iter()
+            .find(|room| room.id == STRIKE_ROOM)
+            .unwrap()
+            .center();
+        let [door_x, _, door_z] = door.position;
+        // Step through the door along its thin axis: player inside the room, target beyond it.
+        let (step_x, step_z) = if door.half_extents[0] < door.half_extents[2] {
+            ((room_x - door_x).signum(), 0)
+        } else {
+            (0, (room_z - door_z).signum())
+        };
+        let player = Vec3i::new(door_x + step_x * 80, PLAYER_Y, door_z + step_z * 80);
+        game.world
+            .set_position(ArpgGame::player_body_id(1), player)
+            .unwrap();
+        let state = game.players.get_mut(&1).unwrap();
+        state.facing_x = i8::try_from(-step_x).unwrap();
+        state.facing_z = i8::try_from(-step_z).unwrap();
+        place_monster(&mut game, 1, door_x - step_x * 80, door_z - step_z * 80);
+
+        let outcomes = strike(&mut game, 1, ArpgCommand::PrimaryAttack);
+        assert_eq!(
+            targets(&outcomes),
+            [(StrikeTarget::Monster(1), StrikeResult::Obstructed)]
+        );
+    }
+
+    #[test]
+    fn monster_strikes_share_the_result_path_and_respect_walls() {
+        let (mut game, x, z) = strike_arena();
+        place_monster(&mut game, 1, x + 120, z);
+        place_blocker(
+            &mut game,
+            0,
+            x + 70,
+            z,
+            Vec3i::new(10, WALL_HALF_HEIGHT, 15),
+        );
+        let mut outcomes = Vec::new();
+        for _ in 0..MONSTER_ATTACK_WINDUP_TICKS + 2 {
+            game.advance_tick().unwrap();
+            outcomes.extend_from_slice(game.strike_outcomes());
+        }
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].strike.source, StrikeSource::Monster(1));
+        assert_eq!(outcomes[0].definition, "monster.claw");
+        assert_eq!(
+            (outcomes[0].target, outcomes[0].result),
+            (StrikeTarget::Player(1), StrikeResult::Obstructed)
+        );
+        assert_eq!(game.players.get(&1).unwrap().health, BASE_MAX_HEALTH);
+    }
+
     #[test]
     fn generated_rooms_are_large_enough_for_arpg_combat() {
         for seed in 0..64 {
@@ -3211,6 +3783,16 @@ mod tests {
 
         let mut save = game.save_state().unwrap();
         save.rules_version += 1;
+        assert!(
+            ArpgGame::from_save_state(save)
+                .unwrap_err()
+                .message()
+                .contains("unsupported ARPG save rules version")
+        );
+
+        // Saves from before directional strike volumes resolve melee differently.
+        let mut save = game.save_state().unwrap();
+        save.rules_version = 1;
         assert!(
             ArpgGame::from_save_state(save)
                 .unwrap_err()
