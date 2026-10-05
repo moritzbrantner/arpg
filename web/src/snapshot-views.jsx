@@ -46,8 +46,10 @@ export function PlayerHud({ store, playerId, status }) {
         </p>
       )}
       {player?.alive && player.counter && snapshot.tick < player.counter.expiresAtTick && (
-        <p className="counter-prompt" aria-live="assertive">
-          Counter! · {player.counter.expiresAtTick - snapshot.tick}t
+        <p className="counter-prompt">
+          {/* Announced once when the opportunity opens; the per-tick countdown is visual only. */}
+          <span role="alert">Counter!</span>{" "}
+          <span aria-hidden="true">· {player.counter.expiresAtTick - snapshot.tick}t</span>
         </p>
       )}
       {player?.action && (
