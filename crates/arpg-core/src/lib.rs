@@ -1332,11 +1332,15 @@ impl ArpgGame {
         if save.next_arrow_id < ARROW_ID_BASE || save.arrows.len() > MAX_LIVE_ARROWS {
             return Err(GameError::new("save contains invalid arrow bookkeeping"));
         }
-        let mut arrow_ids = BTreeSet::new();
+        // Arrows are kept oldest first: the live cap retires the first entry and impacts
+        // resolve in this order, so restored ids must strictly increase.
+        let mut previous_arrow_id = None;
         for arrow in &save.arrows {
-            if arrow.id < ARROW_ID_BASE
+            let in_order = previous_arrow_id.is_none_or(|previous| arrow.id > previous);
+            previous_arrow_id = Some(arrow.id);
+            if !in_order
+                || arrow.id < ARROW_ID_BASE
                 || arrow.id >= save.next_arrow_id
-                || !arrow_ids.insert(arrow.id)
                 || arrow.owner_id == 0
                 || arrow.launched_at_tick >= save.tick
                 || !(1..=ARROW_LIFETIME_TICKS).contains(&arrow.ticks_remaining)
@@ -5488,6 +5492,34 @@ mod tests {
         game.players.get_mut(&1).unwrap().health = 0;
         game.advance_tick().unwrap();
         assert_eq!(game.players[&1].draw_ticks, None);
+    }
+
+    #[test]
+    fn restored_arrows_must_stay_in_launch_order() {
+        let (mut game, _, _) = bow_arena();
+        game.tick = 50;
+        let mut shot = ArpgGame::new_action(ActionKind::Shoot, &game.players[&1]);
+        shot.charge = BOW_FULL_DRAW_TICKS;
+        game.players.get_mut(&1).unwrap().action = Some(shot);
+        game.launch_arrow(1, 1, 0).unwrap();
+        game.launch_arrow(1, -1, 0).unwrap();
+        for arrow in &mut game.arrows {
+            arrow.ticks_remaining -= 1;
+        }
+        game.tick += 1;
+        game.players.get_mut(&1).unwrap().action = None;
+        // Saves must carry the generated monster set, not the arena fixture's.
+        game.monsters = ArpgGame::new_with_seed(42).unwrap().monsters;
+        let save = game.save_state().unwrap();
+        assert!(ArpgGame::from_save_state(save.clone()).is_ok());
+        let mut reordered = save;
+        reordered.arrows.reverse();
+        assert!(
+            ArpgGame::from_save_state(reordered)
+                .unwrap_err()
+                .message()
+                .contains("arrow")
+        );
     }
 
     #[test]
