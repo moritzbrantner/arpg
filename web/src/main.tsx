@@ -84,6 +84,7 @@ const inputRegistry = {
     ["game.primaryAttack", "Primary attack", "Space", "never", "Combat"],
     ["game.secondaryAttack", "Heavy attack", "KeyQ", "never", "Combat"],
     ["game.interact", "Interact / pick up", "KeyE", "never", "Interaction"],
+    ["game.guard", "Raise shield (hold)", "KeyF", "never", "Combat"],
   ]
     .map(([id, title, code, repeatPolicy, category]) => ({
       id,
@@ -245,8 +246,35 @@ function buildFrame(snapshot, focusPlayerId, width, height, focusPlayerAccent = 
         ? "#45413d"
         : player.reaction?.kind === "hurt"
           ? "#e05a4f"
-          : (actionColor ?? (player.id === focusPlayerId ? focusPlayerAccent : "#6f91b6"));
+          : player.reaction?.kind === "guardBroken"
+            ? "#9b6bd6"
+            : (actionColor ?? (player.id === focusPlayerId ? focusPlayerAccent : "#6f91b6"));
+      // The thin shield board faces along the player's facing.
+      const shieldYaw = Math.atan2(facingX, facingZ);
+      const shield = player.guard
+        ? [
+            {
+              id: `player-shield-${player.id}`,
+              geometry: { kind: "box", size: [0.5, 0.6, 0.08] },
+              color:
+                player.reaction?.kind === "blocked"
+                  ? "#e8f4ff"
+                  : player.guard.phase === "raised"
+                    ? "#8fb3d9"
+                    : "#55687d",
+              transform: {
+                translation: [
+                  position[0] + facingX * 0.42,
+                  Math.max(position[1], 0.5),
+                  position[2] + facingZ * 0.42,
+                ],
+                rotationQuaternion: [0, Math.sin(shieldYaw / 2), 0, Math.cos(shieldYaw / 2)],
+              },
+            },
+          ]
+        : [];
       return [
+        ...shield,
         {
           id: `player-${player.id}`,
           geometry: { kind: "cylinder", radius: 0.3, height: 1 },
@@ -656,6 +684,10 @@ function App() {
           runtime.dispatch({ type: combatCommand });
           return;
         }
+        if (dispatch.action === "game.guard") {
+          runtime.setGuard("keyboard", dispatch.phase !== "release");
+          return;
+        }
         const key = {
           "game.moveForward": "forward",
           "game.moveBackward": "backward",
@@ -729,6 +761,7 @@ function App() {
       controlledPlayerId,
       lastSequence: savedPlayer.lastSequence ?? 0,
       movement: [savedPlayer.movement?.[0] ?? 0, savedPlayer.movement?.[1] ?? 0],
+      guardHeld: savedPlayer.guard?.held === true,
     });
     initialRunSeedRef.current = null;
     leaveTrainingUrl();
@@ -1056,6 +1089,7 @@ function App() {
           store={snapshotStore}
           playerId={playerId}
           triggerCombatAction={triggerCombatAction}
+          setTouchGuard={(held) => runtime.setGuard("touch", held)}
         />
       )}
 

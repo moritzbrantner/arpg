@@ -139,3 +139,25 @@ test("leaving and re-entering the world restarts one paused-aware simulation", a
   await page.getByRole("button", { name: "Step", exact: true }).click();
   await expect.poll(tickOf).toBe(paused + 1);
 });
+
+test("holding guard raises the authoritative shield and releasing lowers it", async ({
+  page,
+  appUrl,
+}) => {
+  await page.goto(`${appUrl}?scenario=training&seed=42`);
+  const guard = page.getByRole("button", { name: "Hold shield", exact: true });
+  await expect(guard).toBeEnabled();
+  await page.evaluate(() => document.activeElement?.blur());
+
+  await page.keyboard.down("f");
+  await expect(guard).toHaveAttribute("data-guard", "raised");
+  await expect(page.getByText("Shield raised", { exact: true })).toBeVisible();
+  await page.keyboard.up("f");
+  await expect(guard).not.toHaveAttribute("data-guard", /.+/);
+
+  await page.keyboard.down("f");
+  await expect(guard).toHaveAttribute("data-guard", "raised");
+  await page.evaluate(() => window.dispatchEvent(new Event("blur")));
+  await expect(guard).not.toHaveAttribute("data-guard", /.+/);
+  await page.keyboard.up("f");
+});

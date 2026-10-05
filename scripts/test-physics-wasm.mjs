@@ -15,7 +15,7 @@ const candidate = await load(current);
 const baseline = reference && await load(reference);
 const cases = ["quiet", "party", "sparse", "wall", "corner", "actions", "lifecycle"];
 function command(game, sequence, payload) {
-  game.applyCommand(1, sequence, JSON.stringify({ protocolVersion: 6, payload }));
+  game.applyCommand(1, sequence, JSON.stringify({ protocolVersion: 7, payload }));
 }
 function replay(module, seed, scenario) {
   const game = new module.WasmGame(seed);

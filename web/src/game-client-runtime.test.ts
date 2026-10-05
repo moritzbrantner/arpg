@@ -22,6 +22,8 @@ const snapshotJson = (tick, players = [1]) =>
         experienceForNextLevel: 100,
         attackDamage: 1,
         gold: 0,
+        guardPoints: 100,
+        maxGuardPoints: 100,
       })),
       monsters: [],
       rooms: [],
@@ -498,4 +500,41 @@ test("disposal releases everything and makes the runtime inert", async () => {
   expect(timers.size).toBe(0);
   expect(statuses).toHaveLength(statusCount);
   expect(runtime.getState().lifecycle).toBe("disposed");
+});
+
+test("guard is held while any device holds it and released on focus loss", () => {
+  const { runtime, games } = harness();
+  runtime.startLocal({ seed: 1 });
+  runtime.setGuard("keyboard", true);
+  runtime.setGuard("touch", true);
+  runtime.setGuard("keyboard", false);
+  runtime.setGuard("keyboard", true);
+  runtime.releaseInput();
+  runtime.releaseInput();
+  runtime.setGuard("touch", false);
+  expect(games[0].commands.map((command) => command.payload)).toEqual([
+    { type: "setGuard", raised: true },
+    { type: "setGuard", raised: false },
+  ]);
+
+  runtime.setGuard("keyboard", true);
+  runtime.startLocal({ seed: 2 });
+  runtime.setGuard("keyboard", false);
+  expect(games[1].commands).toEqual([]);
+});
+
+test("restoring a save that held guard releases it for this client", () => {
+  const { runtime } = harness();
+  const restored = new FakeGame(5);
+  restored.addPlayer(1);
+  runtime.restore({
+    game: restored,
+    controlledPlayerId: 1,
+    lastSequence: 3,
+    movement: [0, 0],
+    guardHeld: true,
+  });
+  expect(restored.commands).toEqual([
+    { playerId: 1, sequence: 4, payload: { type: "setGuard", raised: false } },
+  ]);
 });

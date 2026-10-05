@@ -27,10 +27,24 @@ export function PlayerHud({ store, playerId, status }) {
           </span>
           <span>Damage {player.attackDamage}</span>
           <span>Gold {player.gold}</span>
+          <span>
+            Guard {player.guardPoints}/{player.maxGuardPoints}
+          </span>
         </div>
       )}
       <p>{status}</p>
       {player && !player.alive && <p className="defeated-status">Defeated</p>}
+      {player?.alive && (player.guard || player.reaction?.kind === "guardBroken") && (
+        <p className="guard-status" aria-live="polite">
+          {player.reaction?.kind === "guardBroken"
+            ? "Guard broken"
+            : player.reaction?.kind === "blocked"
+              ? "Blocked"
+              : player.guard.phase === "raised"
+                ? "Shield raised"
+                : "Raising shield"}
+        </p>
+      )}
       {player?.action && (
         <p className="action-status">
           {player.action.kind === "secondaryAttack"
@@ -42,16 +56,16 @@ export function PlayerHud({ store, playerId, status }) {
         </p>
       )}
       <p className="desktop-controls-hint">
-        WASD move · Space primary · Q heavy · E interact · Esc settings
+        WASD move · Space primary · Q heavy · F hold shield · E interact · Esc settings
       </p>
       <p className="mobile-controls-hint">
-        Left stick to move · Attack / Heavy / Interact on the right
+        Left stick to move · Attack / Heavy / Guard / Interact on the right
       </p>
     </section>
   );
 }
 
-export function CombatActions({ store, playerId, triggerCombatAction }) {
+export function CombatActions({ store, playerId, triggerCombatAction, setTouchGuard }) {
   const player = focusedPlayer(useSnapshot(store), playerId);
   return (
     <section className="combat-actions" aria-label="Combat actions">
@@ -80,6 +94,31 @@ export function CombatActions({ store, playerId, triggerCombatAction }) {
       >
         <strong>Heavy</strong>
         <span>Q</span>
+      </button>
+      <button
+        type="button"
+        className={`combat-action combat-action-guard ${player?.guard ? "is-committed" : ""}`}
+        data-guard={player?.guard?.phase}
+        aria-label="Hold shield"
+        disabled={!playerId || !player?.alive}
+        onPointerDown={(event) => {
+          event.currentTarget.setPointerCapture?.(event.pointerId);
+          setTouchGuard(true);
+        }}
+        onPointerUp={() => setTouchGuard(false)}
+        onPointerCancel={() => setTouchGuard(false)}
+        onLostPointerCapture={() => setTouchGuard(false)}
+        onKeyDown={(event) => {
+          if ((event.key === "Enter" || event.key === " ") && !event.repeat) setTouchGuard(true);
+        }}
+        onKeyUp={(event) => {
+          if (event.key === "Enter" || event.key === " ") setTouchGuard(false);
+        }}
+        onBlur={() => setTouchGuard(false)}
+        onContextMenu={(event) => event.preventDefault()}
+      >
+        <strong>Guard</strong>
+        <span>F</span>
       </button>
       <button
         type="button"

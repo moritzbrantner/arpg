@@ -23,9 +23,10 @@ pub const TICK_HZ: u16 = 60;
 const PHYSICS_TICKS_PER_GAME_TICK: i32 = 1;
 pub const MAX_PLAYERS: usize = 4;
 pub const WORLD_UNITS_PER_METER: i32 = 100;
-pub const SAVE_STATE_SCHEMA_VERSION: u16 = 1;
+pub const SAVE_STATE_SCHEMA_VERSION: u16 = 2;
 // 2: directional multi-target strike volumes and obstruction by fixed geometry.
-pub const SAVE_STATE_RULES_VERSION: u16 = 2;
+// 3: directional shield guard, block and guard break.
+pub const SAVE_STATE_RULES_VERSION: u16 = 3;
 // physics-engine::World::step(1) integrates velocity as world units per simulation tick.
 // At 60 Hz and 100 world units per meter, 7 units/tick is 4.2 m/s rather than
 // the previous 260 units/tick (156 m/s).
@@ -64,6 +65,14 @@ const MONSTER_ATTACK_WINDUP_TICKS: u8 = 18;
 const MONSTER_ATTACK_ACTIVE_TICKS: u8 = 1;
 const MONSTER_ATTACK_RECOVERY_TICKS: u8 = 30;
 const PLAYER_HURT_TICKS: u8 = 6;
+/// Ticks between pressing guard and the shield protecting.
+const GUARD_RAISE_TICKS: u8 = 4;
+pub const MAX_GUARD_POINTS: u16 = 100;
+/// Guard regenerates only while lowered and not broken.
+const GUARD_REGEN_PER_TICK: u16 = 1;
+const GUARD_BLOCK_REACTION_TICKS: u8 = 8;
+const GUARD_BREAK_TICKS: u8 = 45;
+const MONSTER_CLAW_GUARD_COST: u16 = 30;
 const PRIMARY_STAGGER_TICKS: u8 = 4;
 const SECONDARY_STAGGER_TICKS: u8 = 8;
 const BASE_ATTACK_DAMAGE: u16 = 25;
@@ -150,10 +159,17 @@ pub trait AuthoritativeGame: Send + 'static {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum ArpgCommand {
-    SetMovement { x: i8, z: i8 },
+    SetMovement {
+        x: i8,
+        z: i8,
+    },
     PrimaryAttack,
     SecondaryAttack,
     Interact,
+    /// Held shield input: `raised: true` while the guard button is held.
+    SetGuard {
+        raised: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -224,6 +240,63 @@ pub struct MonsterReactionSnapshot {
 #[serde(rename_all = "camelCase")]
 pub enum PlayerReactionKind {
     Hurt,
+    Blocked,
+    GuardBroken,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GuardPhase {
+    /// Shield is coming up and does not protect yet.
+    Raising,
+    /// Shield protects the front sector.
+    Raised,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GuardStance {
+    pub phase: GuardPhase,
+    /// Remaining raise ticks; zero once raised.
+    pub ticks_remaining: u8,
+}
+
+/// Authoritative shield guard state of one player.
+///
+/// Rules: guard rises while the guard input is held and the player is alive, not acting,
+/// not hurt and not guard-broken. Starting an action, a hurt reaction or death lowers it;
+/// the held input then raises it again from the start once the player is free. Movement
+/// and turning stay allowed while guarding. A raised shield protects 60 degrees either
+/// side of the current facing against blockable strikes; each block costs guard points,
+/// and a strike whose cost reaches the remaining points breaks the guard instead.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GuardState {
+    pub held: bool,
+    pub stance: Option<GuardStance>,
+    pub points: u16,
+    pub broken_ticks_remaining: u8,
+    pub block_reaction_ticks_remaining: u8,
+}
+
+impl GuardState {
+    const READY: Self = Self {
+        held: false,
+        stance: None,
+        points: MAX_GUARD_POINTS,
+        broken_ticks_remaining: 0,
+        block_reaction_ticks_remaining: 0,
+    };
+
+    fn is_raised(self) -> bool {
+        matches!(
+            self.stance,
+            Some(GuardStance {
+                phase: GuardPhase::Raised,
+                ..
+            })
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -326,6 +399,9 @@ pub struct PlayerSnapshot {
     pub facing: [i8; 2],
     pub action: Option<PlayerActionSnapshot>,
     pub reaction: Option<PlayerReactionSnapshot>,
+    pub guard: Option<GuardStance>,
+    pub guard_points: u16,
+    pub max_guard_points: u16,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -380,6 +456,7 @@ pub struct PlayerSaveState {
     pub facing: [i8; 2],
     pub action: Option<PlayerActionSnapshot>,
     pub hurt_ticks_remaining: u8,
+    pub guard: GuardState,
     pub health: u16,
     pub experience: u32,
     pub gold: u32,
@@ -494,6 +571,11 @@ pub struct StrikeId {
 pub enum StrikeResult {
     /// The strike connected and dealt `damage`; `defeated` reports a killing blow.
     Hit { damage: u16, defeated: bool },
+    /// A raised shield intercepted the strike: no health damage, `guard_damage` guard spent.
+    Blocked { guard_damage: u16 },
+    /// The strike reached a raised shield but its guard cost exhausted the guard: no health
+    /// damage, the guard drops and cannot be raised for a recovery period.
+    GuardBroken,
     /// The target was inside the strike volume but fixed geometry (a wall, pillar or closed
     /// door) lies between attacker and target.
     Obstructed,
@@ -521,6 +603,10 @@ struct StrikeDefinition {
     frontal: bool,
     /// Maximum number of targets the strike connects with. Obstructed targets do not count.
     max_targets: usize,
+    /// Whether a raised shield facing the attacker can intercept the strike.
+    blockable: bool,
+    /// Guard points a block of this strike costs.
+    guard_cost: u16,
 }
 
 /// Light sword swing: a wide sweep that connects with every eligible target in its arc.
@@ -529,6 +615,8 @@ const SWORD_LIGHT_SWING: StrikeDefinition = StrikeDefinition {
     reach: ATTACK_RANGE,
     frontal: true,
     max_targets: usize::MAX,
+    blockable: true,
+    guard_cost: 0,
 };
 
 /// Heavy sword strike: a shorter committed thrust that connects with one target.
@@ -537,6 +625,8 @@ const SWORD_HEAVY_THRUST: StrikeDefinition = StrikeDefinition {
     reach: SECONDARY_ATTACK_RANGE,
     frontal: true,
     max_targets: 1,
+    blockable: true,
+    guard_cost: 0,
 };
 
 /// Monster melee: strikes only its committed target, in any direction within reach.
@@ -545,6 +635,8 @@ const MONSTER_CLAW: StrikeDefinition = StrikeDefinition {
     reach: MONSTER_ATTACK_RANGE,
     frontal: false,
     max_targets: 1,
+    blockable: true,
+    guard_cost: MONSTER_CLAW_GUARD_COST,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -555,6 +647,7 @@ struct PlayerState {
     facing_z: i8,
     action: Option<ActionState>,
     hurt_ticks_remaining: u8,
+    guard: GuardState,
     health: u16,
     experience: u32,
     gold: u32,
@@ -707,6 +800,7 @@ impl ArpgGame {
                     facing: [state.facing_x, state.facing_z],
                     action: state.action.map(ActionState::snapshot),
                     hurt_ticks_remaining: state.hurt_ticks_remaining,
+                    guard: state.guard,
                     health: state.health,
                     experience: state.experience,
                     gold: state.gold,
@@ -825,6 +919,7 @@ impl ArpgGame {
             if let Some(action) = player.action {
                 Self::validate_action_snapshot(action)?;
             }
+            Self::validate_guard(player)?;
             if player.last_sequence == u32::MAX {
                 return Err(GameError::new(
                     "saved command sequence leaves no valid next command",
@@ -950,6 +1045,7 @@ impl ArpgGame {
                     facing_z: action.facing[1],
                 }),
                 hurt_ticks_remaining: player.hurt_ticks_remaining,
+                guard: player.guard,
                 health: player.health,
                 experience: player.experience,
                 gold: player.gold,
@@ -1048,6 +1144,35 @@ impl ArpgGame {
         Ok(())
     }
 
+    fn validate_guard(player: &PlayerSaveState) -> Result<(), GameError> {
+        let guard = player.guard;
+        let stance_valid = match guard.stance {
+            None => true,
+            Some(stance) => {
+                let timing = match stance.phase {
+                    GuardPhase::Raising => {
+                        (1..=GUARD_RAISE_TICKS).contains(&stance.ticks_remaining)
+                    }
+                    GuardPhase::Raised => stance.ticks_remaining == 0,
+                };
+                timing
+                    && guard.held
+                    && player.health > 0
+                    && player.action.is_none()
+                    && player.hurt_ticks_remaining == 0
+                    && guard.broken_ticks_remaining == 0
+            }
+        };
+        if !stance_valid
+            || guard.points > MAX_GUARD_POINTS
+            || guard.broken_ticks_remaining > GUARD_BREAK_TICKS
+            || guard.block_reaction_ticks_remaining > GUARD_BLOCK_REACTION_TICKS
+        {
+            return Err(GameError::new("saved player guard is invalid"));
+        }
+        Ok(())
+    }
+
     fn validate_action_snapshot(action: PlayerActionSnapshot) -> Result<(), GameError> {
         Self::validate_facing(action.facing)?;
         let maximum_ticks = match action.phase {
@@ -1102,6 +1227,71 @@ impl ArpgGame {
             Vec3i::new(x * PLAYER_DIAGONAL_SPEED, 0, z * PLAYER_DIAGONAL_SPEED)
         } else {
             Vec3i::new(x * PLAYER_SPEED, 0, z * PLAYER_SPEED)
+        }
+    }
+
+    fn player_reaction(state: &PlayerState) -> Option<PlayerReactionSnapshot> {
+        [
+            (PlayerReactionKind::Hurt, state.hurt_ticks_remaining),
+            (
+                PlayerReactionKind::GuardBroken,
+                state.guard.broken_ticks_remaining,
+            ),
+            (
+                PlayerReactionKind::Blocked,
+                state.guard.block_reaction_ticks_remaining,
+            ),
+        ]
+        .into_iter()
+        .find(|(_, ticks)| *ticks > 0)
+        .map(|(kind, ticks_remaining)| PlayerReactionSnapshot {
+            kind,
+            ticks_remaining,
+        })
+    }
+
+    fn advance_guard(state: &mut PlayerState) {
+        let guard = &mut state.guard;
+        guard.block_reaction_ticks_remaining =
+            guard.block_reaction_ticks_remaining.saturating_sub(1);
+        if state.health == 0 {
+            guard.held = false;
+            guard.stance = None;
+            guard.block_reaction_ticks_remaining = 0;
+            return;
+        }
+        if guard.broken_ticks_remaining > 0 {
+            guard.broken_ticks_remaining -= 1;
+            guard.stance = None;
+            return;
+        }
+        let free = state.action.is_none() && state.hurt_ticks_remaining == 0;
+        guard.stance = if guard.held && free {
+            Some(match guard.stance {
+                None => GuardStance {
+                    phase: GuardPhase::Raising,
+                    ticks_remaining: GUARD_RAISE_TICKS,
+                },
+                Some(GuardStance {
+                    phase: GuardPhase::Raising,
+                    ticks_remaining,
+                }) if ticks_remaining > 1 => GuardStance {
+                    phase: GuardPhase::Raising,
+                    ticks_remaining: ticks_remaining - 1,
+                },
+                Some(_) => GuardStance {
+                    phase: GuardPhase::Raised,
+                    ticks_remaining: 0,
+                },
+            })
+        } else {
+            None
+        };
+        if guard.stance.is_none() {
+            guard.points = guard
+                .points
+                .saturating_add(GUARD_REGEN_PER_TICK)
+                .min(MAX_GUARD_POINTS);
         }
     }
 
@@ -1184,6 +1374,8 @@ impl ArpgGame {
         if state.health == 0 || state.action.is_some() {
             return Ok(());
         }
+        // Committing to an action lowers the shield; a held guard rises again afterwards.
+        state.guard.stance = None;
         state.action = Some(ActionState {
             kind,
             phase: ActionPhase::Windup,
@@ -1466,6 +1658,47 @@ impl ArpgGame {
         monster_id: u32,
         target_player_id: PlayerId,
     ) -> Result<(), GameError> {
+        self.resolve_monster_strike(monster_id, target_player_id, MONSTER_CLAW)
+    }
+
+    /// Resolves the shield before damage: a valid block or guard break never touches health.
+    fn guard_outcome(
+        state: &mut PlayerState,
+        definition: StrikeDefinition,
+        defender: Vec3i,
+        attacker: Vec3i,
+    ) -> Option<StrikeResult> {
+        let dx = i64::from(attacker.x - defender.x);
+        let dz = i64::from(attacker.z - defender.z);
+        // A zero-direction (overlapping) contact has no incoming side to block.
+        if !definition.blockable
+            || !state.guard.is_raised()
+            || (dx == 0 && dz == 0)
+            || !Self::target_is_in_front(state.facing_x, state.facing_z, dx, dz)
+        {
+            return None;
+        }
+        let guard = &mut state.guard;
+        if definition.guard_cost >= guard.points {
+            guard.points = 0;
+            guard.stance = None;
+            guard.block_reaction_ticks_remaining = 0;
+            guard.broken_ticks_remaining = GUARD_BREAK_TICKS;
+            return Some(StrikeResult::GuardBroken);
+        }
+        guard.points -= definition.guard_cost;
+        guard.block_reaction_ticks_remaining = GUARD_BLOCK_REACTION_TICKS;
+        Some(StrikeResult::Blocked {
+            guard_damage: definition.guard_cost,
+        })
+    }
+
+    fn resolve_monster_strike(
+        &mut self,
+        monster_id: u32,
+        target_player_id: PlayerId,
+        definition: StrikeDefinition,
+    ) -> Result<(), GameError> {
         let monster_position = self
             .monsters
             .iter()
@@ -1490,7 +1723,7 @@ impl ArpgGame {
         }
 
         let contacts = self.strike_contacts(
-            MONSTER_CLAW,
+            definition,
             monster_position,
             (0, 0),
             [(StrikeTarget::Player(target_player_id), target_position)],
@@ -1507,18 +1740,25 @@ impl ArpgGame {
                     .players
                     .get_mut(&target_player_id)
                     .ok_or_else(|| GameError::new("monster attack references an unknown player"))?;
-                let previous_health = player.health;
-                player.health = player.health.saturating_sub(MONSTER_ATTACK_DAMAGE);
-                player.hurt_ticks_remaining = PLAYER_HURT_TICKS;
-                player.action = None;
-                StrikeResult::Hit {
-                    damage: previous_health - player.health,
-                    defeated: player.health == 0,
+                if let Some(result) =
+                    Self::guard_outcome(player, definition, target_position, monster_position)
+                {
+                    result
+                } else {
+                    let previous_health = player.health;
+                    player.health = player.health.saturating_sub(MONSTER_ATTACK_DAMAGE);
+                    player.hurt_ticks_remaining = PLAYER_HURT_TICKS;
+                    player.action = None;
+                    player.guard.stance = None;
+                    StrikeResult::Hit {
+                        damage: previous_health - player.health,
+                        defeated: player.health == 0,
+                    }
                 }
             };
             self.strike_outcomes.push(StrikeOutcome {
                 strike,
-                definition: MONSTER_CLAW.id,
+                definition: definition.id,
                 target,
                 result,
             });
@@ -1725,6 +1965,7 @@ impl AuthoritativeGame for ArpgGame {
                 facing_z: 0,
                 action: None,
                 hurt_ticks_remaining: 0,
+                guard: GuardState::READY,
                 health: BASE_MAX_HEALTH,
                 experience: 0,
                 gold: 0,
@@ -1776,6 +2017,16 @@ impl AuthoritativeGame for ArpgGame {
                 self.start_action(command.player_id, ActionKind::SecondaryAttack)?
             }
             ArpgCommand::Interact => self.start_action(command.player_id, ActionKind::Interact)?,
+            ArpgCommand::SetGuard { raised } => {
+                let state = self
+                    .players
+                    .get_mut(&command.player_id)
+                    .expect("player existence checked");
+                state.guard.held = raised;
+                if !raised {
+                    state.guard.stance = None;
+                }
+            }
         }
         self.last_sequences
             .insert(command.player_id, command.sequence);
@@ -1786,6 +2037,7 @@ impl AuthoritativeGame for ArpgGame {
         self.strike_outcomes.clear();
         for player in self.players.values_mut() {
             player.hurt_ticks_remaining = player.hurt_ticks_remaining.saturating_sub(1);
+            Self::advance_guard(player);
         }
         for monster in &mut self.monsters {
             monster.stagger_ticks_remaining = monster.stagger_ticks_remaining.saturating_sub(1);
@@ -1852,10 +2104,10 @@ impl AuthoritativeGame for ArpgGame {
                     alive: state.health > 0,
                     facing: [state.facing_x, state.facing_z],
                     action: state.action.map(ActionState::snapshot),
-                    reaction: (state.hurt_ticks_remaining > 0).then_some(PlayerReactionSnapshot {
-                        kind: PlayerReactionKind::Hurt,
-                        ticks_remaining: state.hurt_ticks_remaining,
-                    }),
+                    reaction: Self::player_reaction(state),
+                    guard: state.guard.stance,
+                    guard_points: state.guard.points,
+                    max_guard_points: MAX_GUARD_POINTS,
                 })
             })
             .collect::<Result<Vec<_>, GameError>>()?;
@@ -1870,7 +2122,7 @@ impl AuthoritativeGame for ArpgGame {
         }));
 
         Ok(ArpgSnapshot {
-            schema_version: 8,
+            schema_version: 9,
             run_seed: self.run_seed,
             tick: self.tick,
             world_units_per_meter: WORLD_UNITS_PER_METER,
@@ -2253,6 +2505,7 @@ mod tests {
             facing_z: z,
             action: None,
             hurt_ticks_remaining: 0,
+            guard: GuardState::READY,
             health: BASE_MAX_HEALTH,
             experience: 0,
             gold: 0,
@@ -3316,6 +3569,322 @@ mod tests {
         assert_eq!(game.players.get(&1).unwrap().health, BASE_MAX_HEALTH);
     }
 
+    fn hold_guard(game: &mut ArpgGame, sequence: u32, raised: bool) {
+        game.apply_command(
+            PlayerCommand::new(1, sequence, ArpgCommand::SetGuard { raised }).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn raise_guard_fully(game: &mut ArpgGame) {
+        let player = game.players.get_mut(&1).unwrap();
+        player.guard.held = true;
+        player.guard.stance = Some(GuardStance {
+            phase: GuardPhase::Raised,
+            ticks_remaining: 0,
+        });
+    }
+
+    fn claw(game: &mut ArpgGame, monster_id: u32) -> StrikeResult {
+        game.strike_outcomes.clear();
+        game.resolve_monster_strike(monster_id, 1, MONSTER_CLAW)
+            .unwrap();
+        assert_eq!(game.strike_outcomes.len(), 1);
+        game.strike_outcomes[0].result
+    }
+
+    const CLAW_HIT: StrikeResult = StrikeResult::Hit {
+        damage: MONSTER_ATTACK_DAMAGE,
+        defeated: false,
+    };
+    const CLAW_BLOCKED: StrikeResult = StrikeResult::Blocked {
+        guard_damage: MONSTER_CLAW_GUARD_COST,
+    };
+
+    #[test]
+    fn guard_rises_over_authored_ticks_before_it_protects() {
+        let (mut game, x, z) = strike_arena();
+        place_monster(&mut game, 1, x + 120, z);
+        hold_guard(&mut game, 1, true);
+        let mut phases = Vec::new();
+        for _ in 0..6 {
+            game.advance_tick().unwrap();
+            phases.push(game.snapshot().unwrap().players[0].guard);
+        }
+        let raising = |ticks_remaining| {
+            Some(GuardStance {
+                phase: GuardPhase::Raising,
+                ticks_remaining,
+            })
+        };
+        let raised = Some(GuardStance {
+            phase: GuardPhase::Raised,
+            ticks_remaining: 0,
+        });
+        assert_eq!(
+            phases,
+            [
+                raising(4),
+                raising(3),
+                raising(2),
+                raising(1),
+                raised,
+                raised
+            ]
+        );
+
+        let player = game.players.get_mut(&1).unwrap();
+        player.guard.stance = raising(1);
+        assert_eq!(
+            claw(&mut game, 1),
+            CLAW_HIT,
+            "a rising shield does not protect"
+        );
+    }
+
+    #[test]
+    fn a_raised_shield_blocks_its_front_sector_only() {
+        // (dx, dz) of the attacker relative to a defender facing +x, with the expected
+        // result from the 60-degree rule 3·dx² ≥ dz², dx > 0.
+        let fixtures = [
+            ((120, 0), true),
+            ((50, 86), true),
+            ((50, -86), true),
+            ((50, 87), false),
+            ((0, 120), false),
+            ((0, -120), false),
+            ((-120, 0), false),
+            ((-80, 80), false),
+            ((0, 0), false),
+        ];
+        for ((dx, dz), blocked) in fixtures {
+            let (mut game, x, z) = strike_arena();
+            place_monster(&mut game, 1, x + dx, z + dz);
+            raise_guard_fully(&mut game);
+            let expected = if blocked { CLAW_BLOCKED } else { CLAW_HIT };
+            assert_eq!(claw(&mut game, 1), expected, "attacker at ({dx}, {dz})");
+            let player = game.players.get(&1).unwrap();
+            if blocked {
+                assert_eq!(player.health, BASE_MAX_HEALTH);
+                assert_eq!(
+                    player.guard.points,
+                    MAX_GUARD_POINTS - MONSTER_CLAW_GUARD_COST
+                );
+                assert_eq!(
+                    game.snapshot().unwrap().players[0].reaction,
+                    Some(PlayerReactionSnapshot {
+                        kind: PlayerReactionKind::Blocked,
+                        ticks_remaining: GUARD_BLOCK_REACTION_TICKS,
+                    })
+                );
+            } else {
+                assert_eq!(player.health, BASE_MAX_HEALTH - MONSTER_ATTACK_DAMAGE);
+                assert_eq!(
+                    player.guard.stance, None,
+                    "an unblocked hit lowers the shield"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn guard_breaks_when_the_cost_reaches_the_remaining_guard() {
+        let (mut game, x, z) = strike_arena();
+        place_monster(&mut game, 1, x + 120, z);
+        raise_guard_fully(&mut game);
+        game.players.get_mut(&1).unwrap().guard.points = MONSTER_CLAW_GUARD_COST + 1;
+        assert_eq!(claw(&mut game, 1), CLAW_BLOCKED);
+        assert_eq!(game.players.get(&1).unwrap().guard.points, 1);
+
+        game.players.get_mut(&1).unwrap().guard.points = MONSTER_CLAW_GUARD_COST;
+        assert_eq!(claw(&mut game, 1), StrikeResult::GuardBroken);
+        let player = *game.players.get(&1).unwrap();
+        assert_eq!(
+            player.health, BASE_MAX_HEALTH,
+            "a guard break absorbs that strike"
+        );
+        assert_eq!(player.guard.points, 0);
+        assert_eq!(player.guard.stance, None);
+        assert_eq!(player.guard.broken_ticks_remaining, GUARD_BREAK_TICKS);
+
+        assert_eq!(
+            claw(&mut game, 1),
+            CLAW_HIT,
+            "a broken guard does not block"
+        );
+        game.players.get_mut(&1).unwrap().hurt_ticks_remaining = 0;
+        game.monsters.clear();
+        place_monster(&mut game, 1, x - 600, z);
+        for _ in 0..GUARD_BREAK_TICKS {
+            assert_eq!(game.players.get(&1).unwrap().guard.stance, None);
+            game.advance_tick().unwrap();
+        }
+        assert_eq!(
+            game.players.get(&1).unwrap().guard.points,
+            0,
+            "no regen while broken"
+        );
+        game.advance_tick().unwrap();
+        assert!(
+            game.players.get(&1).unwrap().guard.stance.is_some(),
+            "held guard rises again"
+        );
+    }
+
+    #[test]
+    fn same_tick_strikes_each_spend_guard_once() {
+        let (mut game, x, z) = strike_arena();
+        place_monster(&mut game, 1, x + 120, z);
+        place_monster(&mut game, 2, x + 120, z + 40);
+        raise_guard_fully(&mut game);
+        game.players.get_mut(&1).unwrap().guard.points = 50;
+        game.strike_outcomes.clear();
+        game.resolve_monster_strike(1, 1, MONSTER_CLAW).unwrap();
+        game.resolve_monster_strike(2, 1, MONSTER_CLAW).unwrap();
+        assert_eq!(
+            targets(&game.strike_outcomes),
+            [
+                (StrikeTarget::Player(1), CLAW_BLOCKED),
+                (StrikeTarget::Player(1), StrikeResult::GuardBroken),
+            ]
+        );
+        assert_eq!(game.players.get(&1).unwrap().health, BASE_MAX_HEALTH);
+    }
+
+    #[test]
+    fn unblockable_strikes_ignore_a_raised_shield() {
+        let (mut game, x, z) = strike_arena();
+        place_monster(&mut game, 1, x + 120, z);
+        raise_guard_fully(&mut game);
+        let unblockable = StrikeDefinition {
+            id: "test.unblockable",
+            blockable: false,
+            ..MONSTER_CLAW
+        };
+        game.resolve_monster_strike(1, 1, unblockable).unwrap();
+        assert_eq!(game.strike_outcomes[0].result, CLAW_HIT);
+        assert_eq!(game.players.get(&1).unwrap().guard.points, MAX_GUARD_POINTS);
+    }
+
+    #[test]
+    fn monster_blocked_through_the_tick_loop_and_an_attacker_crossing_behind_hits() {
+        let (mut game, x, z) = strike_arena();
+        place_monster(&mut game, 1, x + 120, z);
+        hold_guard(&mut game, 1, true);
+        let mut outcomes = Vec::new();
+        for _ in 0..MONSTER_ATTACK_WINDUP_TICKS + 2 {
+            game.advance_tick().unwrap();
+            outcomes.extend_from_slice(game.strike_outcomes());
+        }
+        assert_eq!(
+            targets(&outcomes),
+            [(StrikeTarget::Player(1), CLAW_BLOCKED)]
+        );
+        assert_eq!(game.players.get(&1).unwrap().health, BASE_MAX_HEALTH);
+
+        // Next attack: wind up in front, then circle behind before contact.
+        outcomes.clear();
+        while game.monsters[0].action.map(|action| action.phase) != Some(ActionPhase::Windup) {
+            game.advance_tick().unwrap();
+        }
+        game.monsters[0].position.x = x - 120;
+        while game.monsters[0].action.map(|action| action.phase) == Some(ActionPhase::Windup) {
+            game.advance_tick().unwrap();
+            outcomes.extend_from_slice(game.strike_outcomes());
+        }
+        assert_eq!(targets(&outcomes), [(StrikeTarget::Player(1), CLAW_HIT)]);
+    }
+
+    #[test]
+    fn attacking_lowers_the_guard_and_a_held_guard_rises_again_afterwards() {
+        let (mut game, x, z) = strike_arena();
+        place_monster(&mut game, 1, x - 600, z);
+        hold_guard(&mut game, 1, true);
+        for _ in 0..6 {
+            game.advance_tick().unwrap();
+        }
+        assert!(game.players.get(&1).unwrap().guard.is_raised());
+        game.apply_command(PlayerCommand::new(1, 2, ArpgCommand::PrimaryAttack).unwrap())
+            .unwrap();
+        assert_eq!(game.players.get(&1).unwrap().guard.stance, None);
+        while game.players.get(&1).unwrap().action.is_some() {
+            game.advance_tick().unwrap();
+            assert_eq!(game.players.get(&1).unwrap().guard.stance, None);
+        }
+        game.advance_tick().unwrap();
+        assert_eq!(
+            game.players
+                .get(&1)
+                .unwrap()
+                .guard
+                .stance
+                .map(|stance| stance.phase),
+            Some(GuardPhase::Raising)
+        );
+
+        hold_guard(&mut game, 3, false);
+        assert_eq!(game.players.get(&1).unwrap().guard.stance, None);
+        game.advance_tick().unwrap();
+        assert_eq!(game.players.get(&1).unwrap().guard.stance, None);
+    }
+
+    #[test]
+    fn death_clears_held_guard() {
+        let (mut game, x, z) = strike_arena();
+        place_monster(&mut game, 1, x - 600, z);
+        raise_guard_fully(&mut game);
+        game.players.get_mut(&1).unwrap().health = 0;
+        game.advance_tick().unwrap();
+        let guard = game.players.get(&1).unwrap().guard;
+        assert!(!guard.held);
+        assert_eq!(guard.stance, None);
+    }
+
+    #[test]
+    fn guard_state_survives_save_and_restore_and_invalid_guard_is_rejected() {
+        let mut game = ArpgGame::new_with_seed(42).unwrap();
+        game.add_player(1).unwrap();
+        hold_guard(&mut game, 1, true);
+        game.advance_tick().unwrap();
+        game.advance_tick().unwrap();
+        game.players.get_mut(&1).unwrap().guard.points = 42;
+        let save = game.save_state().unwrap();
+        let mut restored = ArpgGame::from_save_state(save.clone()).unwrap();
+        assert_eq!(restored.snapshot().unwrap(), game.snapshot().unwrap());
+        for _ in 0..4 {
+            game.advance_tick().unwrap();
+            restored.advance_tick().unwrap();
+        }
+        assert_eq!(restored.snapshot().unwrap(), game.snapshot().unwrap());
+
+        for corrupt in [
+            GuardState {
+                points: MAX_GUARD_POINTS + 1,
+                ..save.players[0].guard
+            },
+            GuardState {
+                held: false,
+                ..save.players[0].guard
+            },
+            GuardState {
+                stance: Some(GuardStance {
+                    phase: GuardPhase::Raised,
+                    ticks_remaining: 3,
+                }),
+                ..save.players[0].guard
+            },
+        ] {
+            let mut tampered = save.clone();
+            tampered.players[0].guard = corrupt;
+            assert!(
+                ArpgGame::from_save_state(tampered)
+                    .unwrap_err()
+                    .message()
+                    .contains("guard")
+            );
+        }
+    }
+
     #[test]
     fn generated_rooms_are_large_enough_for_arpg_combat() {
         for seed in 0..64 {
@@ -3418,7 +3987,7 @@ mod tests {
         game.add_player(1).unwrap();
         let snapshot = game.snapshot().unwrap();
         let generated = generate_dungeon(snapshot.run_seed);
-        assert_eq!(snapshot.schema_version, 8);
+        assert_eq!(snapshot.schema_version, 9);
         assert_eq!(snapshot.run_seed, 0xDEAD_BEEF);
         assert_eq!(game.run_seed(), snapshot.run_seed);
         assert_eq!(snapshot.rooms, generated.rooms);
