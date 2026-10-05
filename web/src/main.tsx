@@ -10,7 +10,8 @@ import {
 import { createRoot } from "react-dom/client";
 import * as THREE from "three";
 import { createThreeSceneRenderer } from "@moritzbrantner/three-d-renderer";
-import { validateRegistry } from "@moritzbrantner/input-bindings";
+import { applyProfile, validateRegistry } from "@moritzbrantner/input-bindings";
+import { keyLabelForAction } from "./binding-labels.js";
 import { createSnapshotStore } from "./snapshot-store.js";
 import {
   PlayerHud,
@@ -480,6 +481,11 @@ function App() {
   const [joinCode, setJoinCode] = useState(
     () => new URLSearchParams(location.search).get("join") ?? "",
   );
+
+  const interactKey = useMemo(() => {
+    const defaults = inputRegistry.actions.flatMap((action) => action.defaults);
+    return keyLabelForAction(applyProfile(defaults, profile).bindings, "game.interact");
+  }, [profile]);
 
   const selectedCharacter = useMemo(
     () => resolveCharacter(selectedCharacterId),
@@ -1180,7 +1186,12 @@ function App() {
         </aside>
       )}
 
-      <PlayerHud store={snapshotStore} playerId={playerId} status={status} />
+      <PlayerHud
+        store={snapshotStore}
+        playerId={playerId}
+        status={status}
+        interactKey={interactKey}
+      />
 
       {ready && !settingsOpen && (
         <section className="mobile-controls" aria-label="Touch controls">
