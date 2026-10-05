@@ -1512,7 +1512,9 @@ impl ArpgGame {
                     "saved monster health exceeds authoritative maximum",
                 ));
             }
-            if monster.stagger_ticks_remaining > content().max_stagger_ticks() {
+            // Arrows apply their own (not yet content-defined) stagger.
+            let max_stagger = content().max_stagger_ticks().max(ARROW_STAGGER_TICKS);
+            if monster.stagger_ticks_remaining > max_stagger {
                 return Err(GameError::new("saved monster stagger reaction is invalid"));
             }
             if let Some(action) = monster.action {
@@ -6757,6 +6759,17 @@ mod tests {
         assert_eq!(content().counter_window_ticks, COUNTER_WINDOW_TICKS);
         assert_eq!(content().combos.len(), 4);
         assert_eq!(content().max_stagger_ticks(), HEAVY_FINISHER_STAGGER_TICKS);
+    }
+
+    #[test]
+    fn a_save_during_arrow_stagger_restores() {
+        let mut game = ArpgGame::new_with_seed(42).unwrap();
+        game.add_player(1).unwrap();
+        game.monsters[0].stagger_ticks_remaining = ARROW_STAGGER_TICKS;
+        assert!(ArpgGame::from_save_state(game.save_state().unwrap()).is_ok());
+        game.monsters[0].stagger_ticks_remaining =
+            content().max_stagger_ticks().max(ARROW_STAGGER_TICKS) + 1;
+        assert!(ArpgGame::from_save_state(game.save_state().unwrap()).is_err());
     }
 
     #[test]

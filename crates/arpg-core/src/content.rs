@@ -157,7 +157,8 @@ impl Content {
             .expect("validation requires one definition per action kind")
     }
 
-    /// Longest stagger any player action applies; bounds restored monster reactions.
+    /// Longest stagger any content-defined player action applies. Restoration also allows
+    /// the arrow stagger, which is not content-defined yet.
     pub fn max_stagger_ticks(&self) -> u8 {
         self.actions
             .values()
