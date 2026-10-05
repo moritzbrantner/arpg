@@ -2300,14 +2300,18 @@ impl ArpgGame {
                 }
             }
         };
+        let mut result = result;
         if let InteractionResult::PickedUp { gold, .. } | InteractionResult::Opened { gold, .. } =
-            result
+            &mut result
         {
             let player = self
                 .players
                 .get_mut(&player_id)
                 .ok_or_else(|| GameError::new("interaction references an unknown player"))?;
-            player.gold = player.gold.saturating_add(gold);
+            let before = player.gold;
+            player.gold = player.gold.saturating_add(*gold);
+            // Publish what was actually credited (gold saturates at its maximum).
+            *gold = player.gold - before;
         }
         let order = self.next_event_order();
         self.interaction_events.push(InteractionEventSnapshot {
@@ -6588,6 +6592,27 @@ mod tests {
         // Players resolve in id order: player 1's strike, then player 2's pickup.
         assert_eq!(snapshot.strike_events[0].order, 0);
         assert_eq!(snapshot.interaction_events[0].order, 1);
+    }
+
+    #[test]
+    fn interaction_events_report_the_gold_actually_credited() {
+        let (mut game, x, z) = strike_arena();
+        game.players.get_mut(&1).unwrap().gold = u32::MAX - 3;
+        game.ground_loot.push(GroundLootState {
+            id: GROUND_LOOT_ID_BASE,
+            position: Vec3i::new(x + 50, PLAYER_Y, z),
+            kind: LootKind::Gold,
+            amount: GROUND_LOOT_GOLD_AMOUNT,
+        });
+        let events = interact(&mut game, 1);
+        assert_eq!(
+            events[0].result,
+            InteractionResult::PickedUp {
+                target: InteractionTarget::Loot(GROUND_LOOT_ID_BASE),
+                gold: 3
+            }
+        );
+        assert_eq!(game.players[&1].gold, u32::MAX);
     }
 
     #[test]
