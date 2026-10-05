@@ -1284,3 +1284,26 @@ select {
   align-items: baseline;
   gap: 0.2rem 0.75rem;
 }
+
+.training-scenario {
+  display: grid;
+  gap: 0.25rem;
+}
+.strike-timeline h2 {
+  margin: 0;
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #b7ab98;
+}
+.strike-timeline ol {
+  margin: 0.25rem 0 0;
+  padding-left: 1rem;
+  max-height: 8rem;
+  overflow-y: auto;
+  font-size: 0.75rem;
+}
+.strike-timeline p {
+  margin: 0.25rem 0 0;
+  font-size: 0.75rem;
+}

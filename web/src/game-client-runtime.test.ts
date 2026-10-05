@@ -31,6 +31,8 @@ const snapshotJson = (tick, players = [1]) =>
       staticColliders: [],
       groundLoot: [],
       arrows: [],
+      scenario: "dungeon",
+      strikeEvents: [],
     },
   });
 
@@ -443,7 +445,7 @@ test("a simulation error stops the loop and fails closed", () => {
 test("training pause, step and speed are owned by the runtime loop", () => {
   const { runtime, games, tick } = harness();
   runtime.startLocal({ seed: 42, training: true });
-  expect(runtime.getState().training).toEqual({ paused: false, speed: 1 });
+  expect(runtime.getState().training).toEqual({ paused: false, speed: 1, scenario: "dungeon" });
   tick(2);
   expect(games[0].tick).toBe(2);
 
@@ -604,4 +606,34 @@ test("restoring a save mid-draw cancels the draw for this client", () => {
     drawHeld: true,
   });
   expect(restored.commands).toEqual([{ playerId: 1, sequence: 4, payload: { type: "cancelBow" } }]);
+});
+
+test("training authorities are created from the named scenario", () => {
+  const scenarios = [];
+  const local = createGameClientRuntime({
+    snapshots: createSnapshotStore(),
+    createGame: (seed, scenario) => {
+      scenarios.push([seed, scenario]);
+      return new FakeGame(seed);
+    },
+    createPeerSession: () => {
+      throw new Error("unused");
+    },
+    attachPeerSession: () => () => {},
+    createDedicatedSession: () => {
+      throw new Error("unused");
+    },
+    supportsWebTransport: () => false,
+    freshRunSeed: () => 1,
+    onStatus: () => {},
+    setInterval: () => 1,
+    clearInterval: () => {},
+  });
+  local.startLocal({ seed: 9, training: true, scenario: "archery" });
+  local.startLocal({ seed: 9, scenario: "archery" });
+  expect(scenarios).toEqual([
+    [9, "archery"],
+    [9, undefined],
+  ]);
+  expect(local.getState().training).toBeNull();
 });

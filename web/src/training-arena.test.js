@@ -12,14 +12,20 @@ test("reads a deterministic training request from the URL", () => {
   expect(readTrainingRequest("?scenario=training&seed=42")).toEqual({
     requested: true,
     seed: 42,
+    fixture: "dungeon",
+    unknownFixture: null,
   });
-  expect(readTrainingRequest("?scenario=training&seed=invalid")).toEqual({
+  expect(readTrainingRequest("?scenario=training&seed=invalid&fixture=enemy")).toEqual({
     requested: true,
     seed: DEFAULT_TRAINING_SEED,
+    fixture: "enemy",
+    unknownFixture: null,
   });
-  expect(readTrainingRequest("?seed=7")).toEqual({
+  expect(readTrainingRequest("?seed=7&fixture=lava")).toEqual({
     requested: false,
     seed: 7,
+    fixture: "dungeon",
+    unknownFixture: "lava",
   });
 });
 
@@ -78,4 +84,14 @@ test("writes and removes the training scenario without discarding other query st
   expect(disabled.searchParams.has("scenario")).toBe(false);
   expect(disabled.searchParams.get("seed")).toBe("99");
   expect(disabled.searchParams.get("join")).toBe("ABCD");
+});
+
+test("writes the named scenario only when it is not the plain dungeon", () => {
+  const archery = new URL(withTrainingRequest("https://example.test/game", true, 5, "archery"));
+  expect(archery.searchParams.get("fixture")).toBe("archery");
+  expect(readTrainingRequest(archery.search).fixture).toBe("archery");
+  const plain = new URL(withTrainingRequest(archery.toString(), true, 5, "dungeon"));
+  expect(plain.searchParams.has("fixture")).toBe(false);
+  const left = new URL(withTrainingRequest(archery.toString(), false, 5));
+  expect(left.searchParams.has("fixture")).toBe(false);
 });

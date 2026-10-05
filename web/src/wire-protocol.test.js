@@ -11,8 +11,10 @@ const payload = {
   staticColliders: [],
   groundLoot: [],
   arrows: [],
+  scenario: "dungeon",
+  strikeEvents: [],
 };
-const encode = (value) => JSON.stringify({ protocolVersion: 10, payload: value });
+const encode = (value) => JSON.stringify({ protocolVersion: 11, payload: value });
 
 test("admits bounded presentation data and rejects malformed vectors and collections", () => {
   expect(decodeSnapshot(encode(payload))).toEqual(payload);
@@ -77,4 +79,25 @@ test("admits shield guard state and rejects malformed guard data", () => {
     { ...player, drawTicks: -1 },
   ])
     expect(() => decodeSnapshot(encode({ ...payload, players: [candidate] }))).toThrow();
+});
+
+test("admits workbench scenario and strike events and rejects malformed ones", () => {
+  const event = {
+    source: { kind: "player", id: 1 },
+    strikeTick: 4,
+    definition: "sword.lightSwing",
+    target: { kind: "monster", id: 2 },
+    result: { kind: "hit", damage: 25, defeated: false },
+  };
+  const decoded = decodeSnapshot(
+    encode({ ...payload, scenario: "archery", strikeEvents: [event] }),
+  );
+  expect(decoded.strikeEvents[0].result.kind).toBe("hit");
+  for (const candidate of [
+    { ...payload, scenario: "lava" },
+    { ...payload, strikeEvents: [{ ...event, source: { kind: "ghost", id: 1 } }] },
+    { ...payload, strikeEvents: [{ ...event, result: { kind: "parried" } }] },
+    { ...payload, strikeEvents: [{ ...event, definition: "x".repeat(65) }] },
+  ])
+    expect(() => decodeSnapshot(encode(candidate))).toThrow();
 });
