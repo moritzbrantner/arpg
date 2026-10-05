@@ -84,6 +84,17 @@ const COUNTER_RANGE: i64 = 200;
 const COUNTER_DAMAGE_NUMERATOR: u16 = 2;
 const COUNTER_DAMAGE_DENOMINATOR: u16 = 1;
 const COUNTER_STAGGER_TICKS: u8 = 12;
+/// Longest stagger any player strike applies; bounds restored monster reactions.
+const MAX_MONSTER_STAGGER_TICKS: u8 = {
+    let mut maximum = PRIMARY_STAGGER_TICKS;
+    if SECONDARY_STAGGER_TICKS > maximum {
+        maximum = SECONDARY_STAGGER_TICKS;
+    }
+    if COUNTER_STAGGER_TICKS > maximum {
+        maximum = COUNTER_STAGGER_TICKS;
+    }
+    maximum
+};
 const PRIMARY_STAGGER_TICKS: u8 = 4;
 const SECONDARY_STAGGER_TICKS: u8 = 8;
 const BASE_ATTACK_DAMAGE: u16 = 25;
@@ -1020,7 +1031,7 @@ impl ArpgGame {
                     "saved monster health exceeds authoritative maximum",
                 ));
             }
-            if monster.stagger_ticks_remaining > SECONDARY_STAGGER_TICKS {
+            if monster.stagger_ticks_remaining > MAX_MONSTER_STAGGER_TICKS {
                 return Err(GameError::new("saved monster stagger reaction is invalid"));
             }
             if let Some(action) = monster.action {
@@ -4195,6 +4206,42 @@ mod tests {
         game.players.get_mut(&1).unwrap().health = 0;
         game.advance_tick().unwrap();
         assert_eq!(game.players.get(&1).unwrap().counter, None);
+    }
+
+    #[test]
+    fn a_save_right_after_a_counter_hit_restores() {
+        // Generated monsters only: saves must match the generated dungeon.
+        let mut game = ArpgGame::new_with_seed(42).unwrap();
+        let (x, z) = game
+            .rooms
+            .iter()
+            .find(|room| room.id == STRIKE_ROOM)
+            .unwrap()
+            .center();
+        game.player_spawns[0] = Vec3i::new(x, PLAYER_Y, z);
+        game.add_player(1).unwrap();
+        game.reconcile_encounters().unwrap();
+        let index = game
+            .monsters
+            .iter()
+            .position(|monster| monster.room_id == STRIKE_ROOM)
+            .unwrap();
+        game.monsters[index].position = Vec3i::new(x + 120, PLAYER_Y, z);
+        let monster_id = game.monsters[index].id;
+        raise_guard_fully(&mut game);
+        assert_eq!(claw(&mut game, monster_id), CLAW_BLOCKED);
+        game.tick += 1;
+        command(&mut game, ArpgCommand::PrimaryAttack);
+        assert_eq!(action_kind(&game), Some(ActionKind::Counter));
+        while game.monsters[index].stagger_ticks_remaining == 0 {
+            game.advance_tick().unwrap();
+        }
+        assert_eq!(
+            game.monsters[0].stagger_ticks_remaining,
+            COUNTER_STAGGER_TICKS
+        );
+        let restored = ArpgGame::from_save_state(game.save_state().unwrap()).unwrap();
+        assert_eq!(restored.snapshot().unwrap(), game.snapshot().unwrap());
     }
 
     #[test]
