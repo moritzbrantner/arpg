@@ -60,7 +60,13 @@ export function PlayerHud({ store, playerId, status }) {
               ? "Interact"
               : player.action.kind === "counter"
                 ? "Counter"
-                : "Primary"}{" "}
+                : player.action.kind === "lightFollowUp"
+                  ? "Light 2"
+                  : player.action.kind === "lightFinisher"
+                    ? "Light finisher"
+                    : player.action.kind === "heavyFinisher"
+                      ? "Heavy finisher"
+                      : "Primary"}{" "}
           · {player.action.phase} · {player.action.ticksRemaining}t
         </p>
       )}
@@ -74,25 +80,27 @@ export function PlayerHud({ store, playerId, status }) {
   );
 }
 
+const LIGHT_KINDS = new Set(["primaryAttack", "counter", "lightFollowUp", "lightFinisher"]);
+const HEAVY_KINDS = new Set(["secondaryAttack", "heavyFinisher"]);
+
 export function CombatActions({ store, playerId, triggerCombatAction, setTouchGuard }) {
   const player = focusedPlayer(useSnapshot(store), playerId);
+  const light = LIGHT_KINDS.has(player?.action?.kind);
+  const heavy = HEAVY_KINDS.has(player?.action?.kind);
+  // Attack buttons stay usable during attacks: the authority decides whether a press
+  // continues a combo, is buffered or is ignored.
+  const canAttack = Boolean(playerId && player?.alive);
   return (
     <section className="combat-actions" aria-label="Combat actions">
       <button
         type="button"
-        className={`combat-action combat-action-primary ${
-          player?.action?.kind === "primaryAttack" || player?.action?.kind === "counter"
-            ? "is-committed"
-            : ""
-        } ${player?.counter ? "is-counter-ready" : ""}`}
-        data-phase={
-          player?.action?.kind === "primaryAttack" || player?.action?.kind === "counter"
-            ? player.action.phase
-            : undefined
-        }
+        className={`combat-action combat-action-primary ${light ? "is-committed" : ""} ${
+          player?.counter ? "is-counter-ready" : ""
+        }`}
+        data-phase={light ? player.action.phase : undefined}
         data-counter={player?.counter ? "ready" : undefined}
         aria-label="Primary attack"
-        disabled={!playerId || !player?.alive || Boolean(player?.action)}
+        disabled={!canAttack}
         onClick={() => triggerCombatAction("primaryAttack")}
       >
         <strong>{player?.counter ? "Counter" : "Attack"}</strong>
@@ -100,12 +108,10 @@ export function CombatActions({ store, playerId, triggerCombatAction, setTouchGu
       </button>
       <button
         type="button"
-        className={`combat-action combat-action-secondary ${
-          player?.action?.kind === "secondaryAttack" ? "is-committed" : ""
-        }`}
-        data-phase={player?.action?.kind === "secondaryAttack" ? player.action.phase : undefined}
+        className={`combat-action combat-action-secondary ${heavy ? "is-committed" : ""}`}
+        data-phase={heavy ? player.action.phase : undefined}
         aria-label="Heavy attack"
-        disabled={!playerId || !player?.alive || Boolean(player?.action)}
+        disabled={!canAttack}
         onClick={() => triggerCombatAction("secondaryAttack")}
       >
         <strong>Heavy</strong>
@@ -165,7 +171,15 @@ export function TrainingDiagnostics({ store, playerId }) {
   const actingMonsterCount =
     snapshot?.monsters.filter((monster) => monster.alive && monster.action).length ?? 0;
   const playerActionLabel = player?.action
-    ? `${player.action.kind} · ${player.action.phase} · ${player.action.ticksRemaining}t`
+    ? [
+        player.action.kind,
+        player.action.phase,
+        `${player.action.ticksRemaining}t`,
+        player.action.connected ? "hit" : null,
+        player.action.buffered ? `queued ${player.action.buffered}` : null,
+      ]
+        .filter(Boolean)
+        .join(" · ")
     : "idle";
   return (
     <dl className="training-diagnostics">

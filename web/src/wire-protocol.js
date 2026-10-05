@@ -1,13 +1,22 @@
-// Browser projection of the arpg-protocol v8 envelope. This adapter validates
+// Browser projection of the arpg-protocol v9 envelope. This adapter validates
 // only data consumed by presentation; gameplay rules remain in arpg-core.
-export const PROTOCOL_VERSION = 8;
+export const PROTOCOL_VERSION = 9;
 const MAX_SNAPSHOT_CHARACTERS = 65_535;
 const integer = (value) => Number.isSafeInteger(value);
 const nonNegative = (value) => integer(value) && value >= 0;
 const vector = (value, size) =>
   Array.isArray(value) && value.length === size && value.every(integer);
 const phases = new Set(["windup", "active", "recovery"]);
-const kinds = new Set(["primaryAttack", "secondaryAttack", "interact", "counter"]);
+const kinds = new Set([
+  "primaryAttack",
+  "secondaryAttack",
+  "interact",
+  "counter",
+  "lightFollowUp",
+  "lightFinisher",
+  "heavyFinisher",
+]);
+const comboInputs = new Set(["light", "heavy"]);
 const playerReactions = new Set(["hurt", "blocked", "guardBroken"]);
 const guardPhases = new Set(["raising", "raised"]);
 const optional = (value, validate) => value === null || value === undefined || validate(value);
@@ -50,7 +59,12 @@ export function decodeSnapshot(encoded) {
         ].every((key) => nonNegative(player[key])) &&
         optional(
           player.action,
-          (value) => action(value) && kinds.has(value.kind) && vector(value.facing, 2),
+          (value) =>
+            action(value) &&
+            kinds.has(value.kind) &&
+            vector(value.facing, 2) &&
+            typeof value.connected === "boolean" &&
+            optional(value.buffered, (input) => comboInputs.has(input)),
         ) &&
         optional(
           player.reaction,
