@@ -8,7 +8,7 @@ function focusedPlayer(snapshot, playerId) {
   return snapshot?.players.find((player) => player.id === playerId) ?? null;
 }
 
-export function PlayerHud({ store, playerId, status }) {
+export function PlayerHud({ store, playerId, status, interactKey = "E" }) {
   const snapshot = useSnapshot(store);
   const player = focusedPlayer(snapshot, playerId);
   const healthPercent = player?.maxHealth
@@ -36,8 +36,10 @@ export function PlayerHud({ store, playerId, status }) {
       )}
       <p>{status}</p>
       {player && !player.alive && <p className="defeated-status">Defeated</p>}
-      {player?.alive && interactionPromptText(player.interaction) && (
-        <p className="interaction-prompt">{interactionPromptText(player.interaction)}</p>
+      {player?.alive && interactionPromptText(player.interaction, interactKey) && (
+        <p className="interaction-prompt">
+          {interactionPromptText(player.interaction, interactKey)}
+        </p>
       )}
       {player?.alive && (player.guard || player.reaction?.kind === "guardBroken") && (
         <p className="guard-status" aria-live="polite">
@@ -212,9 +214,11 @@ export function TrainingTick({ store }) {
 const TIMELINE_LIMIT = 8;
 
 // Prompts come from the authority's own interaction choice, never a browser radius.
-function interactionPromptText(interaction) {
-  if (interaction?.kind === "available")
-    return interaction.target.kind === "chest" ? "E · Open chest" : "E · Pick up gold";
+function interactionPromptText(interaction, key) {
+  if (interaction?.kind === "available") {
+    const what = interaction.target.kind === "chest" ? "Open chest" : "Pick up gold";
+    return key ? `${key} · ${what}` : `${what} (Interact is unbound)`;
+  }
   if (interaction?.reason === "chestLocked") return "Chest locked until the room is cleared";
   if (interaction?.reason === "obstructed") return "Out of reach behind a wall";
   return null;
