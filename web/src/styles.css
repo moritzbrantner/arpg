@@ -799,6 +799,16 @@ select {
   border-color: #768c65;
   background: #34452fe8;
 }
+.combat-action-guard {
+  border-color: #5f7d9c;
+  background: #2c3d50e8;
+  touch-action: none;
+}
+.combat-action-guard[data-guard="raised"] {
+  box-shadow:
+    0 0 0 3px #8fb3d9aa,
+    0 0.4rem 1.5rem #0008;
+}
 .combat-action:active {
   transform: scale(0.96);
 }

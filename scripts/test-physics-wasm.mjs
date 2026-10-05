@@ -14,8 +14,12 @@ async function load(path) {
 const candidate = await load(current);
 const baseline = reference && await load(reference);
 const cases = ["quiet", "party", "sparse", "wall", "corner", "actions", "lifecycle"];
+// Each module speaks its own protocol version, so an older reference build stays comparable.
+function protocolVersionOf(game) {
+  return JSON.parse(game.snapshotJson()).protocolVersion;
+}
 function command(game, sequence, payload) {
-  game.applyCommand(1, sequence, JSON.stringify({ protocolVersion: 6, payload }));
+  game.applyCommand(1, sequence, JSON.stringify({ protocolVersion: protocolVersionOf(game), payload }));
 }
 function replay(module, seed, scenario) {
   const game = new module.WasmGame(seed);
@@ -56,12 +60,13 @@ function replay(module, seed, scenario) {
     const encoded = game.snapshotJson();
     snapshotMs += performance.now() - snapshotStart;
     const snapshot = JSON.parse(encoded).payload;
+    // Compare gameplay payloads, not version envelopes.
+    trace.push(JSON.stringify(snapshot));
     assert.equal(snapshot.tick, tick + 1);
     for (const player of snapshot.players) {
       assert(player.position[0] >= -2945 && player.position[0] <= 2945);
       assert(player.position[2] >= -1745 && player.position[2] <= 1745);
     }
-    trace.push(encoded);
   }
   const unchanged = game.snapshotJson();
   command(game, ++sequence, { type: "setMovement", x: 0, z: 0 });

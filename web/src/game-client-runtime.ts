@@ -42,6 +42,7 @@ export interface ClientState {
 }
 
 export type MovementKey = "forward" | "backward" | "left" | "right";
+export type GuardSource = "keyboard" | "touch";
 
 export interface WasmGameLike {
   addPlayer(id: number): void;
@@ -103,6 +104,8 @@ export interface RestoredGame {
   controlledPlayerId: number;
   lastSequence: number;
   movement: [number, number];
+  // Whether the saved authority still holds the guard; this client holds nothing yet.
+  guardHeld?: boolean;
 }
 
 const textEncoder = new TextEncoder();
@@ -141,6 +144,8 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
   let timer: unknown = null;
   let trainingCarry = 0;
   let movement = idleMovement();
+  // Every device currently holding guard; the authority sees one held flag.
+  const guardSources = new Set<GuardSource>();
 
   const update = (patch: Partial<ClientState>) => {
     let changed = false;
@@ -219,6 +224,7 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
     sequence = 0;
     trainingCarry = 0;
     movement = idleMovement();
+    guardSources.clear();
   };
 
   // Replaces the current source. The returned token identifies the new generation.
@@ -302,7 +308,13 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
 
     // Restores a validated save. The caller loads the game first, so a rejected save leaves
     // the current source untouched.
-    restore({ game: next, controlledPlayerId, lastSequence, movement: [x, z] }: RestoredGame) {
+    restore({
+      game: next,
+      controlledPlayerId,
+      lastSequence,
+      movement: [x, z],
+      guardHeld = false,
+    }: RestoredGame) {
       if (disposed()) {
         next.free?.();
         return;
@@ -311,6 +323,7 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
       sequence = lastSequence;
       movement.lastX = x;
       movement.lastZ = z;
+      if (guardHeld) dispatch({ type: "setGuard", raised: false });
     },
 
     async hostPeer(apiBase: string) {
@@ -462,6 +475,15 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
     },
 
     // Clears every held input (focus loss, settings, context change) and stops movement.
+    // Held shield input from one device; guard stays raised while any device holds it.
+    setGuard(source: GuardSource, held: boolean) {
+      const wasHeld = guardSources.size > 0;
+      if (held) guardSources.add(source);
+      else guardSources.delete(source);
+      const isHeld = guardSources.size > 0;
+      if (isHeld !== wasHeld) dispatch({ type: "setGuard", raised: isHeld });
+    },
+
     releaseInput() {
       movement.forward = false;
       movement.backward = false;
@@ -470,6 +492,10 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
       movement.touchX = 0;
       movement.touchZ = 0;
       flushMovement();
+      if (guardSources.size > 0) {
+        guardSources.clear();
+        dispatch({ type: "setGuard", raised: false });
+      }
     },
 
     setTrainingPaused(paused: boolean) {

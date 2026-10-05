@@ -1,6 +1,6 @@
-// Browser projection of the arpg-protocol v6 envelope. This adapter validates
+// Browser projection of the arpg-protocol v7 envelope. This adapter validates
 // only data consumed by presentation; gameplay rules remain in arpg-core.
-export const PROTOCOL_VERSION = 6;
+export const PROTOCOL_VERSION = 7;
 const MAX_SNAPSHOT_CHARACTERS = 65_535;
 const integer = (value) => Number.isSafeInteger(value);
 const nonNegative = (value) => integer(value) && value >= 0;
@@ -8,6 +8,8 @@ const vector = (value, size) =>
   Array.isArray(value) && value.length === size && value.every(integer);
 const phases = new Set(["windup", "active", "recovery"]);
 const kinds = new Set(["primaryAttack", "secondaryAttack", "interact"]);
+const playerReactions = new Set(["hurt", "blocked", "guardBroken"]);
+const guardPhases = new Set(["raising", "raised"]);
 const optional = (value, validate) => value === null || value === undefined || validate(value);
 const action = (value) => phases.has(value?.phase) && nonNegative(value.ticksRemaining);
 const reaction = (value, kind) => value?.kind === kind && nonNegative(value.ticksRemaining);
@@ -50,7 +52,17 @@ export function decodeSnapshot(encoded) {
           player.action,
           (value) => action(value) && kinds.has(value.kind) && vector(value.facing, 2),
         ) &&
-        optional(player.reaction, (value) => reaction(value, "hurt")),
+        optional(
+          player.reaction,
+          (value) => playerReactions.has(value?.kind) && nonNegative(value.ticksRemaining),
+        ) &&
+        optional(
+          player.guard,
+          (value) => guardPhases.has(value?.phase) && nonNegative(value.ticksRemaining),
+        ) &&
+        nonNegative(player.guardPoints) &&
+        nonNegative(player.maxGuardPoints) &&
+        player.guardPoints <= player.maxGuardPoints,
     ) &&
     list(
       "monsters",
