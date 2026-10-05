@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const INPUT_REV = "b3b7204faa47d3b0af56eebc55cdfd4ced127ddc";
-const SETUP_REV = "a8064298182c71267a453071f923d9e0640afdcf";
+const SETUP_REV = "cc5c20fabdac0fc9da4329a5be04d0f4e8eae383";
 
 export const FOUNDATION_FILES = [
   [
@@ -75,8 +75,36 @@ export const FOUNDATION_FILES = [
     "moritzbrantner/multiplayer-setup-service",
     SETUP_REV,
     "web/resilient-lobby-session.ts",
-    "eadc267a846ff8cdff721de503bcf259b796889e",
+    "7ebebeba27c15b627dee1fbe165ab74a2ec8f09e",
     "src/vendor/multiplayer-setup-service/resilient-lobby-session.ts",
+  ],
+  [
+    "moritzbrantner/multiplayer-setup-service",
+    SETUP_REV,
+    "web/demo-session.ts",
+    "41719539090b9abc72520a896248476e9df1d8a3",
+    "src/vendor/multiplayer-setup-service/demo-session.ts",
+  ],
+  [
+    "moritzbrantner/multiplayer-setup-service",
+    SETUP_REV,
+    "web/turn-credentials.ts",
+    "9807da9f052c7998545d0bb3d10e96cb94d588c0",
+    "src/vendor/multiplayer-setup-service/turn-credentials.ts",
+  ],
+  [
+    "moritzbrantner/multiplayer-setup-service",
+    SETUP_REV,
+    "web/events.ts",
+    "9b588c4b71a509f3d0870c8d83fb951978fd08a6",
+    "src/vendor/multiplayer-setup-service/events.ts",
+  ],
+  [
+    "moritzbrantner/multiplayer-setup-service",
+    SETUP_REV,
+    "web/lobby-types.ts",
+    "9018fb2ffb0c95fee4007479beb57c2a6d303591",
+    "src/vendor/multiplayer-setup-service/lobby-types.ts",
   ],
 ];
 

@@ -2,11 +2,11 @@
 
 ARPG peer-hosted co-op consumes `moritzbrantner/multiplayer-setup-service`; it does not implement a second rendezvous/signaling protocol.
 
-Accepted upstream revision: `556f1aa2ac889acffd5b2b27163fca10f1901793`.
+Accepted upstream revision: `cc5c20fabdac0fc9da4329a5be04d0f4e8eae383`.
 
-The browser build fetches the exact accepted `ResilientLobbySession` source into generated `web/src/vendor/multiplayer-setup-service/` and verifies its Git blob hash before Vite can build. Generated vendor files are ignored rather than becoming an ARPG-owned fork.
+The browser build fetches the accepted lobby, credential, and event modules into generated `web/src/vendor/multiplayer-setup-service/` and verifies their Git blob hashes before Vite can build. Generated vendor files are ignored rather than becoming an ARPG-owned fork.
 
-The browser constructs `ResilientLobbySession` with `topology: "host"`:
+The browser constructs the upstream `DemoLobbySession` with `topology: "host"`. This client extends `ResilientLobbySession` with public STUN discovery and authenticated TURN credential acquisition/refresh. Its close lifecycle cancels credential requests and refresh timers. Connections remain direct-first and use the latest TURN credentials during recovery:
 
 - player 1 is the host browser;
 - ready peers receive deterministic ARPG player slots 2–4;

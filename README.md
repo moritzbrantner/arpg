@@ -91,7 +91,7 @@ failure traces under ignored `web/test-results/`.
 
 `bun run setup` acquires the accepted browser sources from `input-bindings` and `multiplayer-setup-service`, verifies their exact Git blob hashes, and builds the Rust/Wasm package. Verified foundation files are reused without downloads or rewrites. After setup, `bun run build` bundles locally with Vite and `bun run dev` starts Vite without downloading sources. Run `bun run wasm` again after Rust changes. Generated vendored sources and Wasm output are not committed.
 
-For peer co-op, run or deploy `multiplayer-setup-service` separately and enter its URL in **Settings → Peer co-op**. Local development defaults to `http://127.0.0.1:8787`. GitHub Pages requires an HTTPS/WSS deployment whose `ALLOWED_ORIGINS` includes the ARPG Pages origin.
+For peer co-op, enter `https://moenarch.com` in **Settings → Peer co-op**, or run a separate `multiplayer-setup-service` deployment. Local development defaults to `http://127.0.0.1:8787`. GitHub Pages requires an HTTPS/WSS deployment whose `ALLOWED_ORIGINS` includes the ARPG Pages origin. Hosts and guests fetch short-lived TURN credentials after lobby admission and refresh them in memory before expiry. The upstream client uses TURN during recovery when direct connectivity fails; deployments without TURN still permit direct connections.
 
 Dedicated server:
 
@@ -112,7 +112,7 @@ The dedicated host defaults to UDP port `4433` and session path `/arpg`. Optiona
 - `physics-engine`: `65e00816fa4e17c899f45d618dcdc8c40990dc00`
 - `3d-lab`: `f484db8a3d2a7a555fa463eddf9c28790b240ce0`
 - `input-bindings`: `b3b7204faa47d3b0af56eebc55cdfd4ced127ddc`
-- `multiplayer-setup-service`: `a8064298182c71267a453071f923d9e0640afdcf`
+- `multiplayer-setup-service`: `cc5c20fabdac0fc9da4329a5be04d0f4e8eae383`
 - `game-server`: `a3851dab9c1fb25dd31b465fb554ca475769caab`
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the authority and trust boundaries.

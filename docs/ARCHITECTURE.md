@@ -82,9 +82,9 @@ Snapshots are typed core values first and encoded only at the protocol boundary.
 
 ## Multiplayer setup service boundary
 
-Browser peer setup should consume the upstream resilient lobby client rather than forking its signaling/reconnect/ICE logic. The accepted initial setup-service revision is `a8064298182c71267a453071f923d9e0640afdcf`.
+Browser peer setup consumes the upstream lobby client rather than forking its signaling/reconnect/ICE logic. The accepted setup-service revision is `cc5c20fabdac0fc9da4329a5be04d0f4e8eae383`.
 
-When the web shell is introduced, vendor the exact accepted upstream browser source under `web/vendor/multiplayer-setup-service/` with deterministic pin checks, following the same pattern already proven by other game consumers. Use `LobbySession`/`ResilientLobbySession` with `topology: "host"`.
+The web shell vendors the accepted upstream browser modules under generated `web/src/vendor/multiplayer-setup-service/` with deterministic pin checks. It uses `DemoLobbySession` with `topology: "host"` to inherit resilient connections, STUN discovery, and participant-authenticated temporary TURN credential refresh. The deployment shared secret remains server-side.
 
 Invite URLs may contain the public lobby identifier only. Participant capability tokens and TURN credentials must never be placed in invite URLs, logs, analytics, or committed configuration.
 
