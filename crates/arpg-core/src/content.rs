@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{ActionKind, ComboInput};
 
-pub const CONTENT_FORMAT_VERSION: u16 = 1;
+pub const CONTENT_FORMAT_VERSION: u16 = 2;
 /// Longest definition id; matches the browser projection's bound on published ids.
 pub const MAX_DEFINITION_ID_LENGTH: usize = 64;
 
@@ -192,6 +192,25 @@ fn strikes(kind: ActionKind) -> bool {
 impl ContentBundle {
     /// Parses JSON and orders every collection canonically, so source order never matters.
     pub fn from_json(json: &str) -> Result<Self, Vec<ContentError>> {
+        // Read the format first: an older bundle should report its version, not the
+        // first field the current format added.
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Format {
+            format_version: Option<u16>,
+        }
+        if let Ok(Format {
+            format_version: Some(version),
+        }) = serde_json::from_str::<Format>(json)
+            && version != CONTENT_FORMAT_VERSION
+        {
+            return Err(vec![ContentError {
+                path: "formatVersion".into(),
+                message: format!(
+                    "unsupported content format version {version}; expected {CONTENT_FORMAT_VERSION}"
+                ),
+            }]);
+        }
         let mut bundle: Self = serde_json::from_str(json).map_err(|error| {
             vec![ContentError {
                 path: "$".into(),
@@ -553,5 +572,22 @@ mod tests {
         );
 
         assert!(ContentBundle::from_json("{\"formatVersion\": 1, \"surprise\": true}").is_err());
+    }
+
+    #[test]
+    fn an_older_format_bundle_reports_its_version_before_missing_fields() {
+        let previous = include_str!("../content/base.json")
+            .replace("\"formatVersion\": 2", "\"formatVersion\": 1")
+            .replace(", \"pursuitSpeed\": 4", "");
+
+        let errors = ContentBundle::from_json(&previous).unwrap_err();
+
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].path, "formatVersion");
+        assert!(
+            errors[0]
+                .message
+                .contains("unsupported content format version 1")
+        );
     }
 }

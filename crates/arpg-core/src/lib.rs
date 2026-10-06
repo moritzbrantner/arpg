@@ -2917,10 +2917,17 @@ impl ArpgGame {
                         .entry(monster.room_id)
                         .or_insert_with(|| self.room_grid(monster.room_id));
                     // End inside reach so the attack range check passes on arrival.
+                    // The attack's own line test: the physics ray against fixed bodies.
+                    let clear_line = |(x, z): (i32, i32)| {
+                        !self
+                            .strike_obstructed(Vec3i::new(x, monster.position.y, z), target)
+                            .unwrap_or(true)
+                    };
                     grid.find_path(
                         (monster.position.x, monster.position.z),
                         (target.x, target.z),
                         reach - i64::from(NAV_CELL_SIZE),
+                        clear_line,
                         &mut expansions,
                     )
                     .map_or(Vec3i::ZERO, |path| {
@@ -3036,6 +3043,18 @@ impl ArpgGame {
             .map(|room| room.id)
             .collect::<BTreeSet<_>>();
         let targets = self.monster_targets();
+        // Pairs with a clear strike line: an obstructed monster keeps pursuing instead of
+        // winding up into a wall.
+        let mut clear_lines = BTreeSet::new();
+        for monster in &self.monsters {
+            for &(player_id, room_id, position) in &targets {
+                if room_id == monster.room_id
+                    && !self.strike_obstructed(monster.position, position)?
+                {
+                    clear_lines.insert((monster.id, player_id));
+                }
+            }
+        }
 
         let mut hits = Vec::new();
         for monster in &mut self.monsters {
@@ -3078,6 +3097,7 @@ impl ArpgGame {
             let target = targets
                 .iter()
                 .filter(|(_, room_id, _)| *room_id == monster.room_id)
+                .filter(|(player_id, _, _)| clear_lines.contains(&(monster.id, *player_id)))
                 .filter_map(|&(player_id, _, position)| {
                     let dx = i64::from(position.x - monster.position.x);
                     let dz = i64::from(position.z - monster.position.z);
@@ -4965,12 +4985,29 @@ mod tests {
 
     #[test]
     fn monster_strikes_share_the_result_path_and_respect_walls() {
+        // A wall already between them: the monster does not wind up into it.
         let (mut game, x, z) = strike_arena();
         place_monster(&mut game, 1, x + 120, z);
         place_blocker(
             &mut game,
             0,
             x + 70,
+            z,
+            Vec3i::new(10, WALL_HALF_HEIGHT, 15),
+        );
+        game.advance_tick().unwrap();
+        assert!(game.monsters[0].action.is_none());
+
+        // A wall that appears during the wind-up obstructs the strike.
+        let (mut game, x, z) = strike_arena();
+        place_monster(&mut game, 1, x + 120, z);
+        game.advance_tick().unwrap();
+        assert!(game.monsters[0].action.is_some());
+        let striking_from = monster_position(&game, 1);
+        place_blocker(
+            &mut game,
+            0,
+            (x + striking_from.x) / 2,
             z,
             Vec3i::new(10, WALL_HALF_HEIGHT, 15),
         );
@@ -7642,6 +7679,21 @@ mod tests {
 
         assert!(arrived.is_some(), "the monster finds a way around");
         assert!(rounded_the_wall);
+        assert!(
+            !game
+                .strike_obstructed(monster_position(&game, 1), player_position(&game))
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn a_player_hugging_a_pillar_is_still_reached_and_attacked() {
+        let (mut game, x, z) = strike_arena();
+        // The player stands against a pillar's face, where no monster body fits.
+        place_blocker(&mut game, 0, x - 60, z, Vec3i::new(20, 50, 60));
+        place_monster(&mut game, 1, x + 600, z + 250);
+
+        assert!(ticks_until_windup(&mut game, 1, 400).is_some());
         assert!(
             !game
                 .strike_obstructed(monster_position(&game, 1), player_position(&game))

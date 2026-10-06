@@ -157,13 +157,16 @@ impl RoomGrid {
             .find(|&cell| self.is_free(cell))
     }
 
-    /// Cell centres from `start` to a free cell within `reach` of `target` that has a clear
-    /// line to it. `None` when no such cell is reachable. `searched` counts A* expansions.
+    /// Cell centres from `start` to a free cell within `reach` of `target` from which
+    /// `clear_line` holds. `None` when no such cell is reachable. The line test is the
+    /// caller's: the target itself may stand where a monster body does not fit.
+    /// `searched` counts A* expansions.
     pub(crate) fn find_path(
         &self,
         start: (i32, i32),
         target: (i32, i32),
         reach: i64,
+        mut clear_line: impl FnMut((i32, i32)) -> bool,
         searched: &mut u64,
     ) -> Option<Vec<(i32, i32)>> {
         let start = self.free_cell_near(start)?;
@@ -177,7 +180,7 @@ impl RoomGrid {
                 let (x, z) = self.cell_center(cell);
                 let dx = i64::from(target.0 - x);
                 let dz = i64::from(target.1 - z);
-                dx * dx + dz * dz <= reach_sq && self.segment_is_free((x, z), target)
+                dx * dx + dz * dz <= reach_sq && clear_line((x, z))
             },
             |&cell| {
                 *searched += 1;
@@ -286,7 +289,13 @@ mod tests {
         let mut searched = 0;
 
         let path = grid
-            .find_path((100, 100), (300, 100), 60, &mut searched)
+            .find_path(
+                (100, 100),
+                (300, 100),
+                60,
+                |point| grid.segment_is_free(point, (300, 100)),
+                &mut searched,
+            )
             .expect("the target is reachable around the wall");
 
         assert!(searched > 0);
@@ -317,12 +326,24 @@ mod tests {
         let mut searched = 0;
 
         assert!(
-            open.find_path((30, 30), (200, 200), 40, &mut searched)
-                .is_some()
+            open.find_path(
+                (30, 30),
+                (200, 200),
+                40,
+                |point| open.segment_is_free(point, (200, 200)),
+                &mut searched
+            )
+            .is_some()
         );
         assert!(
             closed
-                .find_path((30, 30), (200, 200), 40, &mut searched)
+                .find_path(
+                    (30, 30),
+                    (200, 200),
+                    40,
+                    |point| closed.segment_is_free(point, (200, 200)),
+                    &mut searched
+                )
                 .is_none()
         );
         let start = closed.cell_at(30, 30);
@@ -336,8 +357,20 @@ mod tests {
         let pillar = Rect::centered(200, 200, 20, 60);
         let grid = RoomGrid::new(ROOM, &[pillar], 30);
         let mut searched = 0;
-        let first = grid.find_path((60, 200), (340, 200), 50, &mut searched);
-        let second = grid.find_path((60, 200), (340, 200), 50, &mut searched);
+        let first = grid.find_path(
+            (60, 200),
+            (340, 200),
+            50,
+            |point| grid.segment_is_free(point, (340, 200)),
+            &mut searched,
+        );
+        let second = grid.find_path(
+            (60, 200),
+            (340, 200),
+            50,
+            |point| grid.segment_is_free(point, (340, 200)),
+            &mut searched,
+        );
 
         assert!(first.is_some());
         assert_eq!(first, second);
