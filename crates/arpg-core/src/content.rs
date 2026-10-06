@@ -14,6 +14,9 @@ use serde::{Deserialize, Serialize};
 use crate::{ActionKind, ComboInput};
 
 pub const CONTENT_FORMAT_VERSION: u16 = 2;
+/// Pursuit stops one navigation cell (20 units) inside strike reach, so a monster
+/// strike must reach at least two cells.
+pub(crate) const MIN_MONSTER_STRIKE_REACH: i64 = 40;
 /// Longest definition id; matches the browser projection's bound on published ids.
 pub const MAX_DEFINITION_ID_LENGTH: usize = 64;
 
@@ -410,6 +413,15 @@ impl ContentBundle {
                 if monster.pursuit_speed == 0 {
                     fail(path.clone(), "pursuit speed must be positive");
                 }
+                if strike_by_id
+                    .get(monster.strike.as_str())
+                    .is_some_and(|strike| strike.reach < MIN_MONSTER_STRIKE_REACH)
+                {
+                    fail(
+                        path.clone(),
+                        "monster strike reach must be at least 40 units for pursuit",
+                    );
+                }
                 match strike_by_id.get(monster.strike.as_str()) {
                     Some(strike) => Some(MonsterDefinition {
                         health: monster.health,
@@ -559,6 +571,20 @@ mod tests {
         assert!(
             two.iter()
                 .any(|error| error.contains("exactly one monster"))
+        );
+
+        let short_reach = errors(|bundle| {
+            let claw = bundle
+                .strikes
+                .iter_mut()
+                .find(|strike| strike.id == "monster.claw")
+                .unwrap();
+            claw.reach = 20;
+        });
+        assert!(
+            short_reach
+                .iter()
+                .any(|error| error.contains("at least 40 units"))
         );
 
         let long = errors(|bundle| bundle.strikes[0].id = "s".repeat(65));
