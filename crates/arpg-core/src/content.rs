@@ -83,6 +83,8 @@ pub struct MonsterData {
     pub recovery_ticks: u8,
     pub damage: u16,
     pub experience_reward: u32,
+    /// Pursuit speed in world units per tick.
+    pub pursuit_speed: u8,
 }
 
 /// One invariant violation, with the definition path that broke it.
@@ -139,6 +141,7 @@ pub(crate) struct MonsterDefinition {
     pub recovery_ticks: u8,
     pub damage: u16,
     pub experience_reward: u32,
+    pub pursuit_speed: i32,
 }
 
 /// A validated bundle with resolved references.
@@ -385,6 +388,9 @@ impl ContentBundle {
                 {
                     fail(path.clone(), "every phase needs at least one tick");
                 }
+                if monster.pursuit_speed == 0 {
+                    fail(path.clone(), "pursuit speed must be positive");
+                }
                 match strike_by_id.get(monster.strike.as_str()) {
                     Some(strike) => Some(MonsterDefinition {
                         health: monster.health,
@@ -394,6 +400,7 @@ impl ContentBundle {
                         recovery_ticks: monster.recovery_ticks,
                         damage: monster.damage,
                         experience_reward: monster.experience_reward,
+                        pursuit_speed: i32::from(monster.pursuit_speed),
                     }),
                     None => {
                         fail(path, "references an unknown strike");

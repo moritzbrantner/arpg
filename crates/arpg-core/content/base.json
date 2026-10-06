@@ -26,6 +26,6 @@
     { "from": "sword.counter", "input": "light", "opensAt": 2, "closesAt": 10, "requiresHit": false, "to": "sword.lightFollowUp" }
   ],
   "monsters": [
-    { "id": "monster.brute", "health": 100, "strike": "monster.claw", "windupTicks": 18, "activeTicks": 1, "recoveryTicks": 30, "damage": 10, "experienceReward": 50 }
+    { "id": "monster.brute", "health": 100, "strike": "monster.claw", "windupTicks": 18, "activeTicks": 1, "recoveryTicks": 30, "damage": 10, "experienceReward": 50, "pursuitSpeed": 4 }
   ]
 }

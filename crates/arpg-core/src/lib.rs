@@ -13,8 +13,10 @@ pub use content::{
     CONTENT_FORMAT_VERSION, ContentBundle, ContentError, base_bundle, content_revision,
 };
 use content::{ComboTransition, StrikeDefinition, content};
+use navigation::{NAV_CELL_SIZE, Rect, RoomGrid, isqrt};
 
 mod content;
+mod navigation;
 #[cfg(test)]
 mod physics_work;
 #[cfg(test)]
@@ -180,6 +182,9 @@ const MAX_LIVE_ARROWS: usize = 32;
 const ARROW_ID_BASE: u64 = 1;
 /// Query-only hurt boxes for monsters, which are game-owned rather than physics bodies.
 const MONSTER_HURTBOX_BASE: u64 = 40_000;
+/// Monster bodies exist while their monster is alive in an Active room (#65).
+const MONSTER_BODY_BASE: u64 = 60_000;
+const MONSTER_BODY_HALF_EXTENTS: Vec3i = Vec3i::new(30, 50, 30);
 const MONSTER_HURTBOX_HALF_EXTENTS: Vec3i = Vec3i::new(40, 50, 40);
 #[cfg(test)]
 const PRIMARY_STAGGER_TICKS: u8 = 4;
@@ -1098,6 +1103,24 @@ struct MonsterState {
     stagger_ticks_remaining: u8,
 }
 
+/// What a monster does this tick, derived from authoritative state (#65). Attacks keep
+/// their own phase machine (`MonsterActionState`); pursuit only moves between them.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MonsterBehavior {
+    Dead,
+    /// Its room's encounter is not running.
+    Dormant,
+    Staggered,
+    Attacking,
+    /// In strike reach of its target with a clear line; the attack starts this tick.
+    Engaging,
+    Pursuing {
+        target: Vec3i,
+    },
+    /// No living player in its room.
+    Idle,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct GroundLootState {
     id: GroundLootId,
@@ -1151,6 +1174,12 @@ pub struct ArpgGame {
     tick: u64,
     world: World,
     physics_steps: u64,
+    /// A* expansions spent on monster pursuit; work evidence, not gameplay state.
+    navigation_expansions: u64,
+    /// Strike-geometry tests pack monsters closer than bodies allow; they keep monsters
+    /// out of physics.
+    #[cfg(test)]
+    monsters_without_bodies: bool,
     players: BTreeMap<PlayerId, PlayerState>,
     last_sequences: BTreeMap<PlayerId, u32>,
     rooms: Vec<RoomSnapshot>,
@@ -1221,6 +1250,9 @@ impl ArpgGame {
             tick: 0,
             world,
             physics_steps: 0,
+            navigation_expansions: 0,
+            #[cfg(test)]
+            monsters_without_bodies: false,
             players: BTreeMap::new(),
             last_sequences: BTreeMap::new(),
             rooms,
@@ -1885,6 +1917,15 @@ impl ArpgGame {
     /// where one gameplay tick begins stepping physics more than once.
     pub fn physics_steps(&self) -> u64 {
         self.physics_steps
+    }
+
+    /// A* node expansions spent on monster pursuit so far.
+    pub fn navigation_expansions(&self) -> u64 {
+        self.navigation_expansions
+    }
+
+    fn monster_body_id(monster_id: u32) -> BodyId {
+        BodyId(MONSTER_BODY_BASE + u64::from(monster_id))
     }
 
     fn player_body_id(player_id: PlayerId) -> BodyId {
@@ -2818,15 +2859,90 @@ impl ArpgGame {
         Ok(())
     }
 
-    fn advance_monster_actions(&mut self) -> Result<(), GameError> {
+    /// Gives monsters in running encounters a physics body and sets each body's velocity
+    /// from its behaviour: pursuers follow a room-grid path, everything else holds still.
+    fn steer_monsters(&mut self) -> Result<(), GameError> {
+        #[cfg(test)]
+        if self.monsters_without_bodies {
+            return Ok(());
+        }
         let active_rooms = self
             .rooms
             .iter()
             .filter(|room| room.encounter_state == RoomEncounterState::Active)
             .map(|room| room.id)
             .collect::<BTreeSet<_>>();
-        let targets = self
-            .players
+        for monster in &self.monsters {
+            let body_id = Self::monster_body_id(monster.id);
+            let wants_body = monster.health > 0 && active_rooms.contains(&monster.room_id);
+            match (
+                wants_body,
+                self.world.body(body_id).map(RigidBody::position),
+            ) {
+                (true, None) => self
+                    .world
+                    .add_body(RigidBody::dynamic(
+                        body_id,
+                        monster.position,
+                        Vec3i::ZERO,
+                        MONSTER_BODY_HALF_EXTENTS,
+                    ))
+                    .map_err(physics_error)?,
+                // Placed outside physics (scenario setup, tests): the body follows.
+                (true, Some(position)) if position != monster.position => self
+                    .world
+                    .set_position(body_id, monster.position)
+                    .map_err(physics_error)?,
+                (false, Some(_)) => {
+                    self.world.remove_body(body_id);
+                }
+                _ => {}
+            }
+        }
+
+        let targets = self.monster_targets();
+        let reach = content().monster.strike.reach;
+        let speed = content().monster.pursuit_speed;
+        let mut grids = BTreeMap::new();
+        let mut velocities = Vec::new();
+        let mut expansions = 0;
+        for monster in &self.monsters {
+            let body_id = Self::monster_body_id(monster.id);
+            if self.world.body(body_id).is_none() {
+                continue;
+            }
+            let velocity = match self.monster_behavior(monster, &active_rooms, &targets) {
+                MonsterBehavior::Pursuing { target } => {
+                    let grid = grids
+                        .entry(monster.room_id)
+                        .or_insert_with(|| self.room_grid(monster.room_id));
+                    // End inside reach so the attack range check passes on arrival.
+                    grid.find_path(
+                        (monster.position.x, monster.position.z),
+                        (target.x, target.z),
+                        reach - i64::from(NAV_CELL_SIZE),
+                        &mut expansions,
+                    )
+                    .map_or(Vec3i::ZERO, |path| {
+                        pursuit_velocity(grid, monster.position, &path, speed)
+                    })
+                }
+                _ => Vec3i::ZERO,
+            };
+            velocities.push((body_id, velocity));
+        }
+        for (body_id, velocity) in velocities {
+            self.world
+                .set_velocity(body_id, velocity)
+                .map_err(physics_error)?;
+        }
+        self.navigation_expansions = self.navigation_expansions.saturating_add(expansions);
+        Ok(())
+    }
+
+    /// Living players and the room each stands in.
+    fn monster_targets(&self) -> Vec<(PlayerId, RoomId, Vec3i)> {
+        self.players
             .iter()
             .filter(|(_, state)| state.health > 0)
             .filter_map(|(&player_id, _)| {
@@ -2834,7 +2950,92 @@ impl ArpgGame {
                 let room_id = self.room_at_position(position)?;
                 Some((player_id, room_id, position))
             })
+            .collect()
+    }
+
+    fn monster_behavior(
+        &self,
+        monster: &MonsterState,
+        active_rooms: &BTreeSet<RoomId>,
+        targets: &[(PlayerId, RoomId, Vec3i)],
+    ) -> MonsterBehavior {
+        if monster.health == 0 {
+            return MonsterBehavior::Dead;
+        }
+        if !active_rooms.contains(&monster.room_id) {
+            return MonsterBehavior::Dormant;
+        }
+        if monster.stagger_ticks_remaining > 0 {
+            return MonsterBehavior::Staggered;
+        }
+        if monster.action.is_some() {
+            return MonsterBehavior::Attacking;
+        }
+        // The same choice the attack makes: nearest living player in the room, then id.
+        let Some((distance_sq, _, target)) = targets
+            .iter()
+            .filter(|(_, room_id, _)| *room_id == monster.room_id)
+            .map(|&(player_id, _, position)| {
+                let dx = i64::from(position.x - monster.position.x);
+                let dz = i64::from(position.z - monster.position.z);
+                (dx * dx + dz * dz, player_id, position)
+            })
+            .min_by_key(|&(distance_sq, player_id, _)| (distance_sq, player_id))
+        else {
+            return MonsterBehavior::Idle;
+        };
+        let reach = content().monster.strike.reach;
+        if distance_sq <= reach * reach
+            && !self
+                .strike_obstructed(monster.position, target)
+                .unwrap_or(true)
+        {
+            MonsterBehavior::Engaging
+        } else {
+            MonsterBehavior::Pursuing { target }
+        }
+    }
+
+    /// Passability of `room_id` for a monster body: fixed bodies (walls, pillars, locked
+    /// doors) inflated by the body's clearance.
+    fn room_grid(&self, room_id: RoomId) -> RoomGrid {
+        let room = self
+            .rooms
+            .iter()
+            .find(|room| room.id == room_id)
+            .expect("monsters belong to generated rooms");
+        let obstacles = self
+            .world
+            .bodies()
+            .filter(|body| body.kind() == BodyKind::Fixed)
+            .map(|body| {
+                let position = body.position();
+                let half = body.half_extents();
+                Rect::centered(position.x, position.z, half.x, half.z)
+            })
             .collect::<Vec<_>>();
+        RoomGrid::new(
+            Rect {
+                min_x: room.min_x,
+                max_x: room.max_x,
+                min_z: room.min_z,
+                max_z: room.max_z,
+            },
+            &obstacles,
+            // A body may sit anywhere in its cell; one cell of margin keeps it strictly clear
+            // of obstacles, which physics treats as contact even when only touching.
+            MONSTER_BODY_HALF_EXTENTS.x.max(MONSTER_BODY_HALF_EXTENTS.z) + NAV_CELL_SIZE,
+        )
+    }
+
+    fn advance_monster_actions(&mut self) -> Result<(), GameError> {
+        let active_rooms = self
+            .rooms
+            .iter()
+            .filter(|room| room.encounter_state == RoomEncounterState::Active)
+            .map(|room| room.id)
+            .collect::<BTreeSet<_>>();
+        let targets = self.monster_targets();
 
         let mut hits = Vec::new();
         for monster in &mut self.monsters {
@@ -3191,6 +3392,7 @@ impl AuthoritativeGame for ArpgGame {
                 )
                 .map_err(physics_error)?;
         }
+        self.steer_monsters()?;
         {
             #[cfg(test)]
             let measurement = physics_workloads::start_physics();
@@ -3204,6 +3406,11 @@ impl AuthoritativeGame for ArpgGame {
                 .ok_or_else(|| GameError::new("physics step counter overflow"))?;
             #[cfg(test)]
             physics_workloads::finish_physics(measurement, &_report);
+        }
+        for monster in &mut self.monsters {
+            if let Some(body) = self.world.body(Self::monster_body_id(monster.id)) {
+                monster.position = body.position();
+            }
         }
         self.reconcile_encounters()?;
         self.advance_actions()?;
@@ -3665,6 +3872,29 @@ const fn vec_to_array(value: Vec3i) -> [i32; 3] {
 
 const fn array_to_vec(value: [i32; 3]) -> Vec3i {
     Vec3i::new(value[0], value[1], value[2])
+}
+
+/// Velocity toward the farthest path point in direct line, at most `speed` per tick.
+fn pursuit_velocity(grid: &RoomGrid, position: Vec3i, path: &[(i32, i32)], speed: i32) -> Vec3i {
+    let from = (position.x, position.z);
+    let Some(&(x, z)) = path
+        .iter()
+        .rev()
+        .find(|&&point| grid.segment_is_free(from, point))
+        // Pressed against an obstacle: first step out to the path's free start cell.
+        .or_else(|| path.first())
+    else {
+        return Vec3i::ZERO;
+    };
+    let dx = i64::from(x - position.x);
+    let dz = i64::from(z - position.z);
+    let length = isqrt(dx * dx + dz * dz);
+    if length == 0 {
+        return Vec3i::ZERO;
+    }
+    let speed = i64::from(speed).min(length);
+    let component = |delta: i64| i32::try_from(delta * speed / length).unwrap_or(0);
+    Vec3i::new(component(dx), 0, component(dz))
 }
 
 #[cfg(test)]
@@ -4546,6 +4776,7 @@ mod tests {
     fn strike_volume_matches_an_analytic_reference_across_a_grid() {
         for (facing, seed_offset) in [((1, 0), 0), ((0, -1), 1), ((-1, 1), 2)] {
             let (mut game, x, z) = strike_arena();
+            game.monsters_without_bodies = true;
             game.players.get_mut(&1).unwrap().facing_x = facing.0;
             game.players.get_mut(&1).unwrap().facing_z = facing.1;
             let mut expected = Vec::new();
@@ -7327,5 +7558,205 @@ mod tests {
             ArpgGame::from_save_state(save).unwrap_err().message(),
             "save room set does not match generated dungeon"
         );
+    }
+
+    fn monster_position(game: &ArpgGame, id: u32) -> Vec3i {
+        game.monsters
+            .iter()
+            .find(|monster| monster.id == id)
+            .unwrap()
+            .position
+    }
+
+    fn player_position(game: &ArpgGame) -> Vec3i {
+        game.world
+            .body(ArpgGame::player_body_id(1))
+            .unwrap()
+            .position()
+    }
+
+    fn xz_distance_sq(a: Vec3i, b: Vec3i) -> i64 {
+        let dx = i64::from(a.x - b.x);
+        let dz = i64::from(a.z - b.z);
+        dx * dx + dz * dz
+    }
+
+    fn overlaps_xz(center: Vec3i, half: Vec3i, other: Vec3i, other_half: Vec3i) -> bool {
+        (center.x - other.x).abs() < half.x + other_half.x
+            && (center.z - other.z).abs() < half.z + other_half.z
+    }
+
+    /// Ticks until monster `id` starts a wind-up, or `None` within `limit`.
+    fn ticks_until_windup(game: &mut ArpgGame, id: u32, limit: usize) -> Option<usize> {
+        (1..=limit).find(|_| {
+            game.advance_tick().unwrap();
+            game.monsters
+                .iter()
+                .find(|monster| monster.id == id)
+                .unwrap()
+                .action
+                .is_some_and(|action| action.phase == ActionPhase::Windup)
+        })
+    }
+
+    #[test]
+    fn monster_pursues_across_its_room_and_attacks_on_arrival() {
+        let (mut game, x, z) = strike_arena();
+        place_monster(&mut game, 1, x + 700, z + 200);
+        let start = monster_position(&game, 1);
+        let reach = content().monster.strike.reach;
+
+        let arrived =
+            ticks_until_windup(&mut game, 1, 400).expect("the monster reaches its target");
+
+        let position = monster_position(&game, 1);
+        assert!(xz_distance_sq(position, player_position(&game)) <= reach * reach);
+        let travelled = isqrt(xz_distance_sq(start, position));
+        // Never faster than its content speed.
+        assert!(travelled <= i64::from(content().monster.pursuit_speed) * arrived as i64);
+        assert!(game.navigation_expansions() > 0);
+    }
+
+    #[test]
+    fn pursuit_goes_around_a_wall_without_entering_it() {
+        let (mut game, x, z) = strike_arena();
+        // A wall between player and monster; the gaps at its ends are wider than a body.
+        let wall_half = Vec3i::new(20, 50, 220);
+        place_blocker(&mut game, 0, x + 300, z, wall_half);
+        place_monster(&mut game, 1, x + 520, z);
+        let wall = Vec3i::new(x + 300, PLAYER_Y, z);
+
+        let mut rounded_the_wall = false;
+        let arrived = (1..=600).find(|_| {
+            game.advance_tick().unwrap();
+            let position = monster_position(&game, 1);
+            assert!(!overlaps_xz(
+                position,
+                MONSTER_BODY_HALF_EXTENTS,
+                wall,
+                wall_half
+            ));
+            rounded_the_wall |= (position.z - z).abs() > wall_half.z;
+            game.monsters[0].action.is_some()
+        });
+
+        assert!(arrived.is_some(), "the monster finds a way around");
+        assert!(rounded_the_wall);
+        assert!(
+            !game
+                .strike_obstructed(monster_position(&game, 1), player_position(&game))
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn staggered_and_attacking_monsters_hold_their_position() {
+        let (mut game, x, z) = strike_arena();
+        place_monster(&mut game, 1, x + 600, z);
+        game.monsters[0].stagger_ticks_remaining = 20;
+        let start = monster_position(&game, 1);
+        for _ in 0..15 {
+            game.advance_tick().unwrap();
+        }
+        assert_eq!(monster_position(&game, 1), start);
+
+        let mut game = strike_arena().0;
+        place_monster(&mut game, 1, x + 100, z);
+        ticks_until_windup(&mut game, 1, 5).expect("a monster in reach attacks at once");
+        let striking_from = monster_position(&game, 1);
+        while game.monsters[0].action.is_some() {
+            game.advance_tick().unwrap();
+            assert_eq!(monster_position(&game, 1), striking_from);
+        }
+    }
+
+    #[test]
+    fn an_unreachable_target_leaves_the_monster_idle() {
+        let (mut game, x, z) = strike_arena();
+        // Close the player in; the gaps are narrower than a monster body.
+        for (index, (dx, dz, half_x, half_z)) in [
+            (0, 120, 140, 20),
+            (0, -120, 140, 20),
+            (120, 0, 20, 140),
+            (-120, 0, 20, 140),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            place_blocker(
+                &mut game,
+                index as u64,
+                x + dx,
+                z + dz,
+                Vec3i::new(half_x, 50, half_z),
+            );
+        }
+        place_monster(&mut game, 1, x + 600, z + 300);
+        let start = monster_position(&game, 1);
+
+        for _ in 0..60 {
+            game.advance_tick().unwrap();
+        }
+
+        assert_eq!(monster_position(&game, 1), start);
+        assert!(game.monsters[0].action.is_none());
+    }
+
+    #[test]
+    fn dead_monsters_lose_their_body() {
+        let (mut game, x, z) = strike_arena();
+        place_monster(&mut game, 1, x + 600, z);
+        place_monster(&mut game, 2, x - 600, z);
+        game.advance_tick().unwrap();
+        assert!(game.world.body(ArpgGame::monster_body_id(1)).is_some());
+
+        game.monsters[0].health = 0;
+        game.advance_tick().unwrap();
+
+        assert!(game.world.body(ArpgGame::monster_body_id(1)).is_none());
+        assert!(game.world.body(ArpgGame::monster_body_id(2)).is_some());
+    }
+
+    #[test]
+    fn pursuit_replays_and_continues_identically_after_a_save() {
+        // The room's generated monster: saves only accept the generated monster set.
+        let run = || {
+            let mut game = ArpgGame::new_with_seed(42).unwrap();
+            let (x, z) = game
+                .rooms
+                .iter()
+                .find(|room| room.id == STRIKE_ROOM)
+                .unwrap()
+                .center();
+            game.player_spawns[0] = Vec3i::new(x, PLAYER_Y, z);
+            game.add_player(1).unwrap();
+            let chaser = *game
+                .monsters
+                .iter()
+                .find(|monster| monster.room_id == STRIKE_ROOM)
+                .unwrap();
+            game.apply_command(
+                PlayerCommand::new(1, 1, ArpgCommand::SetMovement { x: 1, z: 1 }).unwrap(),
+            )
+            .unwrap();
+            for _ in 0..30 {
+                game.advance_tick().unwrap();
+            }
+            assert_ne!(
+                monster_position(&game, chaser.id),
+                chaser.position,
+                "mid-chase"
+            );
+            game
+        };
+        let mut game = run();
+        assert_eq!(run().snapshot().unwrap(), game.snapshot().unwrap());
+
+        let mut restored = ArpgGame::from_save_state(game.save_state().unwrap()).unwrap();
+        for _ in 0..40 {
+            game.advance_tick().unwrap();
+            restored.advance_tick().unwrap();
+            assert_eq!(restored.snapshot().unwrap(), game.snapshot().unwrap());
+        }
     }
 }
