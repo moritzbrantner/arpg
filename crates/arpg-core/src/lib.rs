@@ -2978,8 +2978,8 @@ impl ArpgGame {
         if monster.action.is_some() {
             return MonsterBehavior::Attacking;
         }
-        // The same choice the attack makes: nearest living player in the room, then id.
-        let Some((distance_sq, _, target)) = targets
+        // Nearest living player in the room first, then id.
+        let mut candidates: Vec<(i64, PlayerId, Vec3i)> = targets
             .iter()
             .filter(|(_, room_id, _)| *room_id == monster.room_id)
             .map(|&(player_id, _, position)| {
@@ -2987,19 +2987,24 @@ impl ArpgGame {
                 let dz = i64::from(position.z - monster.position.z);
                 (dx * dx + dz * dz, player_id, position)
             })
-            .min_by_key(|&(distance_sq, player_id, _)| (distance_sq, player_id))
-        else {
+            .collect();
+        candidates.sort_unstable_by_key(|&(distance_sq, player_id, _)| (distance_sq, player_id));
+        let Some(&(_, _, nearest)) = candidates.first() else {
             return MonsterBehavior::Idle;
         };
+        // The attack's eligibility first: any player in reach with a clear line is engaged
+        // where the monster stands, as the wind-up would choose; otherwise chase the nearest.
         let reach = content().monster.strike.reach;
-        if distance_sq <= reach * reach
-            && !self
-                .strike_obstructed(monster.position, target)
-                .unwrap_or(true)
-        {
+        let attackable = candidates.iter().any(|&(distance_sq, _, position)| {
+            distance_sq <= reach * reach
+                && !self
+                    .strike_obstructed(monster.position, position)
+                    .unwrap_or(true)
+        });
+        if attackable {
             MonsterBehavior::Engaging
         } else {
-            MonsterBehavior::Pursuing { target }
+            MonsterBehavior::Pursuing { target: nearest }
         }
     }
 
@@ -3914,7 +3919,17 @@ fn pursuit_velocity(grid: &RoomGrid, position: Vec3i, path: &[(i32, i32)], speed
     }
     let speed = i64::from(speed).min(length);
     let component = |delta: i64| i32::try_from(delta * speed / length).unwrap_or(0);
-    Vec3i::new(component(dx), 0, component(dz))
+    let velocity = Vec3i::new(component(dx), 0, component(dz));
+    if velocity != Vec3i::ZERO {
+        return velocity;
+    }
+    // Truncation dropped both components (a small speed on a diagonal): step along the
+    // dominant axis instead of standing still.
+    if dx.abs() >= dz.abs() {
+        Vec3i::new(dx.signum() as i32, 0, 0)
+    } else {
+        Vec3i::new(0, 0, dz.signum() as i32)
+    }
 }
 
 #[cfg(test)]
@@ -7699,6 +7714,45 @@ mod tests {
                 .strike_obstructed(monster_position(&game, 1), player_position(&game))
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn a_slow_pursuer_still_moves_on_a_diagonal() {
+        let grid = RoomGrid::new(
+            navigation::Rect {
+                min_x: 0,
+                max_x: 400,
+                min_z: 0,
+                max_z: 400,
+            },
+            &[],
+            30,
+        );
+        let path = [(310, 310)];
+
+        let velocity = pursuit_velocity(&grid, Vec3i::new(100, PLAYER_Y, 120), &path, 1);
+
+        assert_eq!(velocity, Vec3i::new(1, 0, 0));
+    }
+
+    #[test]
+    fn an_attackable_player_is_engaged_before_a_nearer_blocked_one() {
+        let (mut game, x, z) = strike_arena();
+        // Player 1 is nearest but behind a pillar; player 2 is in reach with a clear line.
+        game.player_spawns[1] = Vec3i::new(x + 50, PLAYER_Y, z + 160);
+        game.add_player(2).unwrap();
+        place_blocker(&mut game, 0, x + 50, z, Vec3i::new(10, 50, 40));
+        place_monster(&mut game, 1, x + 120, z);
+        let start = monster_position(&game, 1);
+
+        ticks_until_windup(&mut game, 1, 3).expect("the clear target is attacked at once");
+
+        assert_eq!(
+            monster_position(&game, 1),
+            start,
+            "it does not walk off to the blocked one"
+        );
+        assert_eq!(game.monsters[0].action.unwrap().target_player_id, 2);
     }
 
     #[test]
