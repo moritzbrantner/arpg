@@ -1,5 +1,5 @@
 {
-  "formatVersion": 2,
+  "formatVersion": 3,
   "counterWindowTicks": 30,
   "strikes": [
     { "id": "sword.lightSwing", "reach": 220, "frontal": true, "maxTargets": null, "blockable": true, "guardCost": 0 },
@@ -26,6 +26,6 @@
     { "from": "sword.counter", "input": "light", "opensAt": 2, "closesAt": 10, "requiresHit": false, "to": "sword.lightFollowUp" }
   ],
   "monsters": [
-    { "id": "monster.brute", "health": 100, "strike": "monster.claw", "windupTicks": 18, "activeTicks": 1, "recoveryTicks": 30, "damage": 10, "experienceReward": 50, "pursuitSpeed": 4 }
+    { "id": "monster.brute", "health": 100, "strike": "monster.claw", "windupTicks": 18, "activeTicks": 1, "recoveryTicks": 30, "damage": 10, "experienceReward": 50, "pursuitSpeed": 4, "aggroRange": 1200, "leashRange": 1800, "targetSwitchMargin": 150, "reacquireTicks": 20, "separationRange": 120 }
   ]
 }

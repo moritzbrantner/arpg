@@ -17,7 +17,7 @@ const payload = {
   chests: [],
   interactionEvents: [],
 };
-const encode = (value) => JSON.stringify({ protocolVersion: 13, payload: value });
+const encode = (value) => JSON.stringify({ protocolVersion: 14, payload: value });
 
 test("admits bounded presentation data and rejects malformed vectors and collections", () => {
   expect(decodeSnapshot(encode(payload))).toEqual(payload);
@@ -132,4 +132,39 @@ test("admits chests and interaction results and rejects malformed ones", () => {
 test("requires the authority's content revision", () => {
   for (const contentRevision of [undefined, "", "XYZ", "0123456789abcdef0"])
     expect(() => decodeSnapshot(encode({ ...payload, contentRevision }))).toThrow();
+});
+
+const monster = {
+  id: 1,
+  roomId: 2,
+  position: [0, 50, 0],
+  health: 100,
+  alive: true,
+  action: null,
+  reaction: null,
+  behavior: "pursuing",
+  targetPlayerId: 1,
+};
+
+test("monsters publish their authoritative behaviour and engaged target", () => {
+  const decoded = decodeSnapshot(encode({ ...payload, monsters: [monster] }));
+  expect(decoded.monsters[0].behavior).toBe("pursuing");
+  expect(decoded.monsters[0].targetPlayerId).toBe(1);
+  for (const behavior of ["returning", "searching", "holding", "idle", "dormant", "dead"])
+    expect(
+      decodeSnapshot(
+        encode({ ...payload, monsters: [{ ...monster, behavior, targetPlayerId: null }] }),
+      ).monsters[0].behavior,
+    ).toBe(behavior);
+  for (const candidate of [
+    { ...monster, behavior: undefined },
+    { ...monster, behavior: "fleeing" },
+    { ...monster, targetPlayerId: -1 },
+  ])
+    expect(() => decodeSnapshot(encode({ ...payload, monsters: [candidate] }))).toThrow();
+  expect(() =>
+    decodeSnapshot(
+      JSON.stringify({ protocolVersion: 13, payload: { ...payload, monsters: [monster] } }),
+    ),
+  ).toThrow("Unsupported");
 });

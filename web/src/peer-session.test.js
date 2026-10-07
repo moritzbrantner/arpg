@@ -37,7 +37,7 @@ function sessionFixture(role = "guest") {
 }
 
 const snapshot = JSON.stringify({
-  protocolVersion: 13,
+  protocolVersion: 14,
   payload: {
     tick: 1,
     runSeed: 42,

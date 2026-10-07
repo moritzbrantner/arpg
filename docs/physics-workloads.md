@@ -139,27 +139,42 @@ The checks are:
   vanishes. Each one gives identical snapshots on every tick with the cache kept and
   with it dropped every tick.
 - `retained_and_per_tick_pursuers_set_out_alike`: in 60 random chases, each pursuer
-  moves on its first tick exactly when the per-tick reference moves it.
+  moves on its first pursuit tick exactly when the per-tick reference moves it.
 - `strict_goal_cells_have_a_clear_physics_strike_line_to_their_whole_target_cell` checks
   the line test against the physics ray.
 - `a_chase_continues_identically_after_a_save_that_drops_the_navigation_cache` runs 95
   ticks after a save taken mid-chase while fields are held. Every snapshot equals the
   uninterrupted run's.
 
+### Engagement and separation (#109)
+
+The engagement policy decides *whom* a monster chases and whether it chases at all, and
+separation bends the velocity toward the next route point. Neither touches the cache:
+the target position a field is built for is still a player's position, and separation is
+a pure function of the bodies' positions before the step. So the determinism argument
+above holds unchanged, and `retained_navigation_never_changes_the_game` runs the chases
+with engagement and separation on. A body that separation pushes off its route is a body
+pushed off its route: the field repaths it like any other. A returning monster plans
+with the exact planner every tick (no line test, goal within one cell of its post);
+returning is rare and short, so it is not retained.
+
 ### Counts
 
 `physics_workloads::chase_navigation_work_against_the_per_tick_reference` replays the
-chase workload for 120 ticks per seed, with five pursuers on every tick. The counts are
-deterministic. A repath is a field search or an exact plan.
+chase workload for 120 ticks per seed. Five pursuers chase on every tick after the first,
+in which they engage (#109). The counts are deterministic. A repath is a field search or
+an exact plan. The counts were measured again after #109: there are 595 pursuit ticks per
+seed instead of 600, and separation bends the pursuers' velocities where they come close.
+Retained expansions moved by at most 1%.
 
 | Seed | Planner | Expansions | Peak expansions in one tick | Repaths | Physics queries | Grid builds |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
-| 42 | per tick (#65) | 114,570 | 1,258 | 600 | 600 | 120 |
-| 42 | retained | 15,735 | 873 | 109 | 0 | 1 |
-| 3735928559 | per tick (#65) | 77,351 | 962 | 600 | 600 | 120 |
-| 3735928559 | retained | 10,656 | 663 | 110 | 0 | 1 |
-| 2753562902 | per tick (#65) | 114,756 | 1,259 | 600 | 600 | 120 |
-| 2753562902 | retained | 17,052 | 873 | 119 | 0 | 1 |
+| 42 | per tick (#65) | 114,052 | 1,258 | 595 | 595 | 119 |
+| 42 | retained | 15,789 | 879 | 109 | 0 | 1 |
+| 3735928559 | per tick (#65) | 77,067 | 964 | 595 | 595 | 119 |
+| 3735928559 | retained | 10,765 | 667 | 110 | 0 | 1 |
+| 2753562902 | per tick (#65) | 114,191 | 1,261 | 595 | 595 | 119 |
+| 2753562902 | retained | 17,175 | 879 | 119 | 0 | 1 |
 
 The retained planner needs about a seventh of the expansions and a fifth of the repaths.
 It made no physics query in this chase, because no pursuer reached a strict goal and
@@ -172,14 +187,15 @@ The two planners give different traces, because their shortest routes may break 
 differently.
 
 The same test prints advisory whole-tick timings. The table shows medians of three
-release runs on `x86_64-unknown-linux-gnu` with rustc 1.98.1, dated 2026-10-07, in
-milliseconds for 120 ticks. *Without cache* is the retained planner with its cache dropped every tick.
+release runs on `x86_64-unknown-linux-gnu` with rustc 1.98.1, dated 2026-10-07 (after
+#109), in milliseconds for 120 ticks. *Without cache* is the retained planner with its
+cache dropped every tick.
 
 | Seed | Per tick (#65) | Without cache | Retained |
 | --- | ---: | ---: | ---: |
-| 42 | 75.87 | 32.16 | 6.99 |
-| 3735928559 | 56.08 | 28.61 | 6.00 |
-| 2753562902 | 78.92 | 37.85 | 6.95 |
+| 42 | 73.18 | 33.26 | 6.02 |
+| 3735928559 | 57.24 | 29.06 | 5.22 |
+| 2753562902 | 77.30 | 33.80 | 5.90 |
 
 Both uncached planners rasterize the room on every tick. The test does not separate
 that cost from the searches.
