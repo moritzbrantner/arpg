@@ -286,8 +286,13 @@ function buildFrame(snapshot, focusPlayerId, width, height, focusPlayerAccent = 
           : player.reaction?.kind === "guardBroken"
             ? "#9b6bd6"
             : (actionColor ?? (player.id === focusPlayerId ? focusPlayerAccent : "#6f91b6"));
-      // The thin shield board faces along the player's facing.
-      const shieldYaw = Math.atan2(facingX, facingZ);
+      // The thin shield board faces along the authoritative 8-way facing, which the core's
+      // guard cone uses, not the exact aim shown by the weapon and marker.
+      const guardFacing = player.facing ?? [1, 0];
+      const guardLength = Math.hypot(guardFacing[0], guardFacing[1]) || 1;
+      const guardX = guardFacing[0] / guardLength;
+      const guardZ = guardFacing[1] / guardLength;
+      const shieldYaw = Math.atan2(guardX, guardZ);
       const shield = player.guard
         ? [
             {
@@ -301,9 +306,9 @@ function buildFrame(snapshot, focusPlayerId, width, height, focusPlayerAccent = 
                     : "#55687d",
               transform: {
                 translation: [
-                  position[0] + facingX * 0.42,
+                  position[0] + guardX * 0.42,
                   Math.max(position[1], 0.5),
-                  position[2] + facingZ * 0.42,
+                  position[2] + guardZ * 0.42,
                 ],
                 rotationQuaternion: [0, Math.sin(shieldYaw / 2), 0, Math.cos(shieldYaw / 2)],
               },

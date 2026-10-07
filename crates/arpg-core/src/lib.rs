@@ -2062,6 +2062,20 @@ impl ArpgGame {
             if !game.lock_holds(player_id)? {
                 return Err(GameError::new("saved target lock is invalid"));
             }
+            // Facing is refreshed toward the lock after physics every tick, so a saved locked
+            // player faces its target; anything else would let the first restored tick
+            // resolve guards against a contradictory facing.
+            if let Some(target) = game.locked_target_position(player_id)?
+                && let Some(direction) =
+                    Self::direction_between(game.player_position(player_id)?, target)
+            {
+                let state = &game.players[&player_id];
+                if (state.facing_x, state.facing_z) != Self::facing_for(direction) {
+                    return Err(GameError::new(
+                        "saved player facing does not match its target lock",
+                    ));
+                }
+            }
         }
         Ok(game)
     }
@@ -2174,8 +2188,15 @@ impl ArpgGame {
     /// component rounded toward zero.
     fn aimed_velocity(direction: [i16; 2], speed: i32) -> (i32, i32) {
         let (x, z) = (i64::from(direction[0]), i64::from(direction[1]));
-        // Thousandths keep the length exact enough for short directions such as [1, 1].
-        let scaled_length = ((x * x + z * z) * 1_000_000).isqrt();
+        // Thousandths keep the length exact enough for short directions such as [1, 1]. The
+        // root is rounded up so no component, and so no launch, exceeds the draw speed.
+        let squared = (x * x + z * z) * 1_000_000;
+        let floor = squared.isqrt();
+        let scaled_length = if floor * floor == squared {
+            floor
+        } else {
+            floor + 1
+        };
         let component = |value: i64| {
             i32::try_from(value * i64::from(speed) * 1_000 / scaled_length)
                 .expect("aimed arrow velocity fits i32")
@@ -2193,8 +2214,7 @@ impl ArpgGame {
 
     /// Whether some accepted draw and direction produce this arrow's velocity and damage.
     /// Facing and aimed launches round each component toward zero, so a launched arrow's
-    /// planar speed lies within two units below its draw speed (and never meaningfully
-    /// above it).
+    /// planar speed lies within two units below its draw speed and never above it.
     fn arrow_launch_is_possible(arrow: &ArrowSnapshot) -> bool {
         (content().bow.min_draw_ticks..=content().bow.full_draw_ticks).any(|charge| {
             let (speed, damage) = Self::arrow_launch(charge);
@@ -2204,7 +2224,7 @@ impl ArpgGame {
             damage == arrow.damage
                 && vy == 0
                 && (speed - 2) * (speed - 2) <= length_sq
-                && length_sq <= (speed + 1) * (speed + 1)
+                && length_sq <= speed * speed
         })
     }
 
@@ -7514,6 +7534,21 @@ mod tests {
         assert_eq!(game.arrows[0].velocity, launched.velocity);
         assert_eq!(game.arrows[0].position[0], launched.position[0] + 53);
         assert!(ArpgGame::arrow_launch_is_possible(&game.arrows[0]));
+        // No aim or facing launches faster than the draw speed.
+        let mut fast = game.arrows[0];
+        fast.velocity = [ARROW_FULL_SPEED + 1, 0, 0];
+        assert!(!ArpgGame::arrow_launch_is_possible(&fast));
+        // Every exact aim stays within the draw speed after rounding.
+        for x in (-1_000..=1_000).step_by(37) {
+            for z in (-1_000..=1_000).step_by(41) {
+                if x == 0 && z == 0 {
+                    continue;
+                }
+                let (vx, vz) = ArpgGame::aimed_velocity([x, z], ARROW_FULL_SPEED);
+                let length_sq = i64::from(vx).pow(2) + i64::from(vz).pow(2);
+                assert!(length_sq <= i64::from(ARROW_FULL_SPEED).pow(2), "{x},{z}");
+            }
+        }
     }
 
     #[test]
@@ -7723,6 +7758,12 @@ mod tests {
         stale_facing.players[0].action = None;
         stale_facing.players[0].aim = Some([1000, 0]);
         stale_facing.players[0].facing = [-1, 0];
+        // A locked player faces its target once restored, so a reversed facing is corrupt.
+        let mut locked_facing = saved.clone();
+        locked_facing.players[0].facing = [
+            -locked_facing.players[0].facing[0],
+            -locked_facing.players[0].facing[1],
+        ];
         let mut aligned = stale_facing.clone();
         aligned.players[0].facing = [1, 0];
         assert!(ArpgGame::from_save_state(aligned).is_ok());
@@ -7734,6 +7775,7 @@ mod tests {
             (wide_aim, "aim direction"),
             (unknown_lock, "target lock"),
             (stale_facing, "facing does not match its aim"),
+            (locked_facing, "facing does not match its target lock"),
             (mismatched, "does not match its aim"),
         ] {
             let error = ArpgGame::from_save_state(corrupt).unwrap_err();
