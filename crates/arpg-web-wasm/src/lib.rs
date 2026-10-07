@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 
-use arpg_core::{ArpgGame, ArpgSaveState, AuthoritativeGame, PlayerCommand, ScenarioId};
+use arpg_core::{
+    ArpgGame, ArpgSaveState, AuthoritativeGame, PlayerCommand, ScenarioId, content_revision,
+};
 use arpg_protocol::{JsonProtocol, WireProtocol};
 use wasm_bindgen::prelude::*;
 
@@ -78,6 +80,13 @@ impl WasmGame {
         let save = self.game.save_state().map_err(js_error)?;
         serde_json::to_string(&save).map_err(js_error)
     }
+}
+
+/// Revision of the content bundle this build runs. Guests and dedicated clients compare it
+/// with the authority's published `contentRevision` before playing.
+#[wasm_bindgen(js_name = contentRevision)]
+pub fn wasm_content_revision() -> String {
+    content_revision().to_owned()
 }
 
 #[wasm_bindgen(js_name = loadGameFromSaveStateJson)]

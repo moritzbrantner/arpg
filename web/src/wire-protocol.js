@@ -1,6 +1,6 @@
-// Browser projection of the arpg-protocol v14 envelope. This adapter validates
+// Browser projection of the arpg-protocol v15 envelope. This adapter validates
 // only data consumed by presentation; gameplay rules remain in arpg-core.
-export const PROTOCOL_VERSION = 14;
+export const PROTOCOL_VERSION = 15;
 const MAX_SNAPSHOT_CHARACTERS = 65_535;
 const integer = (value) => Number.isSafeInteger(value);
 const nonNegative = (value) => integer(value) && value >= 0;
@@ -28,6 +28,8 @@ const scenarios = new Set([
 ]);
 const parties = new Set(["player", "monster"]);
 const strikeResults = new Set(["hit", "blocked", "guardBroken", "obstructed"]);
+// Content definition ids (`monster.brute`, `sword.lightSwing`): 1..=64 characters.
+const definitionId = (value) => typeof value === "string" && value.length > 0 && value.length <= 64;
 const party = (value) => parties.has(value?.kind) && nonNegative(value.id);
 const interactionTargets = new Set(["loot", "chest"]);
 const interactionRefusals = new Set(["nothingInRange", "chestLocked", "obstructed", "busy"]);
@@ -58,6 +60,18 @@ const guardPhases = new Set(["raising", "raised"]);
 const optional = (value, validate) => value === null || value === undefined || validate(value);
 const action = (value) => phases.has(value?.phase) && nonNegative(value.ticksRemaining);
 const reaction = (value, kind) => value?.kind === kind && nonNegative(value.ticksRemaining);
+
+// A guest or dedicated client plays only against an authority running the same content
+// bundle; otherwise timings, reach and rewards would silently disagree. Returns the reason
+// to refuse, or null when the revisions match.
+export function contentRevisionMismatch(localRevision, snapshot, authority) {
+  if (snapshot.contentRevision === localRevision) return null;
+  return (
+    `Incompatible game content: the ${authority} runs content revision ` +
+    `${snapshot.contentRevision}, this client runs ${localRevision}. ` +
+    "Both sides need the same game build."
+  );
+}
 
 export function encodeCommand(payload) {
   return JSON.stringify({ protocolVersion: PROTOCOL_VERSION, payload });
@@ -149,8 +163,7 @@ export function decodeSnapshot(encoded) {
         party(event.source) &&
         party(event.target) &&
         nonNegative(event.strikeTick) &&
-        typeof event.definition === "string" &&
-        event.definition.length <= 64 &&
+        definitionId(event.definition) &&
         strikeResults.has(event.result?.kind),
     ) &&
     list(
@@ -166,6 +179,10 @@ export function decodeSnapshot(encoded) {
       "monsters",
       (monster) =>
         nonNegative(monster?.id) &&
+        definitionId(monster.definition) &&
+        nonNegative(monster.health) &&
+        nonNegative(monster.maxHealth) &&
+        monster.health <= monster.maxHealth &&
         vector(monster.position, 3) &&
         typeof monster.alive === "boolean" &&
         optional(

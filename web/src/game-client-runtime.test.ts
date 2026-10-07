@@ -3,7 +3,9 @@ import { createGameClientRuntime } from "./game-client-runtime.ts";
 import { PROTOCOL_VERSION } from "./wire-protocol.js";
 import { createSnapshotStore } from "./snapshot-store.js";
 
-const snapshotJson = (tick, players = [1]) =>
+const LOCAL_REVISION = "0123456789abcdef";
+
+const snapshotJson = (tick, players = [1], contentRevision = LOCAL_REVISION) =>
   JSON.stringify({
     protocolVersion: PROTOCOL_VERSION,
     payload: {
@@ -33,7 +35,7 @@ const snapshotJson = (tick, players = [1]) =>
       groundLoot: [],
       arrows: [],
       scenario: "dungeon",
-      contentRevision: "0123456789abcdef",
+      contentRevision,
       strikeEvents: [],
       chests: [],
       interactionEvents: [],
@@ -173,6 +175,7 @@ function harness({ webTransport = true } = {}) {
     },
     supportsWebTransport: () => webTransport,
     freshRunSeed: () => nextSeed++,
+    localContentRevision: () => LOCAL_REVISION,
     onStatus: (status) => statuses.push(status),
     setInterval: (callback) => {
       const id = nextTimer++;
@@ -421,6 +424,37 @@ test("startup failures and rejected payloads become failed states, not black scr
   expect(statuses.at(-1)).toStartWith("Rejected dedicated snapshot");
   dedicatedSessions[1].ready.resolve();
   await connecting;
+});
+
+test("a dedicated authority running other content is refused with a clear reason", async () => {
+  const { runtime, dedicatedSessions, snapshots, statuses } = harness();
+  const connecting = runtime.startDedicated("https://server/arpg");
+  dedicatedSessions[0].callbacks.onWelcome({ playerId: 2, tickHz: 60 });
+  dedicatedSessions[0].callbacks.onSnapshot({
+    payload: new TextEncoder().encode(snapshotJson(5, [2], "fedcba9876543210")),
+  });
+  expect(dedicatedSessions[0].closed).toBe(true);
+  expect(snapshots.getSnapshot()).toBeNull();
+  expect(runtime.getState()).toMatchObject({ lifecycle: "failed", playerId: null });
+  expect(statuses.at(-1)).toBe(
+    "Incompatible game content: the dedicated authority runs content revision " +
+      "fedcba9876543210, this client runs 0123456789abcdef. Both sides need the same game build.",
+  );
+  dedicatedSessions[0].ready.resolve();
+  await connecting;
+});
+
+test("a guest whose host runs other content stops and releases the session", async () => {
+  const { runtime, peers, attachments, statuses } = harness();
+  const joining = runtime.joinPeer("https://lobby", "ABCD");
+  peers[0].join.resolve({});
+  await joining;
+  expect(attachments[0].options.localContentRevision()).toBe(LOCAL_REVISION);
+  attachments[0].options.onIncompatible("Incompatible game content: host differs");
+  expect(peers[0].closed).toBe(true);
+  expect(attachments[0].detached).toBe(true);
+  expect(runtime.getState()).toMatchObject({ lifecycle: "failed", playerId: null });
+  expect(statuses.at(-1)).toBe("Incompatible game content: host differs");
 });
 
 test("dedicated play without WebTransport leaves the current source untouched", async () => {

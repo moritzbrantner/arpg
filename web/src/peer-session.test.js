@@ -1,5 +1,8 @@
 import { expect, test } from "bun:test";
 import { attachPeerGameSession } from "./peer-session.js";
+import { PROTOCOL_VERSION } from "./wire-protocol.js";
+
+const LOCAL_REVISION = "0123456789abcdef";
 
 function sessionFixture(role = "guest") {
   const session = new EventTarget();
@@ -8,6 +11,8 @@ function sessionFixture(role = "guest") {
   const snapshots = [];
   const statuses = [];
   const commands = [];
+  const players = [];
+  const incompatible = [];
   let current = true;
   const detach = attachPeerGameSession({
     session,
@@ -18,12 +23,16 @@ function sessionFixture(role = "guest") {
       snapshotJson: () => "{}",
       applyCommand: (...args) => commands.push(args),
     }),
-    onPlayer() {},
+    onPlayer: (value) => players.push(value),
     onSnapshot: (value) => snapshots.push(value),
     onStatus: (value) => statuses.push(value),
+    localContentRevision: () => LOCAL_REVISION,
+    onIncompatible: (reason) => incompatible.push(reason),
   });
   return {
     snapshots,
+    players,
+    incompatible,
     statuses,
     commands,
     detach,
@@ -36,25 +45,27 @@ function sessionFixture(role = "guest") {
   };
 }
 
-const snapshot = JSON.stringify({
-  protocolVersion: 14,
-  payload: {
-    tick: 1,
-    runSeed: 42,
-    worldUnitsPerMeter: 100,
-    players: [],
-    monsters: [],
-    rooms: [],
-    staticColliders: [],
-    groundLoot: [],
-    arrows: [],
-    scenario: "dungeon",
-    contentRevision: "0123456789abcdef",
-    strikeEvents: [],
-    chests: [],
-    interactionEvents: [],
-  },
-});
+const snapshotWith = ({ contentRevision = LOCAL_REVISION } = {}) =>
+  JSON.stringify({
+    protocolVersion: PROTOCOL_VERSION,
+    payload: {
+      tick: 1,
+      runSeed: 42,
+      worldUnitsPerMeter: 100,
+      players: [],
+      monsters: [],
+      rooms: [],
+      staticColliders: [],
+      groundLoot: [],
+      arrows: [],
+      scenario: "dungeon",
+      contentRevision,
+      strikeEvents: [],
+      chests: [],
+      interactionEvents: [],
+    },
+  });
+const snapshot = snapshotWith();
 
 test("guests accept presentation snapshots only from the current host", () => {
   const fixture = sessionFixture();
@@ -93,4 +104,22 @@ test("hosts use their own player assignment and validate command envelopes befor
     data: { kind: "command", playerId: 4, sequence: 1, encoded: "{}" },
   });
   expect(fixture.commands).toEqual([[2, 1, "{}"]]);
+});
+
+test("guests refuse a host running other content before taking a player", () => {
+  const fixture = sessionFixture();
+  const foreign = snapshotWith({ contentRevision: "fedcba9876543210" });
+  fixture.emit("reliable", {
+    peerId: "host",
+    data: { kind: "welcome", playerId: 2, encodedSnapshot: foreign },
+  });
+  expect(fixture.players).toEqual([]);
+  expect(fixture.snapshots).toHaveLength(0);
+  expect(fixture.incompatible).toEqual([
+    "Incompatible game content: the host runs content revision fedcba9876543210, " +
+      "this client runs 0123456789abcdef. Both sides need the same game build.",
+  ]);
+  fixture.emit("realtime", { peerId: "host", data: { kind: "snapshot", encoded: foreign } });
+  expect(fixture.snapshots).toHaveLength(0);
+  expect(fixture.incompatible).toHaveLength(2);
 });
