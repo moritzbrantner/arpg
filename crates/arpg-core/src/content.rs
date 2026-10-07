@@ -36,6 +36,8 @@ const fn max_i32(a: i32, b: i32) -> i32 {
 }
 /// Longest definition id; matches the browser projection's bound on published ids.
 pub const MAX_DEFINITION_ID_LENGTH: usize = 64;
+/// Slowest monster projectile: integer velocities still aim diagonally within a few degrees.
+pub(crate) const MIN_PROJECTILE_SPEED: u16 = 16;
 
 const BASE_BUNDLE: &str = include_str!("../content/base.json");
 
@@ -594,10 +596,15 @@ impl ContentBundle {
                 }
             }
             if let Some(projectile) = monster.projectile {
-                if !(1..=200).contains(&projectile.speed) || projectile.lifetime_ticks == 0 {
+                // Shots move in whole units per tick: below this speed the integer direction
+                // can no longer hold a diagonal aim (speed 1 at 45 degrees truncates to one
+                // axis); at 16 the aim stays within about 5 degrees of the target.
+                if !(MIN_PROJECTILE_SPEED..=200).contains(&projectile.speed)
+                    || projectile.lifetime_ticks == 0
+                {
                     fail(
                         path.clone(),
-                        "projectile speed must be within 1..=200 and its lifetime positive",
+                        "projectile speed must be within 16..=200 and its lifetime positive",
                     );
                 }
                 if i64::from(projectile.speed) * i64::from(projectile.lifetime_ticks) < reach {
@@ -957,7 +964,8 @@ mod tests {
             "monster.archer: retreatRange must stay three navigation cells inside",
             "monster.archer: projectile must fly at least as far as the strike reach",
             "monster.brute: retreatRange must be at least 105",
-            "monster.brute: projectile speed must be within 1..=200",
+            "monster.brute: projectile speed must be within 16..=200",
+            "monster.archer: projectile speed must be within 16..=200",
         ] {
             assert!(
                 roles.iter().any(|error| error.contains(invariant)),
