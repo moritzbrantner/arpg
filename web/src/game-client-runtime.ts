@@ -12,7 +12,7 @@
 // hidden tabs, so local simulation slows rather than catching up in a burst; simulation
 // time is never fast-forwarded to wall-clock time.
 
-import { decodeSnapshot, encodeCommand } from "./wire-protocol.js";
+import { contentRevisionMismatch, decodeSnapshot, encodeCommand } from "./wire-protocol.js";
 import { trainingTicksForFrame } from "./training-arena.js";
 
 export const TICK_INTERVAL_MS = 1000 / 60;
@@ -92,10 +92,15 @@ export interface GameClientRuntimeOptions {
     onPlayer: (playerId: number) => void;
     onSnapshot: (snapshot: unknown) => void;
     onStatus: (status: string) => void;
+    localContentRevision: () => string;
+    // The host runs another content bundle: the guest must stop.
+    onIncompatible: (reason: string) => void;
   }): () => void;
   createDedicatedSession(endpoint: string): DedicatedSessionLike;
   supportsWebTransport(): boolean;
   freshRunSeed(): number;
+  // Content revision of this build's Rust/Wasm gameplay; read once a remote snapshot arrives.
+  localContentRevision(): string;
   onStatus(status: string): void;
   setInterval?: (callback: () => void, ms: number) => unknown;
   clearInterval?: (handle: unknown) => void;
@@ -362,6 +367,9 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
         onPlayer: (playerId) => update({ playerId }),
         onSnapshot: (snapshot) => options.snapshots.publish(snapshot),
         onStatus: status,
+        localContentRevision: options.localContentRevision,
+        // A host never receives authority snapshots.
+        onIncompatible: () => {},
       });
       try {
         const lobby = await session.host(4);
@@ -394,6 +402,14 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
         onPlayer: (playerId) => update({ playerId, lifecycle: "running" }),
         onSnapshot: (snapshot) => options.snapshots.publish(snapshot),
         onStatus: status,
+        localContentRevision: options.localContentRevision,
+        onIncompatible: (reason) => {
+          if (!isCurrent(generation) || peer !== session) return;
+          teardown();
+          options.snapshots.publish(null);
+          update({ lifecycle: "failed", playerId: null });
+          status(reason);
+        },
       });
       try {
         await session.join(code);
@@ -431,14 +447,30 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
           },
           onSnapshot: (frame) => {
             if (!current()) return;
+            let snapshot;
             try {
-              options.snapshots.publish(decodeSnapshot(textDecoder.decode(frame.payload)));
+              snapshot = decodeSnapshot(textDecoder.decode(frame.payload));
             } catch (error) {
               dedicated = null;
               session.close();
               update({ lifecycle: "failed", playerId: null });
               status(`Rejected dedicated snapshot: ${error}`);
+              return;
             }
+            const incompatible = contentRevisionMismatch(
+              options.localContentRevision(),
+              snapshot,
+              "dedicated authority",
+            );
+            if (incompatible) {
+              dedicated = null;
+              session.close();
+              options.snapshots.publish(null);
+              update({ lifecycle: "failed", playerId: null });
+              status(incompatible);
+              return;
+            }
+            options.snapshots.publish(snapshot);
           },
           onStateChange: (next) => {
             if (!current()) return;

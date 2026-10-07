@@ -1,4 +1,4 @@
-import { decodeSnapshot } from "./wire-protocol.js";
+import { contentRevisionMismatch, decodeSnapshot } from "./wire-protocol.js";
 
 // ARPG admission and projection boundary. The foundation continues to own
 // signaling, connection recovery, and WebRTC lifecycle.
@@ -10,8 +10,16 @@ export function attachPeerGameSession({
   onPlayer,
   onSnapshot,
   onStatus,
+  localContentRevision,
+  onIncompatible,
 }) {
   const players = new Map();
+  // Guests refuse a host whose content bundle differs from their own build.
+  const incompatible = (snapshot) => {
+    const reason = contentRevisionMismatch(localContentRevision(), snapshot, "host");
+    if (reason) onIncompatible(reason);
+    return reason !== null;
+  };
   const detach = [];
   const listen = (name, handler) => {
     const listener = (event) => {
@@ -69,6 +77,7 @@ export function attachPeerGameSession({
       data?.kind === "welcome"
     ) {
       const snapshot = decodeSnapshot(data.encodedSnapshot);
+      if (incompatible(snapshot)) return;
       if (
         !Number.isInteger(data.playerId) ||
         data.playerId < 2 ||
@@ -85,7 +94,9 @@ export function attachPeerGameSession({
   listen("realtime", ({ peerId, data }) => {
     if (role !== "guest" || peerId !== session.hostParticipantId || data?.kind !== "snapshot")
       return;
-    onSnapshot(decodeSnapshot(data.encoded));
+    const snapshot = decodeSnapshot(data.encoded);
+    if (incompatible(snapshot)) return;
+    onSnapshot(snapshot);
   });
 
   listen("participant-disconnected", ({ participantId }) => {

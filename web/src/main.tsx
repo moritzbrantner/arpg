@@ -36,7 +36,11 @@ import { InputRuntimeController } from "@moritzbrantner/input-bindings-runtime";
 import { attachKeyboardRuntime } from "@moritzbrantner/input-bindings-web";
 import { KeybindingEditor } from "@moritzbrantner/input-bindings-react";
 import "@moritzbrantner/input-bindings-react/styles.css";
-import initWasm, { WasmGame, loadGameFromSaveStateJson } from "./wasm/arpg_web_wasm.js";
+import initWasm, {
+  WasmGame,
+  contentRevision,
+  loadGameFromSaveStateJson,
+} from "./wasm/arpg_web_wasm.js";
 import { attachPeerGameSession } from "./peer-session.js";
 import { DedicatedGameSession } from "./dedicated-session.js";
 import { DemoLobbySession } from "./vendor/multiplayer-setup-service/demo-session.ts";
@@ -477,6 +481,7 @@ function App() {
       createDedicatedSession: (endpoint) => new DedicatedGameSession({ endpoint }),
       supportsWebTransport: () => "WebTransport" in globalThis,
       freshRunSeed,
+      localContentRevision: contentRevision,
       onStatus: setStatus,
     }),
   );

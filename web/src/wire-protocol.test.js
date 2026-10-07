@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { decodeSnapshot } from "./wire-protocol.js";
+import { PROTOCOL_VERSION, contentRevisionMismatch, decodeSnapshot } from "./wire-protocol.js";
 
 const payload = {
   tick: 0,
@@ -17,7 +17,7 @@ const payload = {
   chests: [],
   interactionEvents: [],
 };
-const encode = (value) => JSON.stringify({ protocolVersion: 14, payload: value });
+const encode = (value) => JSON.stringify({ protocolVersion: PROTOCOL_VERSION, payload: value });
 
 test("admits bounded presentation data and rejects malformed vectors and collections", () => {
   expect(decodeSnapshot(encode(payload))).toEqual(payload);
@@ -136,9 +136,11 @@ test("requires the authority's content revision", () => {
 
 const monster = {
   id: 1,
+  definition: "monster.brute",
   roomId: 2,
   position: [0, 50, 0],
   health: 100,
+  maxHealth: 100,
   alive: true,
   action: null,
   reaction: null,
@@ -160,11 +162,34 @@ test("monsters publish their authoritative behaviour and engaged target", () => 
     { ...monster, behavior: undefined },
     { ...monster, behavior: "fleeing" },
     { ...monster, targetPlayerId: -1 },
+    { ...monster, definition: undefined },
+    { ...monster, definition: "" },
+    { ...monster, definition: "m".repeat(65) },
+    { ...monster, maxHealth: undefined },
+    { ...monster, health: 101 },
   ])
     expect(() => decodeSnapshot(encode({ ...payload, monsters: [candidate] }))).toThrow();
   expect(() =>
     decodeSnapshot(
-      JSON.stringify({ protocolVersion: 13, payload: { ...payload, monsters: [monster] } }),
+      JSON.stringify({ protocolVersion: 14, payload: { ...payload, monsters: [monster] } }),
     ),
   ).toThrow("Unsupported");
+});
+
+test("monsters publish their content definition and maximum health", () => {
+  const skirmisher = { ...monster, definition: "monster.skirmisher", health: 60, maxHealth: 60 };
+  const decoded = decodeSnapshot(encode({ ...payload, monsters: [monster, skirmisher] }));
+  expect(decoded.monsters.map(({ definition }) => definition)).toEqual([
+    "monster.brute",
+    "monster.skirmisher",
+  ]);
+  expect(decoded.monsters[1].maxHealth).toBe(60);
+});
+
+test("a content revision mismatch names both revisions; a match passes", () => {
+  expect(contentRevisionMismatch("0123456789abcdef", payload, "host")).toBeNull();
+  expect(contentRevisionMismatch("fedcba9876543210", payload, "dedicated authority")).toBe(
+    "Incompatible game content: the dedicated authority runs content revision " +
+      "0123456789abcdef, this client runs fedcba9876543210. Both sides need the same game build.",
+  );
 });
