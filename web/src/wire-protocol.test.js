@@ -87,6 +87,34 @@ test("admits shield guard state and rejects malformed guard data", () => {
     expect(() => decodeSnapshot(encode({ ...payload, players: [candidate] }))).toThrow();
 });
 
+test("admits aim intent and a target lock and rejects malformed ones", () => {
+  const aimed = {
+    ...player,
+    aim: [-250, 1000],
+    lockedMonsterId: 3,
+    action: { ...player.action, aim: [927, -375] },
+  };
+  const decoded = decodeSnapshot(encode({ ...payload, players: [aimed] })).players[0];
+  expect(decoded.aim).toEqual([-250, 1000]);
+  expect(decoded.lockedMonsterId).toBe(3);
+  expect(decoded.action.aim).toEqual([927, -375]);
+  // Absent and null both mean "no aim" and "no lock".
+  expect(
+    decodeSnapshot(
+      encode({ ...payload, players: [{ ...player, aim: null, lockedMonsterId: null }] }),
+    ).players[0].aim,
+  ).toBeNull();
+  for (const candidate of [
+    { ...player, aim: [0, 0] },
+    { ...player, aim: [1001, 0] },
+    { ...player, aim: [0.5, 1] },
+    { ...player, aim: [1] },
+    { ...player, lockedMonsterId: -1 },
+    { ...player, action: { ...player.action, aim: [0, 2000] } },
+  ])
+    expect(() => decodeSnapshot(encode({ ...payload, players: [candidate] }))).toThrow();
+});
+
 test("admits workbench scenario and strike events and rejects malformed ones", () => {
   const event = {
     order: 0,
@@ -179,7 +207,7 @@ test("monsters publish their authoritative behaviour and engaged target", () => 
     expect(() => decodeSnapshot(encode({ ...payload, monsters: [candidate] }))).toThrow();
   expect(() =>
     decodeSnapshot(
-      JSON.stringify({ protocolVersion: 15, payload: { ...payload, monsters: [monster] } }),
+      JSON.stringify({ protocolVersion: 16, payload: { ...payload, monsters: [monster] } }),
     ),
   ).toThrow("Unsupported");
 });

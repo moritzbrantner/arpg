@@ -32,6 +32,7 @@ export function PlayerHud({ store, playerId, status, interactKey = "E" }) {
           </span>
           <span>{player.weapon === "bow" ? "Bow (unlimited arrows)" : "Sword & shield"}</span>
           {player.drawTicks != null && <span>Draw {player.drawTicks}t</span>}
+          {player.lockedMonsterId != null && <span>Target locked</span>}
         </div>
       )}
       <p>{status}</p>
@@ -345,6 +346,16 @@ export function TrainingDiagnostics({ store, playerId }) {
       <div>
         <dt>Arrows</dt>
         <dd>{snapshot?.arrows?.length ?? 0}</dd>
+      </div>
+      <div>
+        <dt>Aim</dt>
+        <dd>{player?.aim ? `aim ${player.aim[0]}, ${player.aim[1]}` : "facing"}</dd>
+      </div>
+      <div>
+        <dt>Target</dt>
+        <dd>
+          {player?.lockedMonsterId != null ? `locked monster ${player.lockedMonsterId}` : "none"}
+        </dd>
       </div>
     </dl>
   );

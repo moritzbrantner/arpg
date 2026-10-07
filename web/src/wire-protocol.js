@@ -1,6 +1,6 @@
 // Browser projection of the arpg-protocol v16 envelope. This adapter validates
 // only data consumed by presentation; gameplay rules remain in arpg-core.
-export const PROTOCOL_VERSION = 16;
+export const PROTOCOL_VERSION = 17;
 const MAX_SNAPSHOT_CHARACTERS = 65_535;
 const integer = (value) => Number.isSafeInteger(value);
 const nonNegative = (value) => integer(value) && value >= 0;
@@ -63,6 +63,12 @@ const guardPhases = new Set(["raising", "raised"]);
 const optional = (value, validate) => value === null || value === undefined || validate(value);
 // How a monster attack lands: around the monster, or as a shot at its target.
 const deliveries = new Set(["strike", "projectile"]);
+// Aim is a non-zero direction whose components lie within ±1000 (AIM_COMPONENT_LIMIT).
+export const AIM_COMPONENT_LIMIT = 1000;
+const aimDirection = (value) =>
+  vector(value, 2) &&
+  value.every((component) => Math.abs(component) <= AIM_COMPONENT_LIMIT) &&
+  value.some((component) => component !== 0);
 const action = (value) => phases.has(value?.phase) && nonNegative(value.ticksRemaining);
 const reaction = (value, kind) => value?.kind === kind && nonNegative(value.ticksRemaining);
 
@@ -120,7 +126,8 @@ export function decodeSnapshot(encoded) {
             vector(value.facing, 2) &&
             typeof value.connected === "boolean" &&
             optional(value.buffered, (input) => comboInputs.has(input)) &&
-            nonNegative(value.charge),
+            nonNegative(value.charge) &&
+            optional(value.aim, aimDirection),
         ) &&
         optional(
           player.reaction,
@@ -142,7 +149,9 @@ export function decodeSnapshot(encoded) {
         ) &&
         weapons.has(player.weapon) &&
         optional(player.drawTicks, nonNegative) &&
-        interactionPrompt(player.interaction),
+        interactionPrompt(player.interaction) &&
+        optional(player.aim, aimDirection) &&
+        optional(player.lockedMonsterId, nonNegative),
     ) &&
     list(
       "chests",

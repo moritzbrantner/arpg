@@ -1,5 +1,5 @@
 {
-  "formatVersion": 5,
+  "formatVersion": 6,
   "counterWindowTicks": 30,
   "strikes": [
     { "id": "sword.lightSwing", "reach": 220, "frontal": true, "maxTargets": null, "blockable": true, "guardCost": 0 },
@@ -38,5 +38,6 @@
   "guard": { "raiseTicks": 4, "maxPoints": 100, "regenPerTick": 1, "blockReactionTicks": 8, "breakTicks": 45 },
   "bow": { "minDrawTicks": 8, "fullDrawTicks": 30, "arrowMinSpeed": 30, "arrowFullSpeed": 60, "arrowMinDamage": 15, "arrowFullDamage": 35, "arrowLifetimeTicks": 40, "arrowStaggerTicks": 4, "maxLiveArrows": 32 },
   "progression": { "experiencePerLevel": 100, "baseMaxHealth": 100, "maxHealthPerLevel": 10, "baseAttackDamage": 25, "attackDamagePerLevel": 5 },
-  "loot": { "monsterGold": 10, "chestGold": 25 }
+  "loot": { "monsterGold": 10, "chestGold": 25 },
+  "targeting": { "lockRange": 900, "breakRange": 1200 }
 }
