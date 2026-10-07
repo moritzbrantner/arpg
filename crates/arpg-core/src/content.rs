@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{ActionKind, ComboInput};
 
-pub const CONTENT_FORMAT_VERSION: u16 = 3;
+pub const CONTENT_FORMAT_VERSION: u16 = 4;
 /// Touching monster and player bodies keep their centres up to √2 times their
 /// combined XZ half extents apart (85 units), and pursuit stops one navigation
 /// cell inside strike reach, so a monster strike must reach past both.
@@ -49,6 +49,66 @@ pub struct ContentBundle {
     pub actions: Vec<ActionData>,
     pub combos: Vec<ComboData>,
     pub monsters: Vec<MonsterData>,
+    /// Monster definition of each combat room, in generation order. Rooms beyond the list
+    /// repeat it from the start. Order is authored, so it is not canonicalised.
+    pub room_monsters: Vec<String>,
+    pub guard: GuardData,
+    pub bow: BowData,
+    pub progression: ProgressionData,
+    pub loot: LootData,
+}
+
+/// Shield guard tuning.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GuardData {
+    /// Ticks between pressing guard and the shield protecting.
+    pub raise_ticks: u8,
+    pub max_points: u16,
+    /// Guard regenerates only while lowered and not broken.
+    pub regen_per_tick: u16,
+    pub block_reaction_ticks: u8,
+    /// Ticks a broken guard cannot be raised.
+    pub break_ticks: u8,
+}
+
+/// Bow draw and arrow tuning. Speeds are world units per tick.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BowData {
+    /// Draw ticks below which a release does not shoot.
+    pub min_draw_ticks: u8,
+    /// Draw ticks at which an arrow reaches full speed and damage.
+    pub full_draw_ticks: u8,
+    pub arrow_min_speed: u16,
+    pub arrow_full_speed: u16,
+    pub arrow_min_damage: u16,
+    pub arrow_full_damage: u16,
+    pub arrow_lifetime_ticks: u8,
+    pub arrow_stagger_ticks: u8,
+    /// Launching beyond this many live arrows retires the oldest.
+    pub max_live_arrows: u8,
+}
+
+/// Character level curve.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProgressionData {
+    pub experience_per_level: u32,
+    pub base_max_health: u16,
+    pub max_health_per_level: u16,
+    pub base_attack_damage: u16,
+    pub attack_damage_per_level: u16,
+}
+
+/// Gold rewards.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LootData {
+    /// Gold a defeated monster drops.
+    pub monster_gold: u32,
+    /// Gold a reward chest holds.
+    pub chest_gold: u32,
 }
 
 /// Authored melee strike geometry on the gameplay plane.
@@ -164,6 +224,7 @@ pub(crate) struct ComboTransition {
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct MonsterDefinition {
+    pub id: &'static str,
     pub health: u16,
     pub strike: StrikeDefinition,
     pub windup_ticks: u8,
@@ -186,7 +247,14 @@ pub(crate) struct Content {
     pub counter_window_ticks: u64,
     actions: BTreeMap<ActionKind, ActionDefinition>,
     pub combos: Vec<ComboTransition>,
-    pub monster: MonsterDefinition,
+    /// Canonical (id) order; monsters refer to their definition by index.
+    pub monsters: Vec<MonsterDefinition>,
+    /// Index into `monsters` for each combat room, in generation order (repeating).
+    pub room_monsters: Vec<usize>,
+    pub guard: GuardData,
+    pub bow: BowData,
+    pub progression: ProgressionData,
+    pub loot: LootData,
 }
 
 impl Content {
@@ -197,14 +265,23 @@ impl Content {
             .expect("validation requires one definition per action kind")
     }
 
-    /// Longest stagger any content-defined player action applies. Restoration also allows
-    /// the arrow stagger, which is not content-defined yet.
+    /// Longest stagger any player action or arrow applies.
     pub fn max_stagger_ticks(&self) -> u8 {
         self.actions
             .values()
             .map(|action| action.stagger_ticks)
             .max()
             .unwrap_or(0)
+            .max(self.bow.arrow_stagger_ticks)
+    }
+
+    pub fn monster(&self, definition: usize) -> &MonsterDefinition {
+        &self.monsters[definition]
+    }
+
+    /// The monster definition generated into the combat room at `combat_room_index`.
+    pub fn room_monster(&self, combat_room_index: usize) -> usize {
+        self.room_monsters[combat_room_index % self.room_monsters.len()]
     }
 }
 
@@ -430,58 +507,62 @@ impl ContentBundle {
             }
         }
 
-        let monster = match self.monsters.as_slice() {
-            [monster] => {
-                let path = format!("monsters[0] {}", monster.id);
-                if monster.health == 0 {
-                    fail(path.clone(), "health must be positive");
-                }
-                if monster.windup_ticks == 0
-                    || monster.active_ticks == 0
-                    || monster.recovery_ticks == 0
-                {
-                    fail(path.clone(), "every phase needs at least one tick");
-                }
-                if monster.pursuit_speed == 0 {
-                    fail(path.clone(), "pursuit speed must be positive");
-                }
-                let reach = strike_by_id
-                    .get(monster.strike.as_str())
-                    .map_or(0, |strike| strike.reach);
-                if i64::from(monster.aggro_range) < reach {
-                    fail(
-                        path.clone(),
-                        "aggroRange must reach at least as far as the strike",
-                    );
-                }
-                if monster.leash_range <= monster.aggro_range {
-                    fail(path.clone(), "leashRange must exceed aggroRange");
-                }
-                if monster.target_switch_margin > monster.aggro_range {
-                    fail(
-                        path.clone(),
-                        "targetSwitchMargin must not exceed aggroRange",
-                    );
-                }
-                if monster.reacquire_ticks == 0 {
-                    fail(path.clone(), "reacquireTicks must be positive");
-                }
-                if monster.separation_range > 400 {
-                    fail(path.clone(), "separationRange must be within 0..=400");
-                }
-                if strike_by_id
-                    .get(monster.strike.as_str())
-                    .is_some_and(|strike| strike.reach < MIN_MONSTER_STRIKE_REACH)
-                {
-                    fail(
-                        path.clone(),
-                        &format!(
-                            "monster strike reach must be at least {MIN_MONSTER_STRIKE_REACH} units for pursuit"
-                        ),
-                    );
-                }
-                match strike_by_id.get(monster.strike.as_str()) {
-                    Some(strike) => Some(MonsterDefinition {
+        let mut monsters = Vec::new();
+        let mut monster_index = BTreeMap::new();
+        for (index, monster) in self.monsters.iter().enumerate() {
+            let path = format!("monsters[{index}] {}", monster.id);
+            if monster_index
+                .insert(monster.id.as_str(), monsters.len())
+                .is_some()
+            {
+                fail(path.clone(), "duplicate monster id");
+            }
+            if monster.health == 0 {
+                fail(path.clone(), "health must be positive");
+            }
+            if monster.windup_ticks == 0 || monster.active_ticks == 0 || monster.recovery_ticks == 0
+            {
+                fail(path.clone(), "every phase needs at least one tick");
+            }
+            if monster.pursuit_speed == 0 {
+                fail(path.clone(), "pursuit speed must be positive");
+            }
+            let reach = strike_by_id
+                .get(monster.strike.as_str())
+                .map_or(0, |strike| strike.reach);
+            if i64::from(monster.aggro_range) < reach {
+                fail(
+                    path.clone(),
+                    "aggroRange must reach at least as far as the strike",
+                );
+            }
+            if monster.leash_range <= monster.aggro_range {
+                fail(path.clone(), "leashRange must exceed aggroRange");
+            }
+            if monster.target_switch_margin > monster.aggro_range {
+                fail(
+                    path.clone(),
+                    "targetSwitchMargin must not exceed aggroRange",
+                );
+            }
+            if monster.reacquire_ticks == 0 {
+                fail(path.clone(), "reacquireTicks must be positive");
+            }
+            if monster.separation_range > 400 {
+                fail(path.clone(), "separationRange must be within 0..=400");
+            }
+            match strike_by_id.get(monster.strike.as_str()) {
+                Some(strike) => {
+                    if strike.reach < MIN_MONSTER_STRIKE_REACH {
+                        fail(
+                            path.clone(),
+                            &format!(
+                                "monster strike reach must be at least {MIN_MONSTER_STRIKE_REACH} units for pursuit"
+                            ),
+                        );
+                    }
+                    monsters.push(MonsterDefinition {
+                        id: monster.id.as_str(),
                         health: monster.health,
                         strike: resolve_strike(strike),
                         windup_ticks: monster.windup_ticks,
@@ -495,31 +576,112 @@ impl ContentBundle {
                         target_switch_margin: i64::from(monster.target_switch_margin),
                         reacquire_ticks: monster.reacquire_ticks,
                         separation_range: i64::from(monster.separation_range),
-                    }),
-                    None => {
-                        fail(path, "references an unknown strike");
-                        None
-                    }
+                    });
                 }
+                None => fail(path, "references an unknown strike"),
             }
-            _ => {
-                fail(
-                    "monsters".into(),
-                    "exactly one monster definition is supported until a second enemy lands",
-                );
-                None
-            }
-        };
+        }
+        if monsters.is_empty() {
+            fail(
+                "monsters".into(),
+                "at least one monster definition is required",
+            );
+        }
 
-        match (errors.is_empty(), monster) {
-            (true, Some(monster)) => Ok(Content {
+        let mut room_monsters = Vec::new();
+        for (index, id) in self.room_monsters.iter().enumerate() {
+            match monster_index.get(id.as_str()) {
+                Some(&definition) => room_monsters.push(definition),
+                None => fail(
+                    format!("roomMonsters[{index}] {id}"),
+                    "references an unknown monster",
+                ),
+            }
+        }
+        if self.room_monsters.is_empty() {
+            fail(
+                "roomMonsters".into(),
+                "at least one combat room monster is required",
+            );
+        }
+
+        let guard = self.guard;
+        if !(1..=60).contains(&guard.raise_ticks) {
+            fail("guard.raiseTicks".into(), "must be within 1..=60");
+        }
+        if !(1..=1_000).contains(&guard.max_points) {
+            fail("guard.maxPoints".into(), "must be within 1..=1000");
+        }
+        if guard.regen_per_tick > guard.max_points {
+            fail("guard.regenPerTick".into(), "must not exceed maxPoints");
+        }
+        if guard.block_reaction_ticks == 0 || guard.break_ticks == 0 {
+            fail(
+                "guard".into(),
+                "blockReactionTicks and breakTicks must be positive",
+            );
+        }
+
+        let bow = self.bow;
+        if bow.min_draw_ticks == 0 || bow.min_draw_ticks >= bow.full_draw_ticks {
+            fail(
+                "bow.minDrawTicks".into(),
+                "must be positive and below fullDrawTicks",
+            );
+        }
+        if bow.full_draw_ticks > 120 {
+            fail("bow.fullDrawTicks".into(), "must be at most 120");
+        }
+        if bow.arrow_min_speed == 0
+            || bow.arrow_min_speed > bow.arrow_full_speed
+            || bow.arrow_full_speed > 200
+        {
+            fail(
+                "bow.arrowMinSpeed".into(),
+                "speeds must satisfy 1 <= arrowMinSpeed <= arrowFullSpeed <= 200",
+            );
+        }
+        if bow.arrow_min_damage > bow.arrow_full_damage {
+            fail(
+                "bow.arrowMinDamage".into(),
+                "must not exceed arrowFullDamage",
+            );
+        }
+        if bow.arrow_lifetime_ticks == 0 {
+            fail("bow.arrowLifetimeTicks".into(), "must be positive");
+        }
+        if !(1..=64).contains(&bow.max_live_arrows) {
+            fail("bow.maxLiveArrows".into(), "must be within 1..=64");
+        }
+
+        let progression = self.progression;
+        if progression.experience_per_level == 0 {
+            fail("progression.experiencePerLevel".into(), "must be positive");
+        }
+        if progression.base_max_health == 0 {
+            fail("progression.baseMaxHealth".into(), "must be positive");
+        }
+
+        let loot = self.loot;
+        if loot.monster_gold == 0 || loot.chest_gold == 0 {
+            fail("loot".into(), "gold rewards must be positive");
+        }
+
+        if errors.is_empty() {
+            Ok(Content {
                 revision: self.revision(),
                 counter_window_ticks: self.counter_window_ticks,
                 actions,
                 combos,
-                monster,
-            }),
-            _ => Err(errors),
+                monsters,
+                room_monsters,
+                guard,
+                bow,
+                progression,
+                loot,
+            })
+        } else {
+            Err(errors)
         }
     }
 }
@@ -582,6 +744,12 @@ mod tests {
         assert_eq!(&reparsed, base_bundle());
         assert_eq!(reparsed.revision(), content_revision());
         assert_eq!(content_revision().len(), 16);
+
+        // Room assignment is authored order, so reordering it is a different bundle.
+        let mut reassigned = base_bundle().clone();
+        reassigned.room_monsters.reverse();
+        assert_ne!(reassigned.room_monsters, base_bundle().room_monsters);
+        assert_ne!(reassigned.revision(), content_revision());
     }
 
     #[test]
@@ -626,15 +794,47 @@ mod tests {
                 .any(|error| error.contains("within the predecessor's recovery"))
         );
 
-        let two = errors(|bundle| {
-            let mut second = bundle.monsters[0].clone();
-            second.id = "monster.second".into();
-            bundle.monsters.push(second);
+        let twin = errors(|bundle| {
+            let copy = bundle.monsters[0].clone();
+            bundle.monsters.push(copy);
         });
         assert!(
-            two.iter()
-                .any(|error| error.contains("exactly one monster"))
+            twin.iter()
+                .any(|error| error.contains("duplicate monster id"))
         );
+
+        let unknown_room_monster = errors(|bundle| {
+            bundle.room_monsters[1] = "monster.missing".into();
+        });
+        assert!(unknown_room_monster.iter().any(|error| {
+            error.starts_with("roomMonsters[1] monster.missing")
+                && error.contains("unknown monster")
+        }));
+        assert!(
+            errors(|bundle| bundle.room_monsters.clear())
+                .iter()
+                .any(|error| error.starts_with("roomMonsters"))
+        );
+
+        let tuning = errors(|bundle| {
+            bundle.bow.min_draw_ticks = bundle.bow.full_draw_ticks;
+            bundle.bow.arrow_min_damage = bundle.bow.arrow_full_damage + 1;
+            bundle.guard.raise_ticks = 0;
+            bundle.progression.experience_per_level = 0;
+            bundle.loot.chest_gold = 0;
+        });
+        for path in [
+            "bow.minDrawTicks",
+            "bow.arrowMinDamage",
+            "guard.raiseTicks",
+            "progression.experiencePerLevel",
+            "loot",
+        ] {
+            assert!(
+                tuning.iter().any(|error| error.starts_with(path)),
+                "{path}: {tuning:?}"
+            );
+        }
 
         let short_reach = errors(|bundle| {
             let claw = bundle
@@ -685,21 +885,21 @@ mod tests {
 
     #[test]
     fn an_older_format_bundle_reports_its_version_before_missing_fields() {
-        let previous = include_str!("../content/base.json")
-            .replace("\"formatVersion\": 3", "\"formatVersion\": 2")
-            .replace(
-                ", \"aggroRange\": 1200, \"leashRange\": 1800, \"targetSwitchMargin\": 150, \"reacquireTicks\": 20, \"separationRange\": 120",
-                "",
-            );
+        let mut previous: serde_json::Value = serde_json::from_str(BASE_BUNDLE).unwrap();
+        previous["formatVersion"] = 3.into();
+        let fields = previous.as_object_mut().unwrap();
+        for added in ["roomMonsters", "guard", "bow", "progression", "loot"] {
+            fields.remove(added);
+        }
 
-        let errors = ContentBundle::from_json(&previous).unwrap_err();
+        let errors = ContentBundle::from_json(&previous.to_string()).unwrap_err();
 
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].path, "formatVersion");
         assert!(
             errors[0]
                 .message
-                .contains("unsupported content format version 2")
+                .contains("unsupported content format version 3")
         );
     }
 }

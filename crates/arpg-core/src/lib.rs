@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 pub use content::{
     CONTENT_FORMAT_VERSION, ContentBundle, ContentError, base_bundle, content_revision,
 };
-use content::{ComboTransition, StrikeDefinition, content};
+use content::{ComboTransition, MonsterDefinition, StrikeDefinition, content};
 use navigation::{Cell, FieldRoute, FieldWork, NAV_CELL_SIZE, Rect, RoomGrid, TargetField, isqrt};
 
 mod content;
@@ -84,9 +84,11 @@ const INTERACT_ACTIVE_TICKS: u8 = 1;
 #[cfg(test)]
 const INTERACT_RECOVERY_TICKS: u8 = 3;
 const INTERACT_RANGE: i64 = 160;
+#[cfg(test)]
 const GROUND_LOOT_GOLD_AMOUNT: u32 = 10;
 /// One reward chest per combat room, opened once after the room's encounter is cleared.
 const CHEST_ID_BASE: u64 = 50_000;
+#[cfg(test)]
 const CHEST_GOLD_AMOUNT: u32 = 25;
 #[cfg(test)]
 const MONSTER_ATTACK_RANGE: i64 = 180;
@@ -100,11 +102,16 @@ const MONSTER_ATTACK_ACTIVE_TICKS: u8 = 1;
 const MONSTER_ATTACK_RECOVERY_TICKS: u8 = 30;
 const PLAYER_HURT_TICKS: u8 = 6;
 /// Ticks between pressing guard and the shield protecting.
+#[cfg(test)]
 const GUARD_RAISE_TICKS: u8 = 4;
-pub const MAX_GUARD_POINTS: u16 = 100;
+#[cfg(test)]
+const MAX_GUARD_POINTS: u16 = 100;
 /// Guard regenerates only while lowered and not broken.
+#[cfg(test)]
 const GUARD_REGEN_PER_TICK: u16 = 1;
+#[cfg(test)]
 const GUARD_BLOCK_REACTION_TICKS: u8 = 8;
+#[cfg(test)]
 const GUARD_BREAK_TICKS: u8 = 45;
 #[cfg(test)]
 const MONSTER_CLAW_GUARD_COST: u16 = 30;
@@ -161,24 +168,33 @@ const HEAVY_FINISHER_DAMAGE_DENOMINATOR: u16 = 1;
 #[cfg(test)]
 const HEAVY_FINISHER_STAGGER_TICKS: u8 = 14;
 /// Draw ticks below which a release does not shoot.
+#[cfg(test)]
 const BOW_MIN_DRAW_TICKS: u8 = 8;
 /// Draw ticks at which an arrow reaches full speed and damage.
-pub const BOW_FULL_DRAW_TICKS: u8 = 30;
+#[cfg(test)]
+const BOW_FULL_DRAW_TICKS: u8 = 30;
 #[cfg(test)]
 const SHOOT_WINDUP_TICKS: u8 = 1;
 #[cfg(test)]
 const SHOOT_ACTIVE_TICKS: u8 = 1;
 #[cfg(test)]
 const SHOOT_RECOVERY_TICKS: u8 = 10;
+#[cfg(test)]
 const ARROW_MIN_SPEED: i32 = 30;
+#[cfg(test)]
 const ARROW_FULL_SPEED: i32 = 60;
 const ARROW_DIAGONAL_NUMERATOR: i32 = 707;
 const ARROW_DIAGONAL_DENOMINATOR: i32 = 1_000;
+#[cfg(test)]
 const ARROW_MIN_DAMAGE: u16 = 15;
+#[cfg(test)]
 const ARROW_FULL_DAMAGE: u16 = 35;
+#[cfg(test)]
 const ARROW_LIFETIME_TICKS: u8 = 40;
+#[cfg(test)]
 const ARROW_STAGGER_TICKS: u8 = 4;
 /// Live arrows are bounded; launching beyond the bound retires the oldest arrow.
+#[cfg(test)]
 const MAX_LIVE_ARROWS: usize = 32;
 const ARROW_ID_BASE: u64 = 1;
 /// Query-only hurt boxes for monsters, which are game-owned rather than physics bodies.
@@ -193,10 +209,15 @@ const MONSTER_HURTBOX_HALF_EXTENTS: Vec3i = Vec3i::new(40, 50, 40);
 const PRIMARY_STAGGER_TICKS: u8 = 4;
 #[cfg(test)]
 const SECONDARY_STAGGER_TICKS: u8 = 8;
+#[cfg(test)]
 const BASE_ATTACK_DAMAGE: u16 = 25;
+#[cfg(test)]
 const ATTACK_DAMAGE_PER_LEVEL: u16 = 5;
+#[cfg(test)]
 const BASE_MAX_HEALTH: u16 = 100;
+#[cfg(test)]
 const MAX_HEALTH_PER_LEVEL: u16 = 10;
+#[cfg(test)]
 const EXPERIENCE_PER_LEVEL: u32 = 100;
 #[cfg(test)]
 const MONSTER_EXPERIENCE_REWARD: u32 = 50;
@@ -650,13 +671,15 @@ impl CounterOpportunity {
 }
 
 impl GuardState {
-    const READY: Self = Self {
-        held: false,
-        stance: None,
-        points: MAX_GUARD_POINTS,
-        broken_ticks_remaining: 0,
-        block_reaction_ticks_remaining: 0,
-    };
+    fn ready() -> Self {
+        Self {
+            held: false,
+            stance: None,
+            points: content().guard.max_points,
+            broken_ticks_remaining: 0,
+            block_reaction_ticks_remaining: 0,
+        }
+    }
 
     fn is_raised(self) -> bool {
         matches!(
@@ -795,9 +818,13 @@ pub struct PlayerSnapshot {
 #[serde(rename_all = "camelCase")]
 pub struct MonsterSnapshot {
     pub id: u32,
+    /// Content definition id (for example `monster.brute`): presentation keys appearance
+    /// and audio by it; gameplay never reads it back.
+    pub definition: String,
     pub room_id: RoomId,
     pub position: [i32; 3],
     pub health: u16,
+    pub max_health: u16,
     pub alive: bool,
     pub action: Option<MonsterActionSnapshot>,
     pub reaction: Option<MonsterReactionSnapshot>,
@@ -1068,12 +1095,12 @@ struct MonsterActionState {
 }
 
 impl MonsterActionState {
-    fn snapshot(self) -> MonsterActionSnapshot {
+    fn snapshot(self, definition: &MonsterDefinition) -> MonsterActionSnapshot {
         MonsterActionSnapshot {
             phase: self.phase,
             ticks_remaining: self.ticks_remaining,
             target_player_id: self.target_player_id,
-            range: i32::try_from(content().monster.strike.reach)
+            range: i32::try_from(definition.strike.reach)
                 .expect("monster attack range must fit i32"),
         }
     }
@@ -1156,6 +1183,8 @@ struct PlayerState {
 #[derive(Clone, Copy, Debug)]
 struct MonsterState {
     id: u32,
+    /// Index of its definition in the content's canonical monster list.
+    definition: usize,
     room_id: RoomId,
     position: Vec3i,
     health: u16,
@@ -1168,18 +1197,23 @@ struct MonsterState {
 }
 
 impl MonsterState {
-    fn new(id: u32, room_id: RoomId, position: Vec3i) -> Self {
+    fn new(id: u32, definition: usize, room_id: RoomId, position: Vec3i) -> Self {
         Self {
             id,
+            definition,
             room_id,
             position,
-            health: content().monster.health,
+            health: content().monster(definition).health,
             action: None,
             stagger_ticks_remaining: 0,
             post: None,
             engagement: Engagement::Idle,
             steered: false,
         }
+    }
+
+    fn definition(&self) -> &'static MonsterDefinition {
+        content().monster(self.definition)
     }
 
     /// The published behaviour: a function of authoritative state and whether the body
@@ -1349,8 +1383,10 @@ struct NavigationCache {
     /// them (a door locking or unlocking, a fixed body added or removed) drops everything.
     obstacles: Vec<Rect>,
     grids: BTreeMap<RoomId, RoomGrid>,
-    /// Fields by room and target cell, kept while a pursuer still chases that cell.
-    fields: BTreeMap<(RoomId, Cell), TargetField>,
+    /// Fields by room, target cell and goal reach, kept while a pursuer still chases that
+    /// cell. Reach is part of the key: monsters of different definitions chasing the same
+    /// cell stop at different distances.
+    fields: BTreeMap<(RoomId, Cell, i64), TargetField>,
 }
 
 impl fmt::Debug for NavigationCache {
@@ -1755,21 +1791,26 @@ impl ArpgGame {
         }
         let mut monster_states = BTreeMap::new();
         for monster in save.monsters {
-            if monster.health > content().monster.health {
+            // A monster's definition follows from the generated dungeon, not the save.
+            let definition = game
+                .monsters
+                .iter()
+                .find(|generated| generated.id == monster.id)
+                .ok_or_else(|| GameError::new("save contains unknown monster ids"))?
+                .definition();
+            if monster.health > definition.health {
                 return Err(GameError::new(
                     "saved monster health exceeds authoritative maximum",
                 ));
             }
-            // Arrows apply their own (not yet content-defined) stagger.
-            let max_stagger = content().max_stagger_ticks().max(ARROW_STAGGER_TICKS);
-            if monster.stagger_ticks_remaining > max_stagger {
+            if monster.stagger_ticks_remaining > content().max_stagger_ticks() {
                 return Err(GameError::new("saved monster stagger reaction is invalid"));
             }
             let engagement_valid = match monster.engagement {
                 Engagement::Idle | Engagement::Returning => true,
                 Engagement::Engaged { target_player_id } => target_player_id != 0,
                 Engagement::Searching { ticks_remaining } => {
-                    (1..=content().monster.reacquire_ticks).contains(&ticks_remaining)
+                    (1..=definition.reacquire_ticks).contains(&ticks_remaining)
                 }
             };
             if !engagement_valid {
@@ -1777,9 +1818,9 @@ impl ArpgGame {
             }
             if let Some(action) = monster.action {
                 let maximum_ticks = match action.phase {
-                    ActionPhase::Windup => content().monster.windup_ticks,
-                    ActionPhase::Active => content().monster.active_ticks,
-                    ActionPhase::Recovery => content().monster.recovery_ticks,
+                    ActionPhase::Windup => definition.windup_ticks,
+                    ActionPhase::Active => definition.active_ticks,
+                    ActionPhase::Recovery => definition.recovery_ticks,
                 };
                 if action.ticks_remaining == 0
                     || action.ticks_remaining > maximum_ticks
@@ -1837,7 +1878,7 @@ impl ArpgGame {
         for loot in save.ground_loot {
             if loot.id < GROUND_LOOT_ID_BASE
                 || !game.dungeon_contains(loot.position, Vec3i::ZERO)
-                || loot.amount != GROUND_LOOT_GOLD_AMOUNT
+                || loot.amount != content().loot.monster_gold
                 || !loot_ids.insert(loot.id)
                 || loot.id >= save.next_ground_loot_id
             {
@@ -1858,7 +1899,9 @@ impl ArpgGame {
         game.ground_loot = ground_loot;
         game.next_ground_loot_id = save.next_ground_loot_id;
 
-        if save.next_arrow_id < ARROW_ID_BASE || save.arrows.len() > MAX_LIVE_ARROWS {
+        if save.next_arrow_id < ARROW_ID_BASE
+            || save.arrows.len() > usize::from(content().bow.max_live_arrows)
+        {
             return Err(GameError::new("save contains invalid arrow bookkeeping"));
         }
         // Arrows are kept oldest first: the live cap retires the first entry and impacts
@@ -1872,10 +1915,10 @@ impl ArpgGame {
                 || arrow.id >= save.next_arrow_id
                 || arrow.owner_id == 0
                 || arrow.launched_at_tick >= save.tick
-                || !(1..=ARROW_LIFETIME_TICKS).contains(&arrow.ticks_remaining)
+                || !(1..=content().bow.arrow_lifetime_ticks).contains(&arrow.ticks_remaining)
                 // An arrow launched during tick L has flown (tick - L) ticks of its lifetime.
                 || save.tick - arrow.launched_at_tick
-                    != u64::from(ARROW_LIFETIME_TICKS - arrow.ticks_remaining)
+                    != u64::from(content().bow.arrow_lifetime_ticks - arrow.ticks_remaining)
                 || !Self::arrow_launch_is_possible(arrow)
                 || !game.dungeon_contains(arrow.position, Vec3i::ZERO)
             {
@@ -2034,7 +2077,7 @@ impl ArpgGame {
 
     /// Whether some accepted draw and facing produce exactly this arrow's velocity and damage.
     fn arrow_launch_is_possible(arrow: &ArrowSnapshot) -> bool {
-        (BOW_MIN_DRAW_TICKS..=BOW_FULL_DRAW_TICKS).any(|charge| {
+        (content().bow.min_draw_ticks..=content().bow.full_draw_ticks).any(|charge| {
             let (speed, damage) = Self::arrow_launch(charge);
             let diagonal = speed * ARROW_DIAGONAL_NUMERATOR / ARROW_DIAGONAL_DENOMINATOR;
             let [vx, vy, vz] = arrow.velocity;
@@ -2047,20 +2090,27 @@ impl ArpgGame {
     /// Speed and damage of an arrow launched with `charge` draw ticks: the minimum accepted
     /// draw gives the minimum arrow and a full draw the full arrow, linearly in between.
     fn arrow_launch(charge: u8) -> (i32, u16) {
-        let charge = charge.clamp(BOW_MIN_DRAW_TICKS, BOW_FULL_DRAW_TICKS);
-        let progress = i32::from(charge - BOW_MIN_DRAW_TICKS);
-        let span = i32::from(BOW_FULL_DRAW_TICKS - BOW_MIN_DRAW_TICKS);
-        let speed = ARROW_MIN_SPEED + (ARROW_FULL_SPEED - ARROW_MIN_SPEED) * progress / span;
-        let damage = ARROW_MIN_DAMAGE
-            + u16::try_from(i32::from(ARROW_FULL_DAMAGE - ARROW_MIN_DAMAGE) * progress / span)
-                .expect("arrow damage fits u16");
+        let bow = content().bow;
+        let charge = charge.clamp(bow.min_draw_ticks, bow.full_draw_ticks);
+        let progress = i32::from(charge - bow.min_draw_ticks);
+        let span = i32::from(bow.full_draw_ticks - bow.min_draw_ticks);
+        let (min_speed, full_speed) = (
+            i32::from(bow.arrow_min_speed),
+            i32::from(bow.arrow_full_speed),
+        );
+        let speed = min_speed + (full_speed - min_speed) * progress / span;
+        let damage = bow.arrow_min_damage
+            + u16::try_from(
+                i32::from(bow.arrow_full_damage - bow.arrow_min_damage) * progress / span,
+            )
+            .expect("arrow damage fits u16");
         (speed, damage)
     }
 
     fn validate_loadout(player: &PlayerSaveState) -> Result<(), GameError> {
         let bow = player.weapon == Weapon::Bow;
         let draw_valid = player.draw_ticks.is_none_or(|drawn| {
-            bow && drawn <= BOW_FULL_DRAW_TICKS
+            bow && drawn <= content().bow.full_draw_ticks
                 && player.health > 0
                 && player.action.is_none()
                 && player.hurt_ticks_remaining == 0
@@ -2070,7 +2120,8 @@ impl ArpgGame {
                 // Any hit clears a shot, so a shot can only belong to a live, unhurt archer.
                 bow && player.health > 0
                     && player.hurt_ticks_remaining == 0
-                    && (BOW_MIN_DRAW_TICKS..=BOW_FULL_DRAW_TICKS).contains(&action.charge)
+                    && (content().bow.min_draw_ticks..=content().bow.full_draw_ticks)
+                        .contains(&action.charge)
             }
             ActionKind::Interact => action.charge == 0,
             _ => !bow && action.charge == 0,
@@ -2090,7 +2141,7 @@ impl ArpgGame {
             Some(stance) => {
                 let timing = match stance.phase {
                     GuardPhase::Raising => {
-                        (1..=GUARD_RAISE_TICKS).contains(&stance.ticks_remaining)
+                        (1..=content().guard.raise_ticks).contains(&stance.ticks_remaining)
                     }
                     GuardPhase::Raised => stance.ticks_remaining == 0,
                 };
@@ -2103,9 +2154,9 @@ impl ArpgGame {
             }
         };
         if !stance_valid
-            || guard.points > MAX_GUARD_POINTS
-            || guard.broken_ticks_remaining > GUARD_BREAK_TICKS
-            || guard.block_reaction_ticks_remaining > GUARD_BLOCK_REACTION_TICKS
+            || guard.points > content().guard.max_points
+            || guard.broken_ticks_remaining > content().guard.break_ticks
+            || guard.block_reaction_ticks_remaining > content().guard.block_reaction_ticks
         {
             return Err(GameError::new("saved player guard is invalid"));
         }
@@ -2174,19 +2225,23 @@ impl ArpgGame {
     }
 
     fn level_for_experience(experience: u32) -> u16 {
-        let level = 1u32.saturating_add(experience / EXPERIENCE_PER_LEVEL);
+        let level = 1u32.saturating_add(experience / content().progression.experience_per_level);
         u16::try_from(level.min(u32::from(u16::MAX))).expect("clamped level must fit u16")
     }
 
     fn max_health_for_level(level: u16) -> u16 {
-        BASE_MAX_HEALTH.saturating_add(level.saturating_sub(1).saturating_mul(MAX_HEALTH_PER_LEVEL))
+        content().progression.base_max_health.saturating_add(
+            level
+                .saturating_sub(1)
+                .saturating_mul(content().progression.max_health_per_level),
+        )
     }
 
     fn attack_damage_for_level(level: u16) -> u16 {
-        BASE_ATTACK_DAMAGE.saturating_add(
+        content().progression.base_attack_damage.saturating_add(
             level
                 .saturating_sub(1)
-                .saturating_mul(ATTACK_DAMAGE_PER_LEVEL),
+                .saturating_mul(content().progression.attack_damage_per_level),
         )
     }
 
@@ -2224,7 +2279,7 @@ impl ArpgGame {
         if state.health == 0 || state.hurt_ticks_remaining > 0 || state.action.is_some() {
             state.draw_ticks = None;
         } else if let Some(drawn) = state.draw_ticks.as_mut() {
-            *drawn = (*drawn + 1).min(BOW_FULL_DRAW_TICKS);
+            *drawn = (*drawn + 1).min(content().bow.full_draw_ticks);
         }
     }
 
@@ -2253,7 +2308,7 @@ impl ArpgGame {
             Some(match guard.stance {
                 None => GuardStance {
                     phase: GuardPhase::Raising,
-                    ticks_remaining: GUARD_RAISE_TICKS,
+                    ticks_remaining: content().guard.raise_ticks,
                 },
                 Some(GuardStance {
                     phase: GuardPhase::Raising,
@@ -2273,8 +2328,8 @@ impl ArpgGame {
         if guard.stance.is_none() {
             guard.points = guard
                 .points
-                .saturating_add(GUARD_REGEN_PER_TICK)
-                .min(MAX_GUARD_POINTS);
+                .saturating_add(content().guard.regen_per_tick)
+                .min(content().guard.max_points);
         }
     }
 
@@ -2460,7 +2515,7 @@ impl ArpgGame {
             id,
             position,
             kind: LootKind::Gold,
-            amount: GROUND_LOOT_GOLD_AMOUNT,
+            amount: content().loot.monster_gold,
         });
         Ok(())
     }
@@ -2578,7 +2633,7 @@ impl ArpgGame {
                 chest.opened = true;
                 InteractionResult::Opened {
                     target,
-                    gold: CHEST_GOLD_AMOUNT,
+                    gold: content().loot.chest_gold,
                 }
             }
         };
@@ -2738,7 +2793,7 @@ impl ArpgGame {
                 }
                 let defeated = previous_health > 0 && monster.health == 0;
                 if defeated {
-                    defeated_positions.push(monster.position);
+                    defeated_positions.push((monster.position, monster.definition()));
                 }
                 StrikeResult::Hit {
                     damage: previous_health - monster.health,
@@ -2764,8 +2819,8 @@ impl ArpgGame {
         {
             action.connected = true;
         }
-        for position in defeated_positions {
-            self.award_experience(player_id, content().monster.experience_reward)?;
+        for (position, defeated) in defeated_positions {
+            self.award_experience(player_id, defeated.experience_reward)?;
             self.spawn_ground_loot(position)?;
         }
         self.reconcile_encounters()
@@ -2854,7 +2909,7 @@ impl ArpgGame {
         } else {
             speed
         };
-        if self.arrows.len() >= MAX_LIVE_ARROWS {
+        if self.arrows.len() >= usize::from(content().bow.max_live_arrows) {
             self.arrows.remove(0);
         }
         let id = self.next_arrow_id;
@@ -2868,7 +2923,7 @@ impl ArpgGame {
             position: vec_to_array(position),
             velocity: [fx * axis_speed, 0, fz * axis_speed],
             damage,
-            ticks_remaining: ARROW_LIFETIME_TICKS,
+            ticks_remaining: content().bow.arrow_lifetime_ticks,
         });
         Ok(())
     }
@@ -2950,7 +3005,7 @@ impl ArpgGame {
         let previous_health = monster.health;
         monster.health = monster.health.saturating_sub(arrow.damage);
         if monster.health > 0 {
-            monster.stagger_ticks_remaining = ARROW_STAGGER_TICKS;
+            monster.stagger_ticks_remaining = content().bow.arrow_stagger_ticks;
             monster.action = None;
             if shooter_present {
                 monster.provoke(arrow.owner_id);
@@ -2958,6 +3013,7 @@ impl ArpgGame {
         }
         let defeated = monster.health == 0;
         let position = monster.position;
+        let reward = monster.definition().experience_reward;
         let damage = previous_health - monster.health;
         self.push_strike_outcome(StrikeOutcome {
             order: 0,
@@ -2972,7 +3028,7 @@ impl ArpgGame {
         if defeated {
             // A departed shooter's arrow still kills, but nobody is credited.
             if self.players.contains_key(&arrow.owner_id) {
-                self.award_experience(arrow.owner_id, content().monster.experience_reward)?;
+                self.award_experience(arrow.owner_id, reward)?;
             }
             self.spawn_ground_loot(position)?;
         }
@@ -2984,7 +3040,14 @@ impl ArpgGame {
         monster_id: u32,
         target_player_id: PlayerId,
     ) -> Result<(), GameError> {
-        self.resolve_monster_strike(monster_id, target_player_id, content().monster.strike)
+        let Some(monster) = self
+            .monsters
+            .iter()
+            .find(|monster| monster.id == monster_id)
+        else {
+            return Ok(());
+        };
+        self.resolve_monster_strike(monster_id, target_player_id, monster.definition().strike)
     }
 
     /// Resolves the shield before damage: a valid block or guard break never touches health.
@@ -3009,11 +3072,11 @@ impl ArpgGame {
             guard.points = 0;
             guard.stance = None;
             guard.block_reaction_ticks_remaining = 0;
-            guard.broken_ticks_remaining = GUARD_BREAK_TICKS;
+            guard.broken_ticks_remaining = content().guard.break_ticks;
             return Some(StrikeResult::GuardBroken);
         }
         guard.points -= definition.guard_cost;
-        guard.block_reaction_ticks_remaining = GUARD_BLOCK_REACTION_TICKS;
+        guard.block_reaction_ticks_remaining = content().guard.block_reaction_ticks;
         Some(StrikeResult::Blocked {
             guard_damage: definition.guard_cost,
         })
@@ -3025,12 +3088,12 @@ impl ArpgGame {
         target_player_id: PlayerId,
         definition: StrikeDefinition,
     ) -> Result<(), GameError> {
-        let monster_position = self
+        let monster = self
             .monsters
             .iter()
             .find(|monster| monster.id == monster_id && monster.health > 0)
-            .map(|monster| monster.position);
-        let Some(monster_position) = monster_position else {
+            .map(|monster| (monster.position, monster.definition().damage));
+        let Some((monster_position, monster_damage)) = monster else {
             return Ok(());
         };
         let target_position = self
@@ -3072,7 +3135,7 @@ impl ArpgGame {
                     result
                 } else {
                     let previous_health = player.health;
-                    player.health = player.health.saturating_sub(content().monster.damage);
+                    player.health = player.health.saturating_sub(monster_damage);
                     player.hurt_ticks_remaining = PLAYER_HURT_TICKS;
                     player.action = None;
                     player.guard.stance = None;
@@ -3147,10 +3210,6 @@ impl ArpgGame {
         }
 
         let targets = self.monster_targets();
-        let definition = content().monster;
-        // End inside reach so the attack range check passes on arrival.
-        let goal_reach = definition.strike.reach - i64::from(NAV_CELL_SIZE);
-        let speed = definition.pursuit_speed;
         #[cfg(test)]
         let mode = self.navigation_mode;
         #[cfg(not(test))]
@@ -3179,6 +3238,7 @@ impl ArpgGame {
                 continue;
             }
             let steering = self.steering(monster, &targets)?;
+            let definition = monster.definition();
             let (goal, goal_reach) = match steering {
                 Steering::Hold => {
                     velocities.push((index, body_id, Vec3i::ZERO));
@@ -3186,7 +3246,8 @@ impl ArpgGame {
                 }
                 Steering::Pursue { target } => {
                     work.pursuit_ticks += 1;
-                    (target, goal_reach)
+                    // End inside reach so the attack range check passes on arrival.
+                    (target, definition.strike.reach - i64::from(NAV_CELL_SIZE))
                 }
                 // Any free cell whose centre is within one cell of the post.
                 Steering::Return { post } => (post, i64::from(NAV_CELL_SIZE)),
@@ -3216,7 +3277,7 @@ impl ArpgGame {
                     .target_cell(goal_xz)
                     .filter(|_| use_fields)
                     .map(|cell| {
-                        let key = (monster.room_id, cell);
+                        let key = (monster.room_id, cell, goal_reach);
                         chased_fields.insert(key);
                         let field = cache.fields.entry(key).or_insert_with(|| {
                             work.field_builds += 1;
@@ -3253,7 +3314,7 @@ impl ArpgGame {
                         monster,
                         goal,
                         point,
-                        speed,
+                        definition.pursuit_speed,
                         &bodies,
                         definition.separation_range,
                     )
@@ -3305,7 +3366,7 @@ impl ArpgGame {
     /// Whether `monster` could start its attack on a player at `target` now: within strike
     /// reach with a clear strike line.
     fn can_strike(&self, monster: &MonsterState, target: Vec3i) -> Result<bool, GameError> {
-        let reach = content().monster.strike.reach;
+        let reach = monster.definition().strike.reach;
         Ok(xz_distance_sq(monster.position, target) <= reach * reach
             && !self.strike_obstructed(monster.position, target)?)
     }
@@ -3365,7 +3426,7 @@ impl ArpgGame {
         post: Vec3i,
         targets: &[(PlayerId, RoomId, Vec3i)],
     ) -> Result<Engagement, GameError> {
-        let definition = content().monster;
+        let definition = monster.definition();
         let aggro_sq = definition.aggro_range * definition.aggro_range;
         let in_aggro_range = targets
             .iter()
@@ -3487,11 +3548,11 @@ impl ArpgGame {
             .map(|room| room.id)
             .collect::<BTreeSet<_>>();
         let targets = self.monster_targets();
-        let definition = content().monster;
 
         let mut hits = Vec::new();
         for index in 0..self.monsters.len() {
             let mut monster = self.monsters[index];
+            let definition = monster.definition();
             let active = active_rooms.contains(&monster.room_id);
             if monster.health == 0 || monster.stagger_ticks_remaining > 0 || !active {
                 if monster.stagger_ticks_remaining > 0 || monster.health == 0 {
@@ -3662,11 +3723,11 @@ impl AuthoritativeGame for ArpgGame {
                 facing_z: 0,
                 action: None,
                 hurt_ticks_remaining: 0,
-                guard: GuardState::READY,
+                guard: GuardState::ready(),
                 counter: None,
                 weapon: Weapon::SwordAndShield,
                 draw_ticks: None,
-                health: BASE_MAX_HEALTH,
+                health: content().progression.base_max_health,
                 experience: 0,
                 gold: 0,
             },
@@ -3789,7 +3850,7 @@ impl AuthoritativeGame for ArpgGame {
                 // Re-check life and freedom: damage this tick may have landed after the draw
                 // advanced.
                 if let Some(drawn) = state.draw_ticks.take()
-                    && drawn >= BOW_MIN_DRAW_TICKS
+                    && drawn >= content().bow.min_draw_ticks
                     && state.health > 0
                     && state.hurt_ticks_remaining == 0
                     && state.action.is_none()
@@ -3893,8 +3954,9 @@ impl AuthoritativeGame for ArpgGame {
                     max_health: Self::max_health_for_level(level),
                     level,
                     experience: state.experience,
-                    experience_into_level: state.experience % EXPERIENCE_PER_LEVEL,
-                    experience_for_next_level: EXPERIENCE_PER_LEVEL,
+                    experience_into_level: state.experience
+                        % content().progression.experience_per_level,
+                    experience_for_next_level: content().progression.experience_per_level,
                     attack_damage: Self::attack_damage_for_level(level),
                     gold: state.gold,
                     alive: state.health > 0,
@@ -3903,7 +3965,7 @@ impl AuthoritativeGame for ArpgGame {
                     reaction: Self::player_reaction(state),
                     guard: state.guard.stance,
                     guard_points: state.guard.points,
-                    max_guard_points: MAX_GUARD_POINTS,
+                    max_guard_points: content().guard.max_points,
                     counter: state.counter,
                     weapon: state.weapon,
                     draw_ticks: state.draw_ticks,
@@ -3937,7 +3999,7 @@ impl AuthoritativeGame for ArpgGame {
         }));
 
         Ok(ArpgSnapshot {
-            schema_version: 16,
+            schema_version: 17,
             run_seed: self.run_seed,
             tick: self.tick,
             world_units_per_meter: WORLD_UNITS_PER_METER,
@@ -3949,11 +4011,15 @@ impl AuthoritativeGame for ArpgGame {
                 .iter()
                 .map(|monster| MonsterSnapshot {
                     id: monster.id,
+                    definition: monster.definition().id.to_owned(),
                     room_id: monster.room_id,
                     position: vec_to_array(monster.position),
                     health: monster.health,
+                    max_health: monster.definition().health,
                     alive: monster.health > 0,
-                    action: monster.action.map(MonsterActionState::snapshot),
+                    action: monster
+                        .action
+                        .map(|action| action.snapshot(monster.definition())),
                     reaction: (monster.stagger_ticks_remaining > 0).then_some(
                         MonsterReactionSnapshot {
                             kind: MonsterReactionKind::Stagger,
@@ -4213,6 +4279,7 @@ fn generated_monsters(rooms: &[RoomSnapshot], rng: &mut DungeonRng) -> Vec<Monst
             );
             MonsterState::new(
                 u32::try_from(index + 1).expect("monster id must fit u32"),
+                content().room_monster(index),
                 room.id,
                 Vec3i::new(x, PLAYER_Y, z),
             )
@@ -4494,8 +4561,24 @@ fn xz_distance_sq(a: Vec3i, b: Vec3i) -> i64 {
 mod tests {
     use super::*;
 
+    const BRUTE: &str = "monster.brute";
+    const SKIRMISHER: &str = "monster.skirmisher";
+
+    /// Canonical index of a monster definition in the built-in content.
+    fn definition_index(id: &str) -> usize {
+        content()
+            .monsters
+            .iter()
+            .position(|definition| definition.id == id)
+            .expect("built-in content defines this monster")
+    }
+
+    fn brute() -> &'static MonsterDefinition {
+        content().monster(definition_index(BRUTE))
+    }
+
     fn monster_claw() -> StrikeDefinition {
-        content().monster.strike
+        brute().strike
     }
 
     #[test]
@@ -4514,7 +4597,7 @@ mod tests {
             facing_z: z,
             action: None,
             hurt_ticks_remaining: 0,
-            guard: GuardState::READY,
+            guard: GuardState::ready(),
             counter: None,
             weapon: Weapon::SwordAndShield,
             draw_ticks: None,
@@ -5235,8 +5318,13 @@ mod tests {
     }
 
     fn place_monster(game: &mut ArpgGame, id: u32, x: i32, z: i32) {
+        place_monster_of(game, id, BRUTE, x, z);
+    }
+
+    fn place_monster_of(game: &mut ArpgGame, id: u32, definition: &str, x: i32, z: i32) {
         game.monsters.push(MonsterState::new(
             id,
+            definition_index(definition),
             STRIKE_ROOM,
             Vec3i::new(x, PLAYER_Y, z),
         ));
@@ -7611,7 +7699,7 @@ mod tests {
                 "{kind:?}"
             );
         }
-        let monster = content().monster;
+        let monster = *brute();
         assert_eq!(
             (
                 monster.health,
@@ -7643,6 +7731,327 @@ mod tests {
         assert_eq!(content().counter_window_ticks, COUNTER_WINDOW_TICKS);
         assert_eq!(content().combos.len(), 4);
         assert_eq!(content().max_stagger_ticks(), HEAVY_FINISHER_STAGGER_TICKS);
+
+        let guard = content().guard;
+        assert_eq!(
+            (
+                guard.raise_ticks,
+                guard.max_points,
+                guard.regen_per_tick,
+                guard.block_reaction_ticks,
+                guard.break_ticks
+            ),
+            (
+                GUARD_RAISE_TICKS,
+                MAX_GUARD_POINTS,
+                GUARD_REGEN_PER_TICK,
+                GUARD_BLOCK_REACTION_TICKS,
+                GUARD_BREAK_TICKS
+            )
+        );
+        let bow = content().bow;
+        assert_eq!(
+            (bow.min_draw_ticks, bow.full_draw_ticks),
+            (BOW_MIN_DRAW_TICKS, BOW_FULL_DRAW_TICKS)
+        );
+        assert_eq!(
+            (
+                i32::from(bow.arrow_min_speed),
+                i32::from(bow.arrow_full_speed)
+            ),
+            (ARROW_MIN_SPEED, ARROW_FULL_SPEED)
+        );
+        assert_eq!(
+            (
+                bow.arrow_min_damage,
+                bow.arrow_full_damage,
+                bow.arrow_lifetime_ticks,
+                bow.arrow_stagger_ticks,
+                usize::from(bow.max_live_arrows)
+            ),
+            (
+                ARROW_MIN_DAMAGE,
+                ARROW_FULL_DAMAGE,
+                ARROW_LIFETIME_TICKS,
+                ARROW_STAGGER_TICKS,
+                MAX_LIVE_ARROWS
+            )
+        );
+        let progression = content().progression;
+        assert_eq!(
+            (
+                progression.experience_per_level,
+                progression.base_max_health,
+                progression.max_health_per_level,
+                progression.base_attack_damage,
+                progression.attack_damage_per_level
+            ),
+            (
+                EXPERIENCE_PER_LEVEL,
+                BASE_MAX_HEALTH,
+                MAX_HEALTH_PER_LEVEL,
+                BASE_ATTACK_DAMAGE,
+                ATTACK_DAMAGE_PER_LEVEL
+            )
+        );
+        assert_eq!(
+            (content().loot.monster_gold, content().loot.chest_gold),
+            (GROUND_LOOT_GOLD_AMOUNT, CHEST_GOLD_AMOUNT)
+        );
+    }
+
+    /// Room whose generated monster the built-in content makes a skirmisher (#105).
+    const SKIRMISHER_ROOM: RoomId = 4;
+
+    fn skirmisher() -> &'static MonsterDefinition {
+        content().monster(definition_index(SKIRMISHER))
+    }
+
+    /// Player 1 at the centre of the skirmisher's room, activated, with the generated
+    /// skirmisher `offset` units along +x.
+    fn skirmisher_room(offset: i32) -> (ArpgGame, u32) {
+        let mut game = ArpgGame::new_with_seed(42).unwrap();
+        let (center_x, center_z) = game
+            .rooms
+            .iter()
+            .find(|room| room.id == SKIRMISHER_ROOM)
+            .unwrap()
+            .center();
+        game.player_spawns[0] = Vec3i::new(center_x, PLAYER_Y, center_z);
+        game.add_player(1).unwrap();
+        game.reconcile_encounters().unwrap();
+        let monster = game
+            .monsters
+            .iter_mut()
+            .find(|monster| monster.room_id == SKIRMISHER_ROOM)
+            .unwrap();
+        assert_eq!(monster.definition().id, SKIRMISHER);
+        monster.position = Vec3i::new(center_x + offset, PLAYER_Y, center_z);
+        let id = monster.id;
+        (game, id)
+    }
+
+    #[test]
+    fn combat_rooms_spawn_the_monster_their_content_assigns() {
+        let skirmisher = skirmisher();
+        assert_ne!(
+            (
+                skirmisher.health,
+                skirmisher.strike.reach,
+                skirmisher.pursuit_speed
+            ),
+            (brute().health, brute().strike.reach, brute().pursuit_speed)
+        );
+        for seed in [0, 42, 0xA420_0916, u32::MAX] {
+            let snapshot = ArpgGame::new_with_seed(seed).unwrap().snapshot().unwrap();
+            let rooms = snapshot
+                .monsters
+                .iter()
+                .map(|monster| (monster.room_id, monster.definition.as_str()))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                rooms,
+                [
+                    (2, BRUTE),
+                    (3, BRUTE),
+                    (4, SKIRMISHER),
+                    (5, BRUTE),
+                    (6, SKIRMISHER)
+                ],
+                "seed {seed}"
+            );
+            for monster in &snapshot.monsters {
+                let definition = content().monster(definition_index(&monster.definition));
+                assert_eq!(monster.health, definition.health);
+                assert_eq!(monster.max_health, definition.health);
+            }
+        }
+    }
+
+    #[test]
+    fn a_skirmisher_attacks_with_its_own_timing_reach_and_damage() {
+        let definition = skirmisher();
+        let (mut game, id) = skirmisher_room(100);
+
+        game.advance_tick().unwrap();
+
+        let telegraph = game.snapshot().unwrap();
+        let monster = telegraph.monsters.iter().find(|m| m.id == id).unwrap();
+        let action = monster.action.unwrap();
+        assert_eq!(action.phase, ActionPhase::Windup);
+        assert_eq!(action.ticks_remaining, definition.windup_ticks);
+        assert_eq!(i64::from(action.range), definition.strike.reach);
+        assert_eq!(telegraph.players[0].health, BASE_MAX_HEALTH);
+
+        for _ in 0..definition.windup_ticks {
+            game.advance_tick().unwrap();
+        }
+        let impact = game.snapshot().unwrap();
+        assert_eq!(
+            impact.players[0].health,
+            BASE_MAX_HEALTH - definition.damage
+        );
+        assert!(impact.strike_events.iter().any(|event| {
+            event.definition == "monster.lunge"
+                && event.source == StrikeSource::Monster(id)
+                && event.result
+                    == StrikeResult::Hit {
+                        damage: definition.damage,
+                        defeated: false,
+                    }
+        }));
+        let monster = impact.monsters.iter().find(|m| m.id == id).unwrap();
+        assert_eq!(monster.action.unwrap().phase, ActionPhase::Active);
+    }
+
+    #[test]
+    fn a_skirmisher_blocked_spends_its_own_guard_cost() {
+        let definition = skirmisher();
+        let (mut game, _) = skirmisher_room(100);
+        game.apply_command(
+            PlayerCommand::new(1, 1, ArpgCommand::SetGuard { raised: true }).unwrap(),
+        )
+        .unwrap();
+        for _ in 0..=definition.windup_ticks {
+            game.advance_tick().unwrap();
+        }
+        let player = &game.snapshot().unwrap().players[0];
+        assert_eq!(player.health, BASE_MAX_HEALTH);
+        assert_eq!(
+            player.guard_points,
+            MAX_GUARD_POINTS - definition.strike.guard_cost
+        );
+    }
+
+    #[test]
+    fn defeating_a_skirmisher_awards_its_own_experience_and_drop() {
+        let (mut game, id) = skirmisher_room(100);
+        game.monsters
+            .iter_mut()
+            .find(|monster| monster.id == id)
+            .unwrap()
+            .health = 1;
+
+        run_action(&mut game, 1, 1, ArpgCommand::PrimaryAttack);
+
+        let snapshot = game.snapshot().unwrap();
+        assert!(!snapshot.monsters.iter().find(|m| m.id == id).unwrap().alive);
+        assert_eq!(
+            snapshot.players[0].experience,
+            skirmisher().experience_reward
+        );
+        assert_ne!(skirmisher().experience_reward, brute().experience_reward);
+        assert_eq!(snapshot.ground_loot.len(), 1);
+        assert_eq!(snapshot.ground_loot[0].amount, content().loot.monster_gold);
+    }
+
+    #[test]
+    fn a_skirmisher_outpaces_a_brute_but_never_its_own_speed() {
+        let (mut game, x, z) = strike_arena();
+        place_monster_of(&mut game, 1, SKIRMISHER, x + 700, z + 200);
+        let start = monster_position(&game, 1);
+        let mut previous = start;
+        let mut fastest = 0;
+        let arrived = (1..=400)
+            .find(|_| {
+                game.advance_tick().unwrap();
+                let position = monster_position(&game, 1);
+                fastest = fastest.max(isqrt(xz_distance_sq(previous, position)));
+                previous = position;
+                game.monsters[0].action.is_some()
+            })
+            .expect("the skirmisher reaches its target");
+        let reach = skirmisher().strike.reach;
+        assert!(xz_distance_sq(previous, player_position(&game)) <= reach * reach);
+        assert!(fastest <= i64::from(skirmisher().pursuit_speed));
+        assert!(
+            fastest > i64::from(brute().pursuit_speed),
+            "fastest step {fastest} after {arrived} ticks"
+        );
+    }
+
+    #[test]
+    fn mixed_definitions_in_one_room_each_close_to_their_own_reach() {
+        let (mut game, x, z) = strike_arena();
+        place_monster_of(&mut game, 1, BRUTE, x + 700, z + 200);
+        place_monster_of(&mut game, 2, SKIRMISHER, x + 700, z - 200);
+        let mut started = BTreeMap::new();
+        for _ in 0..500 {
+            game.advance_tick().unwrap();
+            let player = player_position(&game);
+            for monster in &game.monsters {
+                if monster.action.is_some() {
+                    started
+                        .entry(monster.id)
+                        .or_insert(xz_distance_sq(monster.position, player));
+                }
+            }
+            if started.len() == 2 {
+                break;
+            }
+        }
+        let brute_reach = brute().strike.reach;
+        let skirmisher_reach = skirmisher().strike.reach;
+        assert!(started[&1] <= brute_reach * brute_reach, "{started:?}");
+        assert!(
+            started[&2] <= skirmisher_reach * skirmisher_reach,
+            "{started:?}"
+        );
+    }
+
+    #[test]
+    fn a_save_mid_skirmisher_attack_continues_like_the_uninterrupted_game() {
+        let (mut game, id) = skirmisher_room(100);
+        for _ in 0..4 {
+            game.advance_tick().unwrap();
+        }
+        assert!(
+            game.monsters
+                .iter()
+                .any(|m| m.id == id && m.action.is_some())
+        );
+
+        let mut restored = ArpgGame::from_save_state(game.save_state().unwrap()).unwrap();
+        assert_eq!(restored.snapshot().unwrap(), game.snapshot().unwrap());
+        for _ in 0..60 {
+            game.advance_tick().unwrap();
+            restored.advance_tick().unwrap();
+            assert_eq!(restored.snapshot().unwrap(), game.snapshot().unwrap());
+        }
+    }
+
+    #[test]
+    fn saved_monsters_are_validated_against_their_own_definition() {
+        let (game, id) = skirmisher_room(100);
+        let save = game.save_state().unwrap();
+        let skirmisher = skirmisher();
+
+        let mut over_health = save.clone();
+        let saved = over_health
+            .monsters
+            .iter_mut()
+            .find(|m| m.id == id)
+            .unwrap();
+        saved.health = skirmisher.health + 1;
+        assert!(saved.health <= brute().health);
+        assert!(ArpgGame::from_save_state(over_health).is_err());
+
+        let mut long_windup = save;
+        let saved = long_windup
+            .monsters
+            .iter_mut()
+            .find(|m| m.id == id)
+            .unwrap();
+        saved.engagement = Engagement::Engaged {
+            target_player_id: 1,
+        };
+        saved.action = Some(MonsterActionSaveState {
+            phase: ActionPhase::Windup,
+            ticks_remaining: skirmisher.windup_ticks + 1,
+            target_player_id: 1,
+        });
+        assert!(skirmisher.windup_ticks < brute().windup_ticks);
+        assert!(ArpgGame::from_save_state(long_windup).is_err());
     }
 
     #[test]
@@ -7651,8 +8060,7 @@ mod tests {
         game.add_player(1).unwrap();
         game.monsters[0].stagger_ticks_remaining = ARROW_STAGGER_TICKS;
         assert!(ArpgGame::from_save_state(game.save_state().unwrap()).is_ok());
-        game.monsters[0].stagger_ticks_remaining =
-            content().max_stagger_ticks().max(ARROW_STAGGER_TICKS) + 1;
+        game.monsters[0].stagger_ticks_remaining = content().max_stagger_ticks() + 1;
         assert!(ArpgGame::from_save_state(game.save_state().unwrap()).is_err());
     }
 
@@ -7777,7 +8185,7 @@ mod tests {
         game.add_player(1).unwrap();
         let snapshot = game.snapshot().unwrap();
         let generated = generate_dungeon(snapshot.run_seed);
-        assert_eq!(snapshot.schema_version, 16);
+        assert_eq!(snapshot.schema_version, 17);
         assert_eq!(snapshot.run_seed, 0xDEAD_BEEF);
         assert_eq!(game.run_seed(), snapshot.run_seed);
         assert_eq!(snapshot.rooms, generated.rooms);
@@ -8205,7 +8613,7 @@ mod tests {
         let (mut game, x, z) = strike_arena();
         place_monster(&mut game, 1, x + 700, z + 200);
         let start = monster_position(&game, 1);
-        let reach = content().monster.strike.reach;
+        let reach = brute().strike.reach;
 
         let arrived =
             ticks_until_windup(&mut game, 1, 400).expect("the monster reaches its target");
@@ -8214,7 +8622,7 @@ mod tests {
         assert!(xz_distance_sq(position, player_position(&game)) <= reach * reach);
         let travelled = isqrt(xz_distance_sq(start, position));
         // Never faster than its content speed.
-        assert!(travelled <= i64::from(content().monster.pursuit_speed) * arrived as i64);
+        assert!(travelled <= i64::from(brute().pursuit_speed) * arrived as i64);
         assert!(game.navigation_expansions() > 0);
     }
 
@@ -8453,7 +8861,7 @@ mod tests {
         assert_eq!(published(&game, 1), (MonsterBehavior::Pursuing, Some(1)));
 
         // A second player arrives nearer than the target, but by less than the margin.
-        let margin = content().monster.target_switch_margin;
+        let margin = brute().target_switch_margin;
         let monster = monster_position(&game, 1);
         let current = isqrt(xz_distance_sq(monster, player_position(&game)));
         let offset = i32::try_from(current - margin + 30).unwrap();
@@ -8549,7 +8957,7 @@ mod tests {
         game.players.get_mut(&1).unwrap().health = 0;
         game.advance_tick().unwrap();
         let held_at = monster_position(&game, 1);
-        let reacquire = content().monster.reacquire_ticks;
+        let reacquire = brute().reacquire_ticks;
         assert_eq!(
             monster_state(&game, 1).engagement,
             Engagement::Searching {
@@ -8590,7 +8998,7 @@ mod tests {
         // Facing +x: the light swing (reach 220) hits the monster at 200.
         run_action(&mut game, 1, 1, ArpgCommand::PrimaryAttack);
         let state = monster_state(&game, 1);
-        assert!(state.health < content().monster.health);
+        assert!(state.health < brute().health);
         assert_eq!(state.engaged_target(), Some(1));
 
         let (mut game, x, z) = strike_arena();
@@ -8628,7 +9036,7 @@ mod tests {
                 monster_state(&game, 1).stagger_ticks_remaining > 0
             })
             .expect("the strike lands before the claw");
-        assert!(staggered < usize::from(content().monster.windup_ticks));
+        assert!(staggered < usize::from(brute().windup_ticks));
         assert_eq!(published(&game, 1), (MonsterBehavior::Staggered, Some(1)));
         let held_at = monster_position(&game, 1);
         while monster_state(&game, 1).stagger_ticks_remaining > 0 {
@@ -8660,7 +9068,7 @@ mod tests {
             .clone();
         let post = Vec3i::new(room.min_x + 150, PLAYER_Y, room.min_z + 150);
         let start = Vec3i::new(room.max_x - 150, PLAYER_Y, room.max_z - 150);
-        let leash = content().monster.leash_range;
+        let leash = brute().leash_range;
         assert!(xz_distance_sq(post, start) > leash * leash);
         place_monster(&mut game, 1, start.x, start.z);
         game.monsters[0].post = Some(post);
@@ -8684,7 +9092,7 @@ mod tests {
 
         // Home again with nobody in aggro range, it rests; then re-engages a player.
         place_player(&mut game, 1, x + 600, room.max_z - 150);
-        let aggro = content().monster.aggro_range;
+        let aggro = brute().aggro_range;
         assert!(xz_distance_sq(post, player_position(&game)) > aggro * aggro);
         let home = (1..=600)
             .find(|_| {
@@ -8715,7 +9123,7 @@ mod tests {
         assert_eq!(post, Vec3i::new(x + 500, PLAYER_Y, z));
         assert!(xz_distance_sq(monster_position(&game, 1), post) > 200 * 200);
         assert!(game.remove_player(1));
-        for _ in 0..=content().monster.reacquire_ticks {
+        for _ in 0..=brute().reacquire_ticks {
             game.advance_tick().unwrap();
         }
         assert_eq!(published(&game, 1), (MonsterBehavior::Returning, None));
@@ -8886,7 +9294,7 @@ mod tests {
         );
         assert!(
             tamper(&|monster| monster.engagement = Engagement::Searching {
-                ticks_remaining: content().monster.reacquire_ticks + 1
+                ticks_remaining: brute().reacquire_ticks + 1
             })
             .is_err()
         );
@@ -9013,7 +9421,7 @@ mod tests {
 
     #[test]
     fn strict_goal_cells_have_a_clear_physics_strike_line_to_their_whole_target_cell() {
-        let reach = content().monster.strike.reach;
+        let reach = brute().strike.reach;
         for seed in 0..12 {
             let mut rng = ScenarioRng(seed | 1);
             let (mut game, x, z) = strike_arena();
