@@ -3891,13 +3891,18 @@ impl ArpgGame {
                 }
             } else {
                 let post = *monster.post.get_or_insert(monster.position);
+                // Steering found no retreat from the target it was engaged on; a switch to
+                // another target makes that result stale.
+                let cornered_target = monster.engaged_target().filter(|_| monster.cornered);
                 monster.engagement = self.next_engagement(&monster, post, &targets)?;
+                let cornered =
+                    cornered_target.is_some() && monster.engaged_target() == cornered_target;
                 // Only the engaged target is attacked; an obstructed one is pursued
                 // instead of winding up into a wall. A monster that keeps spacing attacks
                 // from its band, or from where it stands when it found no way back (#108).
                 if let Some(target_player_id) = monster.engaged_target()
                     && let Some(target) = Self::target_in_room(&monster, &targets, target_player_id)
-                    && (monster.cornered || !Self::inside_retreat_range(&monster, target))
+                    && (cornered || !Self::inside_retreat_range(&monster, target))
                     && self.can_strike(&monster, target)?
                 {
                     monster.action = Some(MonsterActionState {

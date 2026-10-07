@@ -607,7 +607,10 @@ impl ContentBundle {
                         "projectile speed must be within 16..=200 and its lifetime positive",
                     );
                 }
-                if i64::from(projectile.speed) * i64::from(projectile.lifetime_ticks) < reach {
+                // Whole-unit velocity components can lose up to two units of speed on a
+                // diagonal, so the reach check uses the slowest speed a shot can have.
+                if (i64::from(projectile.speed) - 2) * i64::from(projectile.lifetime_ticks) < reach
+                {
                     fail(
                         path.clone(),
                         "projectile must fly at least as far as the strike reach",
@@ -960,6 +963,25 @@ mod tests {
                 lifetime_ticks: 40,
             });
         });
+        // 20 × 34 = 680 nominally covers reach 640, but a diagonal shot can be as slow as
+        // 18 per tick and stop at 612.
+        let short_diagonal = errors(|bundle| {
+            let archer = bundle
+                .monsters
+                .iter_mut()
+                .find(|monster| monster.id == "monster.archer")
+                .unwrap();
+            archer.projectile = Some(ProjectileData {
+                speed: 20,
+                lifetime_ticks: 34,
+            });
+        });
+        assert!(
+            short_diagonal
+                .iter()
+                .any(|error| error.contains("monster.archer: projectile must fly at least as far")),
+            "{short_diagonal:?}"
+        );
         for invariant in [
             "monster.archer: retreatRange must stay three navigation cells inside",
             "monster.archer: projectile must fly at least as far as the strike reach",
