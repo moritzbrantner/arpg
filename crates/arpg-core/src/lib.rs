@@ -31,7 +31,10 @@ pub const TICK_HZ: u16 = 60;
 const PHYSICS_TICKS_PER_GAME_TICK: i32 = 1;
 pub const MAX_PLAYERS: usize = 4;
 pub const WORLD_UNITS_PER_METER: i32 = 100;
-pub const SAVE_STATE_SCHEMA_VERSION: u16 = 9;
+/// Largest magnitude of either component of an aim direction. Aim is a direction only: its
+/// length carries no meaning, so `[1, 0]` and `[1000, 0]` aim the same way.
+pub const AIM_COMPONENT_LIMIT: i16 = 1_000;
+pub const SAVE_STATE_SCHEMA_VERSION: u16 = 10;
 // 2: directional multi-target strike volumes and obstruction by fixed geometry.
 // 3: directional shield guard, block and guard break.
 // 4: post-block counterattack opportunity.
@@ -39,7 +42,8 @@ pub const SAVE_STATE_SCHEMA_VERSION: u16 = 9;
 // 6: bow loadout, draw/release and authoritative arrows.
 // 7: reward chests, line-of-sight interaction and reasoned interaction results.
 // 8: enemy engagement: aggro, leash and return, target hysteresis, separation (#109).
-pub const SAVE_STATE_RULES_VERSION: u16 = 8;
+// 9: aim intent separate from movement and optional target lock (#103).
+pub const SAVE_STATE_RULES_VERSION: u16 = 9;
 // physics-engine::World::step(1) integrates velocity as world units per simulation tick.
 // At 60 Hz and 100 world units per meter, 7 units/tick is 4.2 m/s rather than
 // the previous 260 units/tick (156 m/s).
@@ -322,6 +326,18 @@ pub enum ArpgCommand {
     ReleaseBow,
     /// Lowers a drawn bow without shooting (focus loss, menus, explicit cancel).
     CancelBow,
+    /// Semantic aim intent (mouse, stick or touch), independent of movement. `Some` points
+    /// melee strikes and bow shots along that direction and turns the facing to it; `None`
+    /// restores the default of committed facing along movement. Each component must lie
+    /// within ±`AIM_COMPONENT_LIMIT` and the direction must be non-zero.
+    SetAim {
+        direction: Option<[i16; 2]>,
+    },
+    /// Locks the nearest eligible monster, or moves an existing lock to the next one in
+    /// nearest-first order (lower id breaks ties), wrapping around.
+    CycleTarget,
+    /// Drops the target lock.
+    ClearTarget,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
@@ -579,6 +595,9 @@ pub struct PlayerActionSnapshot {
     pub buffered: Option<ComboInput>,
     /// Bow draw ticks committed at release (zero for other actions).
     pub charge: u8,
+    /// Exact direction committed from aim intent or a target lock; `None` means the action
+    /// follows its committed `facing`.
+    pub aim: Option<[i16; 2]>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -812,6 +831,10 @@ pub struct PlayerSnapshot {
     pub draw_ticks: Option<u8>,
     /// What Interact would act on now, or why it would do nothing.
     pub interaction: InteractionPrompt,
+    /// Current aim intent; `None` while facing follows movement.
+    pub aim: Option<[i16; 2]>,
+    /// Monster held by the optional target lock.
+    pub locked_monster_id: Option<u32>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -1005,6 +1028,8 @@ pub struct PlayerSaveState {
     pub counter: Option<CounterOpportunity>,
     pub weapon: Weapon,
     pub draw_ticks: Option<u8>,
+    pub aim: Option<[i16; 2]>,
+    pub locked_monster_id: Option<u32>,
     pub health: u16,
     pub experience: u32,
     pub gold: u32,
@@ -1071,6 +1096,7 @@ struct ActionState {
     connected: bool,
     buffered: Option<ComboInput>,
     charge: u8,
+    aim: Option<[i16; 2]>,
 }
 
 impl ActionState {
@@ -1083,6 +1109,7 @@ impl ActionState {
             connected: self.connected,
             buffered: self.buffered,
             charge: self.charge,
+            aim: self.aim,
         }
     }
 }
@@ -1175,6 +1202,8 @@ struct PlayerState {
     counter: Option<CounterOpportunity>,
     weapon: Weapon,
     draw_ticks: Option<u8>,
+    aim: Option<[i16; 2]>,
+    locked_monster_id: Option<u32>,
     health: u16,
     experience: u32,
     gold: u32,
@@ -1620,6 +1649,8 @@ impl ArpgGame {
                     counter: state.counter,
                     weapon: state.weapon,
                     draw_ticks: state.draw_ticks,
+                    aim: state.aim,
+                    locked_monster_id: state.locked_monster_id,
                     health: state.health,
                     experience: state.experience,
                     gold: state.gold,
@@ -1745,6 +1776,9 @@ impl ArpgGame {
             }
             Self::validate_axis(player.movement, "movement")?;
             Self::validate_facing(player.facing)?;
+            if let Some(aim) = player.aim {
+                Self::validate_aim(aim)?;
+            }
             if player.health
                 > Self::max_health_for_level(Self::level_for_experience(player.experience))
             {
@@ -1971,12 +2005,15 @@ impl ArpgGame {
                     connected: action.connected,
                     buffered: action.buffered,
                     charge: action.charge,
+                    aim: action.aim,
                 }),
                 hurt_ticks_remaining: player.hurt_ticks_remaining,
                 guard: player.guard,
                 counter: player.counter,
                 weapon: player.weapon,
                 draw_ticks: player.draw_ticks,
+                aim: player.aim,
+                locked_monster_id: player.locked_monster_id,
                 health: player.health,
                 experience: player.experience,
                 gold: player.gold,
@@ -2009,6 +2046,17 @@ impl ArpgGame {
         }
 
         game.sync_door_locks()?;
+        let locked_players = game
+            .players
+            .iter()
+            .filter(|(_, state)| state.locked_monster_id.is_some())
+            .map(|(&id, _)| id)
+            .collect::<Vec<_>>();
+        for player_id in locked_players {
+            if !game.lock_holds(player_id)? {
+                return Err(GameError::new("saved target lock is invalid"));
+            }
+        }
         Ok(game)
     }
 
@@ -2067,6 +2115,68 @@ impl ArpgGame {
         Ok(())
     }
 
+    /// Aim intent is any non-zero direction whose components lie within the aim limit.
+    fn validate_aim(direction: [i16; 2]) -> Result<(), GameError> {
+        let limit = -AIM_COMPONENT_LIMIT..=AIM_COMPONENT_LIMIT;
+        if direction == [0, 0] || !direction.iter().all(|component| limit.contains(component)) {
+            return Err(GameError::new(format!(
+                "aim direction must be non-zero with components within ±{AIM_COMPONENT_LIMIT}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// The eight-way facing closest to `direction`. A component counts when it is at least
+    /// tan 22.5° (≈ 0.41421) of the other, so sector boundaries lie halfway between the
+    /// eight directions.
+    fn facing_for(direction: [i16; 2]) -> (i8, i8) {
+        let (x, z) = (i32::from(direction[0]), i32::from(direction[1]));
+        let axis = |own: i32, other: i32| -> i8 {
+            if own.abs() * 100_000 < other.abs() * 41_421 {
+                return 0;
+            }
+            match own.cmp(&0) {
+                std::cmp::Ordering::Greater => 1,
+                std::cmp::Ordering::Less => -1,
+                std::cmp::Ordering::Equal => 0,
+            }
+        };
+        (axis(x, z), axis(z, x))
+    }
+
+    /// The aim direction from `origin` towards `target`, scaled into the aim limit.
+    fn direction_between(origin: Vec3i, target: Vec3i) -> Option<[i16; 2]> {
+        let dx = i64::from(target.x - origin.x);
+        let dz = i64::from(target.z - origin.z);
+        let largest = dx.abs().max(dz.abs());
+        if largest == 0 {
+            return None;
+        }
+        let limit = i64::from(AIM_COMPONENT_LIMIT);
+        let scale = |component: i64| {
+            let scaled = if largest > limit {
+                component * limit / largest
+            } else {
+                component
+            };
+            i16::try_from(scaled).expect("scaled aim component fits the aim limit")
+        };
+        Some([scale(dx), scale(dz)])
+    }
+
+    /// Arrow velocity along an exact aim direction: `speed` world units per tick, each
+    /// component rounded toward zero.
+    fn aimed_velocity(direction: [i16; 2], speed: i32) -> (i32, i32) {
+        let (x, z) = (i64::from(direction[0]), i64::from(direction[1]));
+        // Thousandths keep the length exact enough for short directions such as [1, 1].
+        let scaled_length = ((x * x + z * z) * 1_000_000).isqrt();
+        let component = |value: i64| {
+            i32::try_from(value * i64::from(speed) * 1_000 / scaled_length)
+                .expect("aimed arrow velocity fits i32")
+        };
+        (component(x), component(z))
+    }
+
     fn validate_facing(facing: [i8; 2]) -> Result<(), GameError> {
         Self::validate_axis(facing, "facing")?;
         if facing == [0, 0] {
@@ -2075,15 +2185,20 @@ impl ArpgGame {
         Ok(())
     }
 
-    /// Whether some accepted draw and facing produce exactly this arrow's velocity and damage.
+    /// Whether some accepted draw and direction produce this arrow's velocity and damage.
+    /// Facing and aimed launches round each component toward zero, so a launched arrow's
+    /// planar speed lies within two units below its draw speed (and never meaningfully
+    /// above it).
     fn arrow_launch_is_possible(arrow: &ArrowSnapshot) -> bool {
         (content().bow.min_draw_ticks..=content().bow.full_draw_ticks).any(|charge| {
             let (speed, damage) = Self::arrow_launch(charge);
-            let diagonal = speed * ARROW_DIAGONAL_NUMERATOR / ARROW_DIAGONAL_DENOMINATOR;
-            let [vx, vy, vz] = arrow.velocity;
-            let cardinal = (vx.abs() == speed && vz == 0) || (vx == 0 && vz.abs() == speed);
-            let diagonal = vx.abs() == diagonal && vz.abs() == diagonal;
-            damage == arrow.damage && vy == 0 && (cardinal || diagonal)
+            let [vx, vy, vz] = arrow.velocity.map(i64::from);
+            let speed = i64::from(speed);
+            let length_sq = vx * vx + vz * vz;
+            damage == arrow.damage
+                && vy == 0
+                && (speed - 2) * (speed - 2) <= length_sq
+                && length_sq <= (speed + 1) * (speed + 1)
         })
     }
 
@@ -2165,6 +2280,15 @@ impl ArpgGame {
 
     fn validate_action_snapshot(action: PlayerActionSnapshot) -> Result<(), GameError> {
         Self::validate_facing(action.facing)?;
+        if let Some(aim) = action.aim {
+            Self::validate_aim(aim)?;
+            let (x, z) = Self::facing_for(aim);
+            if action.facing != [x, z] {
+                return Err(GameError::new(
+                    "saved player action facing does not match its aim",
+                ));
+            }
+        }
         let maximum_ticks = match action.phase {
             ActionPhase::Windup => action.kind.windup_ticks(),
             ActionPhase::Active => action.kind.active_ticks(),
@@ -2405,6 +2529,7 @@ impl ArpgGame {
     }
 
     fn start_action(&mut self, player_id: PlayerId, kind: ActionKind) -> Result<(), GameError> {
+        let aim = self.intent_aim(player_id)?;
         let state = self
             .players
             .get_mut(&player_id)
@@ -2416,25 +2541,30 @@ impl ArpgGame {
         // and lowers a drawn bow without shooting.
         state.guard.stance = None;
         state.draw_ticks = None;
-        state.action = Some(Self::new_action(kind, state));
+        state.action = Some(Self::new_action(kind, state, aim));
         Ok(())
     }
 
-    fn new_action(kind: ActionKind, state: &PlayerState) -> ActionState {
+    /// Commits a new action. With `aim` (from aim intent or a held target lock) the action
+    /// strikes or shoots along that exact direction and faces its nearest eight-way facing;
+    /// without it the action keeps the player's current facing.
+    fn new_action(kind: ActionKind, state: &PlayerState, aim: Option<[i16; 2]>) -> ActionState {
+        let (facing_x, facing_z) = aim.map_or((state.facing_x, state.facing_z), Self::facing_for);
         ActionState {
             kind,
             phase: ActionPhase::Windup,
             ticks_remaining: kind.windup_ticks(),
-            facing_x: state.facing_x,
-            facing_z: state.facing_z,
+            facing_x,
+            facing_z,
             connected: false,
             buffered: None,
             charge: 0,
+            aim,
         }
     }
 
     /// Applies an attack input to an action in progress under the combo transition table.
-    fn combo_input(state: &mut PlayerState, input: ComboInput) {
+    fn combo_input(state: &mut PlayerState, input: ComboInput, aim: Option<[i16; 2]>) {
         let Some(mut action) = state.action else {
             return;
         };
@@ -2455,14 +2585,14 @@ impl ArpgGame {
                 } else if elapsed < transition.closes_at
                     && (!transition.requires_hit || action.connected)
                 {
-                    state.action = Some(Self::new_action(transition.to, state));
+                    state.action = Some(Self::new_action(transition.to, state, aim));
                 }
             }
         }
     }
 
     /// Commits a buffered combo input on the tick its transition interval opens.
-    fn commit_buffered_combo(state: &mut PlayerState) {
+    fn commit_buffered_combo(state: &mut PlayerState, aim: Option<[i16; 2]>) {
         let Some(action) = state.action else {
             return;
         };
@@ -2486,17 +2616,17 @@ impl ArpgGame {
                 ..action
             })
         } else {
-            Some(Self::new_action(transition.to, state))
+            Some(Self::new_action(transition.to, state, aim))
         };
     }
 
-    fn target_is_in_front(facing_x: i8, facing_z: i8, dx: i64, dz: i64) -> bool {
+    /// Whether `(dx, dz)` lies within 60° of the direction `(facing_x, facing_z)`, which may
+    /// be an eight-way facing or an exact aim direction.
+    fn target_is_in_front(facing_x: i64, facing_z: i64, dx: i64, dz: i64) -> bool {
         let distance_sq = dx * dx + dz * dz;
         if distance_sq == 0 {
             return true;
         }
-        let facing_x = i64::from(facing_x);
-        let facing_z = i64::from(facing_z);
         let facing_len_sq = facing_x * facing_x + facing_z * facing_z;
         if facing_len_sq == 0 {
             return true;
@@ -2665,7 +2795,7 @@ impl ArpgGame {
         &self,
         definition: StrikeDefinition,
         origin: Vec3i,
-        facing: (i8, i8),
+        facing: (i64, i64),
         candidates: impl IntoIterator<Item = (StrikeTarget, Vec3i)>,
     ) -> Result<Vec<(StrikeTarget, bool)>, GameError> {
         let reach_sq = definition.reach * definition.reach;
@@ -2718,12 +2848,145 @@ impl ArpgGame {
         }))
     }
 
+    fn player_position(&self, player_id: PlayerId) -> Result<Vec3i, GameError> {
+        Ok(self
+            .world
+            .body(Self::player_body_id(player_id))
+            .ok_or_else(|| GameError::new("player physics body is missing"))?
+            .position())
+    }
+
+    /// Whether a target lock may hold `monster` from `origin`: the monster is alive, its
+    /// encounter is active and it is within `range` on the plane.
+    fn monster_lockable(&self, monster: &MonsterState, origin: Vec3i, range: i64) -> bool {
+        monster.health > 0
+            && self.rooms.iter().any(|room| {
+                room.id == monster.room_id && room.encounter_state == RoomEncounterState::Active
+            })
+            && xz_distance_sq(origin, monster.position) <= range * range
+    }
+
+    /// Where a player's lock currently points, revalidated now: `None` when there is no
+    /// lock, the player is defeated, or the target died, left its active encounter or moved
+    /// beyond the break range. Line of sight is not required to keep a lock (stickiness).
+    fn locked_target_position(&self, player_id: PlayerId) -> Result<Option<Vec3i>, GameError> {
+        let Some(state) = self.players.get(&player_id) else {
+            return Ok(None);
+        };
+        let Some(monster_id) = state.locked_monster_id.filter(|_| state.health > 0) else {
+            return Ok(None);
+        };
+        let origin = self.player_position(player_id)?;
+        Ok(self
+            .monsters
+            .iter()
+            .find(|monster| monster.id == monster_id)
+            .filter(|monster| {
+                self.monster_lockable(monster, origin, content().targeting.break_range)
+            })
+            .map(|monster| monster.position))
+    }
+
+    fn lock_holds(&self, player_id: PlayerId) -> Result<bool, GameError> {
+        Ok(self.locked_target_position(player_id)?.is_some())
+    }
+
+    /// The exact direction a newly committed action takes: towards a valid target lock,
+    /// else the player's aim intent. `None` keeps the default committed facing. A lock lost
+    /// here falls back silently, so the action still happens.
+    fn intent_aim(&self, player_id: PlayerId) -> Result<Option<[i16; 2]>, GameError> {
+        let locked = match self.locked_target_position(player_id)? {
+            Some(target) => Self::direction_between(self.player_position(player_id)?, target),
+            None => None,
+        };
+        Ok(locked.or_else(|| self.players.get(&player_id).and_then(|state| state.aim)))
+    }
+
+    /// Points the facing at the lock, else the aim intent, else the movement direction
+    /// (unchanged while standing still without aim).
+    fn refresh_facing(&mut self, player_id: PlayerId) -> Result<(), GameError> {
+        let locked = match self.locked_target_position(player_id)? {
+            Some(target) => Self::direction_between(self.player_position(player_id)?, target),
+            None => None,
+        };
+        let state = self
+            .players
+            .get_mut(&player_id)
+            .ok_or_else(|| GameError::new("facing references an unknown player"))?;
+        if let Some(direction) = locked.or(state.aim) {
+            (state.facing_x, state.facing_z) = Self::facing_for(direction);
+        } else if state.movement_x != 0 || state.movement_z != 0 {
+            state.facing_x = state.movement_x;
+            state.facing_z = state.movement_z;
+        }
+        Ok(())
+    }
+
+    /// Locks the nearest eligible monster or advances an existing lock to the next one.
+    /// Eligible monsters are lockable within the lock range and in line of sight (no fixed
+    /// geometry between), ordered nearest first with the lower id breaking ties. A lock held
+    /// outside that set (sticky beyond the lock range) moves to the nearest; with no eligible
+    /// monster the current lock is kept.
+    fn cycle_target(&mut self, player_id: PlayerId) -> Result<(), GameError> {
+        if self
+            .players
+            .get(&player_id)
+            .is_none_or(|state| state.health == 0)
+        {
+            return Ok(());
+        }
+        let origin = self.player_position(player_id)?;
+        let range = content().targeting.lock_range;
+        let mut candidates = Vec::new();
+        for monster in &self.monsters {
+            if self.monster_lockable(monster, origin, range)
+                && !self.strike_obstructed(origin, monster.position)?
+            {
+                candidates.push((xz_distance_sq(origin, monster.position), monster.id));
+            }
+        }
+        candidates.sort_unstable();
+        let current = self.players[&player_id].locked_monster_id;
+        let next = match current.and_then(|id| candidates.iter().position(|&(_, c)| c == id)) {
+            Some(index) => candidates.get((index + 1) % candidates.len()),
+            None => candidates.first(),
+        };
+        if let Some(&(_, monster_id)) = next {
+            self.players
+                .get_mut(&player_id)
+                .expect("player existence checked")
+                .locked_monster_id = Some(monster_id);
+        }
+        Ok(())
+    }
+
+    /// Drops locks that no longer hold and turns locked players towards their targets.
+    fn revalidate_target_locks(&mut self) -> Result<(), GameError> {
+        let locked = self
+            .players
+            .iter()
+            .filter(|(_, state)| state.locked_monster_id.is_some())
+            .map(|(&id, _)| id)
+            .collect::<Vec<_>>();
+        for player_id in locked {
+            if !self.lock_holds(player_id)? {
+                self.players
+                    .get_mut(&player_id)
+                    .expect("player id came from player map")
+                    .locked_monster_id = None;
+            }
+            self.refresh_facing(player_id)?;
+        }
+        Ok(())
+    }
+
     fn resolve_attack(
         &mut self,
         player_id: PlayerId,
         kind: ActionKind,
         facing_x: i8,
         facing_z: i8,
+        aim: Option<[i16; 2]>,
     ) -> Result<(), GameError> {
         let player_position = self
             .world
@@ -2760,12 +3023,10 @@ impl ArpgGame {
             .filter(|monster| monster.health > 0 && active_rooms.contains(&monster.room_id))
             .map(|monster| (StrikeTarget::Monster(monster.id), monster.position))
             .collect::<Vec<_>>();
-        let contacts = self.strike_contacts(
-            definition,
-            player_position,
-            (facing_x, facing_z),
-            candidates,
-        )?;
+        let direction = aim.map_or((i64::from(facing_x), i64::from(facing_z)), |aim| {
+            (i64::from(aim[0]), i64::from(aim[1]))
+        });
+        let contacts = self.strike_contacts(definition, player_position, direction, candidates)?;
         let strike = StrikeId {
             source: StrikeSource::Player(player_id),
             tick: self.tick,
@@ -2829,6 +3090,8 @@ impl ArpgGame {
     fn advance_actions(&mut self) -> Result<(), GameError> {
         let player_ids = self.players.keys().copied().collect::<Vec<_>>();
         for player_id in player_ids {
+            // A combo step committed this tick re-reads the aim intent and target lock.
+            let aim = self.intent_aim(player_id)?;
             let effect = {
                 let state = self
                     .players
@@ -2840,7 +3103,7 @@ impl ArpgGame {
                 if action.ticks_remaining > 1 {
                     action.ticks_remaining -= 1;
                     state.action = Some(action);
-                    Self::commit_buffered_combo(state);
+                    Self::commit_buffered_combo(state, aim);
                     None
                 } else {
                     match action.phase {
@@ -2848,13 +3111,13 @@ impl ArpgGame {
                             action.phase = ActionPhase::Active;
                             action.ticks_remaining = action.kind.active_ticks();
                             state.action = Some(action);
-                            Some((action.kind, action.facing_x, action.facing_z))
+                            Some((action.kind, action.facing_x, action.facing_z, action.aim))
                         }
                         ActionPhase::Active => {
                             action.phase = ActionPhase::Recovery;
                             action.ticks_remaining = action.kind.recovery_ticks();
                             state.action = Some(action);
-                            Self::commit_buffered_combo(state);
+                            Self::commit_buffered_combo(state, aim);
                             None
                         }
                         ActionPhase::Recovery => {
@@ -2864,7 +3127,7 @@ impl ArpgGame {
                     }
                 }
             };
-            if let Some((kind, facing_x, facing_z)) = effect {
+            if let Some((kind, facing_x, facing_z, aim)) = effect {
                 match kind {
                     ActionKind::PrimaryAttack
                     | ActionKind::SecondaryAttack
@@ -2872,24 +3135,25 @@ impl ArpgGame {
                     | ActionKind::LightFollowUp
                     | ActionKind::LightFinisher
                     | ActionKind::HeavyFinisher => {
-                        self.resolve_attack(player_id, kind, facing_x, facing_z)?;
+                        self.resolve_attack(player_id, kind, facing_x, facing_z, aim)?;
                     }
                     ActionKind::Interact => self.resolve_interaction(player_id)?,
-                    ActionKind::Shoot => self.launch_arrow(player_id, facing_x, facing_z)?,
+                    ActionKind::Shoot => self.launch_arrow(player_id, facing_x, facing_z, aim)?,
                 }
             }
         }
         Ok(())
     }
 
-    /// Launches one arrow from the shooter's centre along the committed release facing. The
-    /// launch point is the authoritative body centre, never a visual bow socket that could
-    /// protrude through a wall.
+    /// Launches one arrow from the shooter's centre along the direction committed at release
+    /// (exact aim, else the eight-way facing). The launch point is the authoritative body
+    /// centre, never a visual bow socket that could protrude through a wall.
     fn launch_arrow(
         &mut self,
         player_id: PlayerId,
         facing_x: i8,
         facing_z: i8,
+        aim: Option<[i16; 2]>,
     ) -> Result<(), GameError> {
         let position = self
             .world
@@ -2903,11 +3167,17 @@ impl ArpgGame {
             .map(|action| action.charge)
             .ok_or_else(|| GameError::new("shot has no committed action"))?;
         let (speed, damage) = Self::arrow_launch(charge);
-        let (fx, fz) = (i32::from(facing_x), i32::from(facing_z));
-        let axis_speed = if fx != 0 && fz != 0 {
-            speed * ARROW_DIAGONAL_NUMERATOR / ARROW_DIAGONAL_DENOMINATOR
-        } else {
-            speed
+        let (velocity_x, velocity_z) = match aim {
+            Some(aim) => Self::aimed_velocity(aim, speed),
+            None => {
+                let (fx, fz) = (i32::from(facing_x), i32::from(facing_z));
+                let axis_speed = if fx != 0 && fz != 0 {
+                    speed * ARROW_DIAGONAL_NUMERATOR / ARROW_DIAGONAL_DENOMINATOR
+                } else {
+                    speed
+                };
+                (fx * axis_speed, fz * axis_speed)
+            }
         };
         if self.arrows.len() >= usize::from(content().bow.max_live_arrows) {
             self.arrows.remove(0);
@@ -2921,7 +3191,7 @@ impl ArpgGame {
             owner_id: player_id,
             launched_at_tick: self.tick,
             position: vec_to_array(position),
-            velocity: [fx * axis_speed, 0, fz * axis_speed],
+            velocity: [velocity_x, 0, velocity_z],
             damage,
             ticks_remaining: content().bow.arrow_lifetime_ticks,
         });
@@ -3063,7 +3333,12 @@ impl ArpgGame {
         if !definition.blockable
             || !state.guard.is_raised()
             || (dx == 0 && dz == 0)
-            || !Self::target_is_in_front(state.facing_x, state.facing_z, dx, dz)
+            || !Self::target_is_in_front(
+                i64::from(state.facing_x),
+                i64::from(state.facing_z),
+                dx,
+                dz,
+            )
         {
             return None;
         }
@@ -3727,6 +4002,8 @@ impl AuthoritativeGame for ArpgGame {
                 counter: None,
                 weapon: Weapon::SwordAndShield,
                 draw_ticks: None,
+                aim: None,
+                locked_monster_id: None,
                 health: content().progression.base_max_health,
                 experience: 0,
                 gold: 0,
@@ -3766,10 +4043,29 @@ impl AuthoritativeGame for ArpgGame {
                     .expect("player existence checked");
                 state.movement_x = x.clamp(-1, 1);
                 state.movement_z = z.clamp(-1, 1);
-                if state.movement_x != 0 || state.movement_z != 0 {
-                    state.facing_x = state.movement_x;
-                    state.facing_z = state.movement_z;
+                // Movement turns the facing only while no aim or lock owns it.
+                self.refresh_facing(command.player_id)?;
+            }
+            ArpgCommand::SetAim { direction } => {
+                if let Some(direction) = direction {
+                    Self::validate_aim(direction)?;
                 }
+                self.players
+                    .get_mut(&command.player_id)
+                    .expect("player existence checked")
+                    .aim = direction;
+                self.refresh_facing(command.player_id)?;
+            }
+            ArpgCommand::CycleTarget => {
+                self.cycle_target(command.player_id)?;
+                self.refresh_facing(command.player_id)?;
+            }
+            ArpgCommand::ClearTarget => {
+                self.players
+                    .get_mut(&command.player_id)
+                    .expect("player existence checked")
+                    .locked_monster_id = None;
+                self.refresh_facing(command.player_id)?;
             }
             ArpgCommand::PrimaryAttack | ArpgCommand::SecondaryAttack
                 if self.players[&command.player_id].weapon == Weapon::Bow =>
@@ -3778,13 +4074,14 @@ impl AuthoritativeGame for ArpgGame {
             }
             ArpgCommand::PrimaryAttack => {
                 let tick = self.tick;
+                let aim = self.intent_aim(command.player_id)?;
                 let state = self
                     .players
                     .get_mut(&command.player_id)
                     .expect("player existence checked");
                 let counter = state.counter.filter(|counter| counter.usable_at(tick));
                 if state.health > 0 && state.action.is_some() {
-                    Self::combo_input(state, ComboInput::Light);
+                    Self::combo_input(state, ComboInput::Light, aim);
                 } else if counter.is_some() && state.health > 0 && state.action.is_none() {
                     // Starting the counter atomically consumes the opportunity.
                     state.counter = None;
@@ -3794,12 +4091,13 @@ impl AuthoritativeGame for ArpgGame {
                 }
             }
             ArpgCommand::SecondaryAttack => {
+                let aim = self.intent_aim(command.player_id)?;
                 let state = self
                     .players
                     .get_mut(&command.player_id)
                     .expect("player existence checked");
                 if state.health > 0 && state.action.is_some() {
-                    Self::combo_input(state, ComboInput::Heavy);
+                    Self::combo_input(state, ComboInput::Heavy, aim);
                 } else {
                     self.start_action(command.player_id, ActionKind::SecondaryAttack)?
                 }
@@ -3843,6 +4141,8 @@ impl AuthoritativeGame for ArpgGame {
                 }
             }
             ArpgCommand::ReleaseBow => {
+                // The release commits the direction: a lock lost later never steers the shot.
+                let aim = self.intent_aim(command.player_id)?;
                 let state = self
                     .players
                     .get_mut(&command.player_id)
@@ -3855,7 +4155,7 @@ impl AuthoritativeGame for ArpgGame {
                     && state.hurt_ticks_remaining == 0
                     && state.action.is_none()
                 {
-                    let mut action = Self::new_action(ActionKind::Shoot, state);
+                    let mut action = Self::new_action(ActionKind::Shoot, state, aim);
                     action.charge = drawn;
                     state.action = Some(action);
                 }
@@ -3921,6 +4221,7 @@ impl AuthoritativeGame for ArpgGame {
         self.advance_actions()?;
         self.advance_arrows()?;
         self.advance_monster_actions()?;
+        self.revalidate_target_locks()?;
         self.tick = self
             .tick
             .checked_add(1)
@@ -3979,6 +4280,8 @@ impl AuthoritativeGame for ArpgGame {
                             Err(reason) => InteractionPrompt::Unavailable { reason },
                         }
                     },
+                    aim: state.aim,
+                    locked_monster_id: state.locked_monster_id,
                 })
             })
             .collect::<Result<Vec<_>, GameError>>()?;
@@ -3999,7 +4302,7 @@ impl AuthoritativeGame for ArpgGame {
         }));
 
         Ok(ArpgSnapshot {
-            schema_version: 17,
+            schema_version: 18,
             run_seed: self.run_seed,
             tick: self.tick,
             world_units_per_meter: WORLD_UNITS_PER_METER,
@@ -4601,6 +4904,8 @@ mod tests {
             counter: None,
             weapon: Weapon::SwordAndShield,
             draw_ticks: None,
+            aim: None,
+            locked_monster_id: None,
             health: BASE_MAX_HEALTH,
             experience: 0,
             gold: 0,
@@ -6128,6 +6433,7 @@ mod tests {
             connected: false,
             buffered: None,
             charge: 0,
+            aim: None,
         });
         command(&mut game, ArpgCommand::PrimaryAttack);
         assert_eq!(action_kind(&game), Some(ActionKind::Interact));
@@ -6829,11 +7135,11 @@ mod tests {
     fn restored_arrows_must_stay_in_launch_order() {
         let (mut game, _, _) = bow_arena();
         game.tick = 50;
-        let mut shot = ArpgGame::new_action(ActionKind::Shoot, &game.players[&1]);
+        let mut shot = ArpgGame::new_action(ActionKind::Shoot, &game.players[&1], None);
         shot.charge = BOW_FULL_DRAW_TICKS;
         game.players.get_mut(&1).unwrap().action = Some(shot);
-        game.launch_arrow(1, 1, 0).unwrap();
-        game.launch_arrow(1, -1, 0).unwrap();
+        game.launch_arrow(1, 1, 0, None).unwrap();
+        game.launch_arrow(1, -1, 0, None).unwrap();
         for arrow in &mut game.arrows {
             arrow.ticks_remaining -= 1;
         }
@@ -6954,11 +7260,11 @@ mod tests {
     #[test]
     fn live_arrows_are_bounded() {
         let (mut game, _, _) = bow_arena();
-        let mut shot = ArpgGame::new_action(ActionKind::Shoot, &game.players[&1]);
+        let mut shot = ArpgGame::new_action(ActionKind::Shoot, &game.players[&1], None);
         shot.charge = BOW_FULL_DRAW_TICKS;
         game.players.get_mut(&1).unwrap().action = Some(shot);
         for _ in 0..=MAX_LIVE_ARROWS {
-            game.launch_arrow(1, 1, 0).unwrap();
+            game.launch_arrow(1, 1, 0, None).unwrap();
         }
         assert_eq!(game.arrows.len(), MAX_LIVE_ARROWS);
         assert_eq!(
@@ -7046,7 +7352,7 @@ mod tests {
             );
         }
         let mut shooting = ArpgGame::from_save_state(mid_flight.clone()).unwrap();
-        let mut shot = ArpgGame::new_action(ActionKind::Shoot, &shooting.players[&1]);
+        let mut shot = ArpgGame::new_action(ActionKind::Shoot, &shooting.players[&1], None);
         shot.charge = BOW_FULL_DRAW_TICKS;
         shooting.players.get_mut(&1).unwrap().action = Some(shot);
         let mut dead_shot = shooting.save_state().unwrap();
@@ -7067,6 +7373,409 @@ mod tests {
                 .message()
                 .contains("loadout")
         );
+    }
+
+    fn locked(game: &ArpgGame) -> Option<u32> {
+        game.players[&1].locked_monster_id
+    }
+
+    fn facing(game: &ArpgGame) -> [i8; 2] {
+        game.snapshot().unwrap().players[0].facing
+    }
+
+    #[test]
+    fn aim_commands_are_validated_in_core() {
+        let (mut game, _, _) = strike_arena();
+        for invalid in [
+            [0, 0],
+            [AIM_COMPONENT_LIMIT + 1, 0],
+            [0, -AIM_COMPONENT_LIMIT - 1],
+        ] {
+            let error = game
+                .apply_command(
+                    PlayerCommand::new(
+                        1,
+                        1,
+                        ArpgCommand::SetAim {
+                            direction: Some(invalid),
+                        },
+                    )
+                    .unwrap(),
+                )
+                .unwrap_err();
+            assert!(error.message().contains("aim direction"), "{invalid:?}");
+            assert_eq!(game.players[&1].aim, None);
+        }
+        // A rejected command does not consume its sequence number.
+        game.apply_command(
+            PlayerCommand::new(
+                1,
+                1,
+                ArpgCommand::SetAim {
+                    direction: Some([-AIM_COMPONENT_LIMIT, AIM_COMPONENT_LIMIT]),
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(game.players[&1].aim, Some([-1_000, 1_000]));
+        assert_eq!(facing(&game), [-1, 1]);
+    }
+
+    #[test]
+    fn aim_turns_the_facing_independently_of_movement() {
+        let (mut game, x, _) = strike_arena();
+        command(
+            &mut game,
+            ArpgCommand::SetAim {
+                direction: Some([0, -1]),
+            },
+        );
+        command(&mut game, ArpgCommand::SetMovement { x: 1, z: 0 });
+        for _ in 0..10 {
+            game.advance_tick().unwrap();
+        }
+        let snapshot = game.snapshot().unwrap();
+        // The body walks east while facing (and aiming) north.
+        assert!(snapshot.players[0].position[0] > x);
+        assert_eq!(snapshot.players[0].facing, [0, -1]);
+        assert_eq!(snapshot.players[0].aim, Some([0, -1]));
+
+        // Clearing the aim restores the default: facing follows movement.
+        command(&mut game, ArpgCommand::SetAim { direction: None });
+        assert_eq!(facing(&game), [1, 0]);
+        assert_eq!(game.snapshot().unwrap().players[0].aim, None);
+    }
+
+    #[test]
+    fn exact_aim_directs_a_strike_between_the_eight_facings() {
+        // 22° below the x axis: still the east facing, but the target 55° further round is
+        // inside the swing only when measured from the exact aim.
+        let aim = [927, -375];
+        assert_eq!(ArpgGame::facing_for(aim), (1, 0));
+        let (mut game, x, z) = strike_arena();
+        place_monster(&mut game, 1, x + 40, z - 175);
+        assert!(strike(&mut game, 1, ArpgCommand::PrimaryAttack).is_empty());
+
+        let (mut game, x, z) = strike_arena();
+        place_monster(&mut game, 1, x + 40, z - 175);
+        command(
+            &mut game,
+            ArpgCommand::SetAim {
+                direction: Some(aim),
+            },
+        );
+        command(&mut game, ArpgCommand::PrimaryAttack);
+        let action = game.snapshot().unwrap().players[0].action.unwrap();
+        assert_eq!(action.aim, Some(aim));
+        assert_eq!(action.facing, [1, 0]);
+        let mut outcomes = Vec::new();
+        while current_action(&game).is_some() {
+            game.advance_tick().unwrap();
+            outcomes.extend_from_slice(game.strike_outcomes());
+        }
+        assert_eq!(
+            targets(&outcomes),
+            vec![(StrikeTarget::Monster(1), LIGHT_HIT)]
+        );
+    }
+
+    #[test]
+    fn aimed_arrows_fly_along_the_exact_direction_and_are_never_steered() {
+        let (mut game, _, _) = bow_arena();
+        command(
+            &mut game,
+            ArpgCommand::SetAim {
+                direction: Some([1_000, 500]),
+            },
+        );
+        draw_for(&mut game, BOW_FULL_DRAW_TICKS);
+        command(&mut game, ArpgCommand::ReleaseBow);
+        // Re-aiming after the release changes nothing about the committed shot.
+        command(
+            &mut game,
+            ArpgCommand::SetAim {
+                direction: Some([-1_000, 0]),
+            },
+        );
+        while game.arrows.is_empty() {
+            game.advance_tick().unwrap();
+        }
+        // 60 units per tick along (2, 1), each component rounded toward zero.
+        assert_eq!(game.arrows[0].velocity, [53, 0, 26]);
+        let launched = game.arrows[0];
+        game.advance_tick().unwrap();
+        assert_eq!(game.arrows[0].velocity, launched.velocity);
+        assert_eq!(game.arrows[0].position[0], launched.position[0] + 53);
+        assert!(ArpgGame::arrow_launch_is_possible(&game.arrows[0]));
+    }
+
+    #[test]
+    fn target_lock_cycles_nearest_first_with_identity_ties_and_line_of_sight() {
+        let (mut game, x, z) = strike_arena();
+        place_monster(&mut game, 4, x - 500, z);
+        place_monster(&mut game, 2, x, z + 300);
+        place_monster(&mut game, 1, x + 300, z);
+        // Out of lock range, and behind a wall: neither can be selected.
+        place_monster(&mut game, 5, x + 1_000, z + 1_000);
+        place_monster(&mut game, 3, x, z - 400);
+        place_blocker(
+            &mut game,
+            1,
+            x,
+            z - 200,
+            Vec3i::new(80, WALL_HALF_HEIGHT, 10),
+        );
+
+        let mut order = Vec::new();
+        for _ in 0..4 {
+            command(&mut game, ArpgCommand::CycleTarget);
+            order.push(locked(&game).unwrap());
+        }
+        assert_eq!(order, [1, 2, 4, 1]);
+        assert_eq!(
+            game.snapshot().unwrap().players[0].locked_monster_id,
+            Some(1)
+        );
+        command(&mut game, ArpgCommand::ClearTarget);
+        assert_eq!(locked(&game), None);
+
+        // Nothing eligible: cycling selects nothing.
+        let (mut empty, x, z) = strike_arena();
+        place_monster(&mut empty, 5, x + 1_000, z + 1_000);
+        command(&mut empty, ArpgCommand::CycleTarget);
+        assert_eq!(locked(&empty), None);
+    }
+
+    #[test]
+    fn a_lock_is_sticky_to_the_break_range_and_drops_with_its_target() {
+        let targeting = content().targeting;
+        let (mut game, x, z) = strike_arena();
+        place_monster(&mut game, 1, x, z + 300);
+        place_monster(&mut game, 2, x - 300, z);
+        command(&mut game, ArpgCommand::CycleTarget);
+        assert_eq!(locked(&game), Some(1));
+        game.advance_tick().unwrap();
+        // The locked player turns to the target although it stands still.
+        assert_eq!(facing(&game), [0, 1]);
+
+        // Beyond the lock range but within the break range, behind a wall: still held.
+        let far = i32::try_from(targeting.break_range).unwrap();
+        game.monsters[0].position = Vec3i::new(x, PLAYER_Y, z + far);
+        place_blocker(
+            &mut game,
+            1,
+            x,
+            z + 200,
+            Vec3i::new(80, WALL_HALF_HEIGHT, 10),
+        );
+        game.advance_tick().unwrap();
+        assert_eq!(locked(&game), Some(1));
+        // Cycling moves a lock held outside the eligible set to the nearest eligible one.
+        command(&mut game, ArpgCommand::CycleTarget);
+        assert_eq!(locked(&game), Some(2));
+        game.advance_tick().unwrap();
+        assert_eq!(facing(&game), [-1, 0]);
+        // One unit past the break range drops the lock.
+        game.monsters[1].position = Vec3i::new(x - far - 1, PLAYER_Y, z);
+        game.advance_tick().unwrap();
+        assert_eq!(locked(&game), None);
+        // Facing keeps its last direction when nothing owns it.
+        assert_eq!(facing(&game), [-1, 0]);
+
+        game.monsters[1].position = Vec3i::new(x - 300, PLAYER_Y, z);
+        command(&mut game, ArpgCommand::CycleTarget);
+        assert_eq!(locked(&game), Some(2));
+        game.monsters[1].health = 0;
+        game.advance_tick().unwrap();
+        assert_eq!(locked(&game), None);
+    }
+
+    #[test]
+    fn a_locked_strike_turns_towards_the_target() {
+        let (mut game, x, z) = strike_arena();
+        place_monster(&mut game, 1, x, z - 150);
+        assert!(strike(&mut game, 1, ArpgCommand::PrimaryAttack).is_empty());
+
+        command(&mut game, ArpgCommand::CycleTarget);
+        command(&mut game, ArpgCommand::PrimaryAttack);
+        let action = current_action(&game).unwrap();
+        assert_eq!(action.aim, Some([0, -150]));
+        assert_eq!((action.facing_x, action.facing_z), (0, -1));
+        let mut outcomes = Vec::new();
+        while current_action(&game).is_some() {
+            game.advance_tick().unwrap();
+            outcomes.extend_from_slice(game.strike_outcomes());
+        }
+        assert_eq!(
+            targets(&outcomes),
+            vec![(StrikeTarget::Monster(1), LIGHT_HIT)]
+        );
+    }
+
+    #[test]
+    fn losing_the_lock_never_suppresses_an_empty_swing() {
+        // The target dies before the press: the swing still happens along the facing.
+        let (mut game, x, z) = strike_arena();
+        place_monster(&mut game, 1, x, z - 150);
+        place_monster(&mut game, 2, x - 600, z);
+        command(&mut game, ArpgCommand::CycleTarget);
+        assert_eq!(locked(&game), Some(1));
+        game.monsters[0].health = 0;
+        command(&mut game, ArpgCommand::PrimaryAttack);
+        let action = current_action(&game).unwrap();
+        assert_eq!(action.kind, ActionKind::PrimaryAttack);
+        // The lock had turned the player; the swing keeps that facing without an aim.
+        assert_eq!(action.aim, None);
+        assert_eq!((action.facing_x, action.facing_z), (0, -1));
+        advance_to_phase(&mut game, ActionKind::PrimaryAttack, ActionPhase::Recovery);
+        assert_eq!(locked(&game), None);
+
+        // The target dies during the wind-up: the committed strike still goes active.
+        let (mut game, x, z) = strike_arena();
+        place_monster(&mut game, 1, x, z - 150);
+        place_monster(&mut game, 2, x - 600, z);
+        command(&mut game, ArpgCommand::CycleTarget);
+        command(&mut game, ArpgCommand::PrimaryAttack);
+        game.advance_tick().unwrap();
+        game.monsters[0].health = 0;
+        let mut went_active = false;
+        while let Some(action) = current_action(&game) {
+            assert_eq!(action.aim, Some([0, -150]));
+            went_active |= action.phase == ActionPhase::Active;
+            game.advance_tick().unwrap();
+            assert!(game.strike_outcomes().is_empty());
+        }
+        assert!(went_active);
+        assert_eq!(locked(&game), None);
+    }
+
+    #[test]
+    fn a_released_arrow_is_never_redirected_by_the_lock() {
+        let (mut game, x, z) = bow_arena();
+        place_monster(&mut game, 1, x, z + 400);
+        command(&mut game, ArpgCommand::CycleTarget);
+        assert_eq!(locked(&game), Some(1));
+        draw_for(&mut game, BOW_FULL_DRAW_TICKS);
+        command(&mut game, ArpgCommand::ReleaseBow);
+        // Losing the lock between release and launch does not steer the shot.
+        command(&mut game, ArpgCommand::ClearTarget);
+        while game.arrows.is_empty() {
+            game.advance_tick().unwrap();
+        }
+        assert_eq!(game.arrows[0].velocity, [0, 0, ARROW_FULL_SPEED]);
+        // Nor does the target moving or dying in flight.
+        game.monsters[1].position = Vec3i::new(x + 300, PLAYER_Y, z);
+        game.monsters[1].health = 0;
+        game.advance_tick().unwrap();
+        assert_eq!(game.arrows[0].velocity, [0, 0, ARROW_FULL_SPEED]);
+    }
+
+    #[test]
+    fn aim_and_lock_survive_save_and_continue_identically() {
+        let mut game = ArpgGame::new_scenario(ScenarioId::Enemy, 42).unwrap();
+        game.add_player(1).unwrap();
+        // The first tick activates the encounter, making its enemy lockable.
+        game.advance_tick().unwrap();
+        command(
+            &mut game,
+            ArpgCommand::SetAim {
+                direction: Some([-3, 7]),
+            },
+        );
+        command(&mut game, ArpgCommand::CycleTarget);
+        let target = locked(&game).expect("the scenario enemy is in lock range");
+        command(&mut game, ArpgCommand::PrimaryAttack);
+        game.advance_tick().unwrap();
+        let saved = game.save_state().unwrap();
+        assert_eq!(saved.players[0].aim, Some([-3, 7]));
+        assert_eq!(saved.players[0].locked_monster_id, Some(target));
+        assert!(saved.players[0].action.unwrap().aim.is_some());
+
+        let mut restored = ArpgGame::from_save_state(saved.clone()).unwrap();
+        for tick in 0..60 {
+            if tick == 30 {
+                for game in [&mut game, &mut restored] {
+                    command(game, ArpgCommand::SecondaryAttack);
+                }
+            }
+            game.advance_tick().unwrap();
+            restored.advance_tick().unwrap();
+            assert_eq!(restored.snapshot().unwrap(), game.snapshot().unwrap());
+        }
+        assert_eq!(restored.save_state().unwrap(), game.save_state().unwrap());
+
+        let mut zero_aim = saved.clone();
+        zero_aim.players[0].aim = Some([0, 0]);
+        let mut wide_aim = saved.clone();
+        wide_aim.players[0].aim = Some([AIM_COMPONENT_LIMIT + 1, 0]);
+        let mut unknown_lock = saved.clone();
+        unknown_lock.players[0].locked_monster_id = Some(77);
+        let mut mismatched = saved;
+        let action = mismatched.players[0].action.as_mut().unwrap();
+        action.facing = [-action.facing[0], -action.facing[1]];
+        for (corrupt, reason) in [
+            (zero_aim, "aim direction"),
+            (wide_aim, "aim direction"),
+            (unknown_lock, "target lock"),
+            (mismatched, "does not match its aim"),
+        ] {
+            let error = ArpgGame::from_save_state(corrupt).unwrap_err();
+            assert!(error.message().contains(reason), "{}", error.message());
+        }
+    }
+
+    #[test]
+    fn aimed_and_locked_reproductions_replay_identically() {
+        let at = |tick, sequence, command| ReproductionCommand {
+            tick,
+            player_id: 1,
+            sequence,
+            command,
+        };
+        let reproduction = Reproduction {
+            scenario: ScenarioId::Archery,
+            seed: 11,
+            players: vec![1],
+            ticks: 150,
+            commands: vec![
+                at(1, 1, ArpgCommand::CycleTarget),
+                at(
+                    2,
+                    2,
+                    ArpgCommand::EquipWeapon {
+                        weapon: Weapon::Bow,
+                    },
+                ),
+                at(3, 3, ArpgCommand::DrawBow),
+                at(40, 4, ArpgCommand::ReleaseBow),
+                at(41, 5, ArpgCommand::ClearTarget),
+                at(
+                    42,
+                    6,
+                    ArpgCommand::SetAim {
+                        direction: Some([700, -250]),
+                    },
+                ),
+                at(43, 7, ArpgCommand::SetMovement { x: -1, z: 0 }),
+            ],
+        };
+        let decoded: Reproduction =
+            serde_json::from_str(&serde_json::to_string(&reproduction).unwrap()).unwrap();
+        assert_eq!(decoded, reproduction);
+        let first = replay_reproduction(&reproduction).unwrap();
+        assert_eq!(first, replay_reproduction(&decoded).unwrap());
+        assert!(first[5].players[0].locked_monster_id.is_some());
+        assert!(first.iter().any(|snapshot| {
+            snapshot
+                .strike_events
+                .iter()
+                .any(|event| event.definition == "bow.arrow")
+        }));
+        let last = &first[149].players[0];
+        assert_eq!(last.aim, Some([700, -250]));
+        assert_eq!(last.facing, [1, 0]);
+        assert_eq!(last.locked_monster_id, None);
     }
 
     fn scenario_player_events(
@@ -8185,7 +8894,7 @@ mod tests {
         game.add_player(1).unwrap();
         let snapshot = game.snapshot().unwrap();
         let generated = generate_dungeon(snapshot.run_seed);
-        assert_eq!(snapshot.schema_version, 17);
+        assert_eq!(snapshot.schema_version, 18);
         assert_eq!(snapshot.run_seed, 0xDEAD_BEEF);
         assert_eq!(game.run_seed(), snapshot.run_seed);
         assert_eq!(snapshot.rooms, generated.rooms);
