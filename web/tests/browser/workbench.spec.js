@@ -101,6 +101,20 @@ test("archery scenarios show an arrow hit and an arrow stopped by a pillar", asy
   }
 });
 
+test("role scenarios show a ranged shot in flight and a heavy telegraphed slam", async ({
+  page,
+  appUrl,
+}) => {
+  const ranged = await openScenario(page, appUrl, "ranged");
+  await ranged.stepUntil(ranged.diagnostics, "Arrows1", 80);
+  await ranged.stepUntil(ranged.timeline, "monster.bolt · monster 2 → player 1 · hit 8", 80);
+
+  const heavy = await openScenario(page, appUrl, "heavy");
+  // The slam lands only after its 45-tick wind-up.
+  await heavy.stepUntil(heavy.timeline, "monster.slam · monster 4 → player 1 · hit 28", 80);
+  await expect(heavy.timeline).toContainText(/tick (4[5-9]|[5-9]\d) · monster\.slam/);
+});
+
 test("a defeated dummy drops gold that the authority prompts for and pays once", async ({
   page,
   appUrl,
