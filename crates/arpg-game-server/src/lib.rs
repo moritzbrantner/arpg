@@ -280,12 +280,13 @@ mod tests {
         assert_eq!(decoded, local_snapshot);
     }
 
-    /// Two players and a pursuing enemy (#109): target choice, pursuit, interruption and
-    /// strikes give the same snapshots and event order locally and through the
+    /// Two players and a pursuing enemy (#109), and the same script against the ranged and
+    /// heavy roles (#108): target choice, pursuit, spacing, shots, telegraphs, interruption
+    /// and strikes give the same snapshots and event order locally and through the
     /// `game-server` runtime, tick for tick.
     #[test]
     fn engagement_matches_between_local_and_dedicated_execution() {
-        use arpg_core::{ArpgCommand, ArpgGame, MonsterBehavior, ScenarioId};
+        use arpg_core::{ArpgCommand, ArpgGame, MonsterBehavior, ScenarioId, StrikeSource};
         use arpg_protocol::JsonProtocol;
         use game_server::{MatchRuntime, RECONNECT_TOKEN_BYTES, ReconnectToken};
 
@@ -311,77 +312,116 @@ mod tests {
         let protocol = JsonProtocol;
         let seed = 0xA420_0916;
 
-        let mut local = ArpgGame::new_scenario(ScenarioId::Enemy, seed).unwrap();
-        local.add_player(1).unwrap();
-        local.add_player(2).unwrap();
-        let mut sequences = [0_u32; 3];
-        let mut local_snapshots = Vec::new();
-        for tick in 0..TICKS {
-            for (player_id, command) in script(tick) {
-                let slot = usize::try_from(player_id).unwrap();
-                sequences[slot] += 1;
-                local
-                    .apply_command(PlayerCommand::new(player_id, sequences[slot], command).unwrap())
-                    .unwrap();
+        for scenario in [ScenarioId::Enemy, ScenarioId::Ranged, ScenarioId::Heavy] {
+            let mut local = ArpgGame::new_scenario(scenario, seed).unwrap();
+            local.add_player(1).unwrap();
+            local.add_player(2).unwrap();
+            let mut sequences = [0_u32; 3];
+            let mut local_snapshots = Vec::new();
+            for tick in 0..TICKS {
+                for (player_id, command) in script(tick) {
+                    let slot = usize::try_from(player_id).unwrap();
+                    sequences[slot] += 1;
+                    local
+                        .apply_command(
+                            PlayerCommand::new(player_id, sequences[slot], command).unwrap(),
+                        )
+                        .unwrap();
+                }
+                local.advance_tick().unwrap();
+                local_snapshots.push(local.snapshot().unwrap());
             }
-            local.advance_tick().unwrap();
-            local_snapshots.push(local.snapshot().unwrap());
-        }
 
-        let adapter = GameServerAdapter::new(
-            ArpgGame::new_scenario(ScenarioId::Enemy, seed).unwrap(),
-            JsonProtocol,
-        );
-        let mut runtime = MatchRuntime::new(adapter, 120);
-        let leases = [7, 8].map(|byte| {
-            runtime
-                .admit(ReconnectToken([byte; RECONNECT_TOKEN_BYTES]))
-                .unwrap()
-        });
-        assert_eq!(leases.map(|lease| lease.player_id), [1, 2]);
-        let mut sequences = [0_u32; 3];
-        let mut server_snapshots = Vec::new();
-        for tick in 0..TICKS {
-            for (player_id, command) in script(tick) {
-                let slot = usize::try_from(player_id).unwrap();
-                sequences[slot] += 1;
-                let lease = leases[slot - 1];
+            let adapter = GameServerAdapter::new(
+                ArpgGame::new_scenario(scenario, seed).unwrap(),
+                JsonProtocol,
+            );
+            let mut runtime = MatchRuntime::new(adapter, 120);
+            let leases = [7, 8].map(|byte| {
                 runtime
-                    .submit_command(
-                        lease.player_id,
-                        lease.connection_epoch,
-                        sequences[slot],
-                        &protocol.encode_command(&command).unwrap(),
-                    )
-                    .unwrap();
+                    .admit(ReconnectToken([byte; RECONNECT_TOKEN_BYTES]))
+                    .unwrap()
+            });
+            assert_eq!(leases.map(|lease| lease.player_id), [1, 2]);
+            let mut sequences = [0_u32; 3];
+            let mut server_snapshots = Vec::new();
+            for tick in 0..TICKS {
+                for (player_id, command) in script(tick) {
+                    let slot = usize::try_from(player_id).unwrap();
+                    sequences[slot] += 1;
+                    let lease = leases[slot - 1];
+                    runtime
+                        .submit_command(
+                            lease.player_id,
+                            lease.connection_epoch,
+                            sequences[slot],
+                            &protocol.encode_command(&command).unwrap(),
+                        )
+                        .unwrap();
+                }
+                runtime.advance_tick().unwrap();
+                let snapshot = runtime.snapshot().unwrap();
+                server_snapshots.push(protocol.decode_snapshot(&snapshot.payload).unwrap());
             }
-            runtime.advance_tick().unwrap();
-            let snapshot = runtime.snapshot().unwrap();
-            server_snapshots.push(protocol.decode_snapshot(&snapshot.payload).unwrap());
-        }
 
-        for (tick, (server, local)) in server_snapshots.iter().zip(&local_snapshots).enumerate() {
-            assert_eq!(server, local, "tick {tick}");
+            for (tick, (server, local)) in server_snapshots.iter().zip(&local_snapshots).enumerate()
+            {
+                assert_eq!(server, local, "{scenario:?} tick {tick}");
+            }
+            let room = local_snapshots[0]
+                .players
+                .first()
+                .and_then(|player| {
+                    local_snapshots[0].rooms.iter().find(|room| {
+                        (room.min_x..=room.max_x).contains(&player.position[0])
+                            && (room.min_z..=room.max_z).contains(&player.position[2])
+                    })
+                })
+                .unwrap()
+                .id;
+            let behaviours = local_snapshots
+                .iter()
+                .flat_map(|snapshot| snapshot.monsters.iter())
+                .filter(|monster| monster.room_id == room)
+                .map(|monster| monster.behavior)
+                .collect::<Vec<_>>();
+            let sources = local_snapshots
+                .iter()
+                .flat_map(|snapshot| &snapshot.strike_events)
+                .map(|event| matches!(event.source, StrikeSource::Monster(_)))
+                .collect::<BTreeSet<_>>();
+            let expected: &[MonsterBehavior] = match scenario {
+                ScenarioId::Enemy => &[
+                    MonsterBehavior::Attacking,
+                    MonsterBehavior::Pursuing,
+                    MonsterBehavior::Staggered,
+                ],
+                // The slow bruiser and the spaced archer are never reached by this script;
+                // their wind-ups, slams and shots are.
+                _ => &[MonsterBehavior::Attacking],
+            };
+            for expected in expected {
+                assert!(behaviours.contains(expected), "{scenario:?} {expected:?}");
+            }
+            if scenario == ScenarioId::Ranged {
+                assert!(
+                    local_snapshots.iter().any(|snapshot| snapshot
+                        .arrows
+                        .iter()
+                        .any(|arrow| matches!(arrow.source, StrikeSource::Monster(_)))),
+                    "the archer shoots"
+                );
+            }
+            if scenario != ScenarioId::Enemy {
+                assert!(sources.contains(&true), "{scenario:?}: its attacks land");
+            } else {
+                assert_eq!(
+                    sources.len(),
+                    2,
+                    "{scenario:?}: player and monster strikes both resolve"
+                );
+            }
         }
-        let behaviours = local_snapshots
-            .iter()
-            .flat_map(|snapshot| snapshot.monsters.iter())
-            .filter(|monster| monster.room_id == 2)
-            .map(|monster| monster.behavior)
-            .collect::<Vec<_>>();
-        for expected in [
-            MonsterBehavior::Attacking,
-            MonsterBehavior::Pursuing,
-            MonsterBehavior::Staggered,
-        ] {
-            assert!(behaviours.contains(&expected), "{expected:?}");
-        }
-        let sources = local_snapshots
-            .iter()
-            .flat_map(|snapshot| &snapshot.strike_events)
-            .map(|event| matches!(event.source, arpg_core::StrikeSource::Monster(_)))
-            .collect::<BTreeSet<_>>();
-        assert_eq!(sources.len(), 2, "player and monster strikes both resolve");
     }
 
     #[test]

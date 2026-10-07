@@ -81,6 +81,7 @@ import "./styles.css";
 // stagger keep their own colours.
 const MONSTER_BEHAVIOR_COLORS: Record<string, string> = {
   pursuing: "#a3483b",
+  retreating: "#8a5a7a",
   holding: "#8f4037",
   searching: "#8a6a3c",
   returning: "#5f5866",
@@ -88,6 +89,7 @@ const MONSTER_BEHAVIOR_COLORS: Record<string, string> = {
 };
 const MONSTER_BEHAVIOR_CUES: Record<string, string> = {
   pursuing: "#ff7a59",
+  retreating: "#d58bd0",
   holding: "#ff7a59",
   searching: "#f2c14e",
   returning: "#9a9aa8",
@@ -369,7 +371,8 @@ function buildFrame(snapshot, focusPlayerId, width, height, focusPlayerAccent = 
       return {
         id: `arrow-${arrow.id}`,
         geometry: { kind: "box", size: [0.04, 0.04, 0.5] },
-        color: "#e8dcc0",
+        // Player arrows and monster shots fly the same authoritative path (#108).
+        color: arrow.source.kind === "monster" ? "#ff8a5c" : "#e8dcc0",
         transform: {
           translation: [translation[0], Math.max(translation[1], 0.55), translation[2]],
           rotationQuaternion: [0, Math.sin(yaw / 2), 0, Math.cos(yaw / 2)],
@@ -427,7 +430,36 @@ function buildFrame(snapshot, focusPlayerId, width, height, focusPlayerAccent = 
             color: cue,
             transform: { translation: [translation[0], translation[1] + 0.62, translation[2]] },
           });
-        if ((phase === "windup" || phase === "active") && monster.action?.range) {
+        const targetPlayer = snapshot.players.find(
+          (candidate) => candidate.id === monster.action?.targetPlayerId,
+        );
+        if (phase === "windup" && monster.action?.delivery === "projectile") {
+          // A shot telegraphs its line of fire toward the target, not a ring.
+          if (targetPlayer?.alive)
+            for (let index = 1; index < 8; index += 1) {
+              const along = index / 8;
+              nodes.push({
+                id: `monster-${monster.id}-aim-${index}`,
+                geometry: { kind: "sphere", radius: 0.06 },
+                color: "#c86a4a",
+                transform: {
+                  translation: [
+                    (monster.position[0] +
+                      (targetPlayer.position[0] - monster.position[0]) * along) /
+                      scale,
+                    0.075,
+                    (monster.position[2] +
+                      (targetPlayer.position[2] - monster.position[2]) * along) /
+                      scale,
+                  ],
+                },
+              });
+            }
+        } else if (
+          (phase === "windup" || phase === "active") &&
+          monster.action?.delivery === "strike" &&
+          monster.action.range
+        ) {
           const radius = monster.action.range / scale;
           const telegraphColor = phase === "active" ? "#f06a4e" : "#824239";
           for (let index = 0; index < 12; index += 1) {
@@ -445,9 +477,6 @@ function buildFrame(snapshot, focusPlayerId, width, height, focusPlayerAccent = 
               },
             });
           }
-          const targetPlayer = snapshot.players.find(
-            (candidate) => candidate.id === monster.action.targetPlayerId,
-          );
           if (targetPlayer?.alive) {
             nodes.push({
               id: `monster-${monster.id}-target`,

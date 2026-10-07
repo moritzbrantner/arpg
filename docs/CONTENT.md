@@ -5,7 +5,7 @@ Gameplay tuning lives in one typed, versioned bundle:
 validated by [`content.rs`](../crates/arpg-core/src/content.rs). Definitions *select*
 supported behaviour; executable rules stay in Rust. Appearance and audio never live here.
 
-## What the bundle holds (format 5)
+## What the bundle holds (format 6)
 
 | Section | Contents |
 | --- | --- |
@@ -13,7 +13,7 @@ supported behaviour; executable rules stay in Rust. Appearance and audio never l
 | `actions` | One definition per supported `ActionKind`: phase ticks, strike, damage ratio, stagger. |
 | `combos` | Light/heavy transitions between striking actions and their input windows. |
 | `counterWindowTicks` | How long a successful block keeps the counter open. |
-| `monsters` | Enemy definitions: health, strike, phase ticks, damage, experience, pursuit speed, aggro/leash/switch/reacquire/separation. |
+| `monsters` | Enemy definitions: health, strike, phase ticks, damage, experience, pursuit speed, aggro/leash/switch/reacquire/separation, and the role parameters `retreatRange` and `projectile` (see below). |
 | `roomMonsters` | The monster definition of each combat room, in generation order (repeats when rooms outnumber entries). |
 | `guard` | Raise ticks, guard points and regeneration, block reaction, guard-break ticks. |
 | `bow` | Draw thresholds, arrow speed/damage range, lifetime, stagger and live-arrow cap. |
@@ -23,6 +23,22 @@ supported behaviour; executable rules stay in Rust. Appearance and audio never l
 
 Ids are 1–64 ASCII characters, unique per collection and published to clients (strike
 events, `MonsterSnapshot.definition`), so presentation can key appearance and audio by them.
+
+## Enemy roles
+
+A role is a combination of definition values on the one shared monster path: the same
+pursuit, engagement, separation, wind-up/active/recovery machine and strike outcomes. There
+is no per-role AI.
+
+| Role | Built-in | What selects it |
+| --- | --- | --- |
+| Melee pressure | `monster.brute`, `monster.skirmisher` | `retreatRange: null`, `projectile: null`: closes to strike reach and strikes around itself. |
+| Ranged | `monster.archer` | `retreatRange` keeps it in a band from that distance out to strike reach: a player who comes nearer makes it back off through its room grid, never nearer to the player and never into fixed bodies, before it shoots again. With nowhere to go it shoots from where it stands. `projectile` (`speed`, `lifetimeTicks`) makes the attack launch a shot along the arrow path at the target's position as the active phase opens; the monster's strike still decides reach, line of sight, block and guard cost, and `damage` the hurt. |
+| Heavy | `monster.bruiser` | Long `windupTicks`, slow `pursuitSpeed`, high `damage` and a `guardCost` that breaks a full guard. The wind-up holds still and lands at the strike's reach around it, so the answer is to step out of it or interrupt it: any player hit staggers the monster and cancels the wind-up. |
+
+Validation: `retreatRange` is at least the minimum monster reach and stays three navigation
+cells inside the strike reach (room for the band); a projectile's speed is `16..=200` (slower integer velocities cannot hold a diagonal aim) and it
+must fly at least the strike reach within its lifetime.
 
 ## Adding a definition
 
@@ -35,7 +51,7 @@ Example: a new enemy.
 3. Keep source order irrelevant: `strikes`, `actions`, `combos` and `monsters` are sorted by
    id on load; only `roomMonsters` is authored order.
 
-A new *kind* of behaviour (a new `ActionKind`, a ranged monster attack) is a Rust change
+A new *kind* of behaviour (a new `ActionKind`, a new attack delivery) is a Rust change
 first; content can then select it.
 
 ## Validating
@@ -56,14 +72,16 @@ deliberate tuning change.
 ## Exercising it deterministically
 
 Gameplay is a pure function of seed, content and commands, so a definition is exercised by
-a headless test on the real runtime. The second-enemy tests in
+a headless test on the real runtime. The enemy tests in
 [`lib.rs`](../crates/arpg-core/src/lib.rs) (`a_skirmisher_*`,
-`combat_rooms_spawn_the_monster_their_content_assigns`,
-`a_save_mid_skirmisher_attack_continues_like_the_uninterrupted_game`) show the pattern:
+`combat_rooms_spawn_the_monster_their_content_assigns`, the role tests such as
+`an_archer_backs_off_around_a_wall_into_its_band_and_never_enters_fixed_bodies` and
+`interrupting_a_bruiser_windup_cancels_the_slam_and_it_winds_up_anew`) show the pattern:
 place the player and the generated monster, advance ticks, and assert timings, reach,
 damage and rewards from the definition rather than from literals. For a recorded session,
 replay a `Reproduction` (scenario, seed, players, commands) with `replay_reproduction`; the
-browser training arena (`?scenario=training&seed=<u32>`) runs the same authority.
+browser training arena (`?scenario=training&seed=<u32>`) runs the same authority, and its
+`fixture=ranged` and `fixture=heavy` arrange the first archer and bruiser rooms.
 
 ## Packaging and compatibility
 

@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{ActionKind, ComboInput};
 
-pub const CONTENT_FORMAT_VERSION: u16 = 5;
+pub const CONTENT_FORMAT_VERSION: u16 = 6;
 /// Touching monster and player bodies keep their centres up to √2 times their
 /// combined XZ half extents apart (85 units), and pursuit stops one navigation
 /// cell inside strike reach, so a monster strike must reach past both.
@@ -36,6 +36,8 @@ const fn max_i32(a: i32, b: i32) -> i32 {
 }
 /// Longest definition id; matches the browser projection's bound on published ids.
 pub const MAX_DEFINITION_ID_LENGTH: usize = 64;
+/// Slowest monster projectile: integer velocities still aim diagonally within a few degrees.
+pub(crate) const MIN_PROJECTILE_SPEED: u16 = 16;
 
 const BASE_BUNDLE: &str = include_str!("../content/base.json");
 
@@ -186,6 +188,23 @@ pub struct MonsterData {
     pub reacquire_ticks: u8,
     /// Moving monsters steer apart from other monsters within this centre distance.
     pub separation_range: u16,
+    /// Spacing (#108): an engaged monster nearer than this to its target backs away into
+    /// its band, from this distance out to strike reach, before it attacks. `null` closes
+    /// to strike reach.
+    pub retreat_range: Option<u16>,
+    /// The attack launches this projectile at its target instead of striking around the
+    /// monster. `null` strikes.
+    pub projectile: Option<ProjectileData>,
+}
+
+/// A monster projectile: it flies the shared arrow path and resolves through the
+/// monster's strike definition (guard and block rules) and damage.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProjectileData {
+    /// World units per tick, committed at release and never steered.
+    pub speed: u16,
+    pub lifetime_ticks: u8,
 }
 
 /// One invariant violation, with the definition path that broke it.
@@ -249,6 +268,14 @@ pub(crate) struct MonsterDefinition {
     pub target_switch_margin: i64,
     pub reacquire_ticks: u8,
     pub separation_range: i64,
+    pub retreat_range: Option<i64>,
+    pub projectile: Option<ProjectileDefinition>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ProjectileDefinition {
+    pub speed: i32,
+    pub lifetime_ticks: u8,
 }
 
 /// A validated bundle with resolved references.
@@ -563,6 +590,45 @@ impl ContentBundle {
             if monster.separation_range > 400 {
                 fail(path.clone(), "separationRange must be within 0..=400");
             }
+            if let Some(retreat) = monster.retreat_range {
+                let retreat = i64::from(retreat);
+                if retreat < MIN_MONSTER_STRIKE_REACH {
+                    fail(
+                        path.clone(),
+                        &format!("retreatRange must be at least {MIN_MONSTER_STRIKE_REACH}"),
+                    );
+                }
+                // The band a retreat ends in, one cell beyond the range out to one cell
+                // inside reach, must hold at least one more cell.
+                if retreat + 3 * i64::from(crate::navigation::NAV_CELL_SIZE) > reach {
+                    fail(
+                        path.clone(),
+                        "retreatRange must stay three navigation cells inside the strike reach",
+                    );
+                }
+            }
+            if let Some(projectile) = monster.projectile {
+                // Shots move in whole units per tick: below this speed the integer direction
+                // can no longer hold a diagonal aim (speed 1 at 45 degrees truncates to one
+                // axis); at 16 the aim stays within about 5 degrees of the target.
+                if !(MIN_PROJECTILE_SPEED..=200).contains(&projectile.speed)
+                    || projectile.lifetime_ticks == 0
+                {
+                    fail(
+                        path.clone(),
+                        "projectile speed must be within 16..=200 and its lifetime positive",
+                    );
+                }
+                // Whole-unit velocity components can lose up to two units of speed on a
+                // diagonal, so the reach check uses the slowest speed a shot can have.
+                if (i64::from(projectile.speed) - 2) * i64::from(projectile.lifetime_ticks) < reach
+                {
+                    fail(
+                        path.clone(),
+                        "projectile must fly at least as far as the strike reach",
+                    );
+                }
+            }
             match strike_by_id.get(monster.strike.as_str()) {
                 Some(strike) => {
                     if strike.reach < MIN_MONSTER_STRIKE_REACH {
@@ -588,6 +654,11 @@ impl ContentBundle {
                         target_switch_margin: i64::from(monster.target_switch_margin),
                         reacquire_ticks: monster.reacquire_ticks,
                         separation_range: i64::from(monster.separation_range),
+                        retreat_range: monster.retreat_range.map(i64::from),
+                        projectile: monster.projectile.map(|projectile| ProjectileDefinition {
+                            speed: i32::from(projectile.speed),
+                            lifetime_ticks: projectile.lifetime_ticks,
+                        }),
                     });
                 }
                 None => fail(path, "references an unknown strike"),
@@ -896,6 +967,60 @@ mod tests {
             );
         }
 
+        let roles = errors(|bundle| {
+            let archer = bundle
+                .monsters
+                .iter_mut()
+                .find(|monster| monster.id == "monster.archer")
+                .unwrap();
+            archer.retreat_range = Some(630);
+            archer.projectile = Some(ProjectileData {
+                speed: 10,
+                lifetime_ticks: 10,
+            });
+            let brute = bundle
+                .monsters
+                .iter_mut()
+                .find(|monster| monster.id == "monster.brute")
+                .unwrap();
+            brute.retreat_range = Some(50);
+            brute.projectile = Some(ProjectileData {
+                speed: 0,
+                lifetime_ticks: 40,
+            });
+        });
+        // 20 × 34 = 680 nominally covers reach 640, but a diagonal shot can be as slow as
+        // 18 per tick and stop at 612.
+        let short_diagonal = errors(|bundle| {
+            let archer = bundle
+                .monsters
+                .iter_mut()
+                .find(|monster| monster.id == "monster.archer")
+                .unwrap();
+            archer.projectile = Some(ProjectileData {
+                speed: 20,
+                lifetime_ticks: 34,
+            });
+        });
+        assert!(
+            short_diagonal
+                .iter()
+                .any(|error| error.contains("monster.archer: projectile must fly at least as far")),
+            "{short_diagonal:?}"
+        );
+        for invariant in [
+            "monster.archer: retreatRange must stay three navigation cells inside",
+            "monster.archer: projectile must fly at least as far as the strike reach",
+            "monster.brute: retreatRange must be at least 105",
+            "monster.brute: projectile speed must be within 16..=200",
+            "monster.archer: projectile speed must be within 16..=200",
+        ] {
+            assert!(
+                roles.iter().any(|error| error.contains(invariant)),
+                "{invariant}: {roles:?}"
+            );
+        }
+
         let long = errors(|bundle| bundle.strikes[0].id = "s".repeat(65));
         assert!(long.iter().any(|error| error.contains("1..=64 ASCII")));
 
@@ -912,9 +1037,12 @@ mod tests {
     #[test]
     fn an_older_format_bundle_reports_its_version_before_missing_fields() {
         let mut previous: serde_json::Value = serde_json::from_str(BASE_BUNDLE).unwrap();
-        previous["formatVersion"] = 4.into();
-        let fields = previous.as_object_mut().unwrap();
-        fields.remove("targeting");
+        previous["formatVersion"] = 5.into();
+        for monster in previous["monsters"].as_array_mut().unwrap() {
+            let fields = monster.as_object_mut().unwrap();
+            fields.remove("retreatRange");
+            fields.remove("projectile");
+        }
 
         let errors = ContentBundle::from_json(&previous.to_string()).unwrap_err();
 
@@ -923,7 +1051,7 @@ mod tests {
         assert!(
             errors[0]
                 .message
-                .contains("unsupported content format version 4")
+                .contains("unsupported content format version 5")
         );
     }
 }

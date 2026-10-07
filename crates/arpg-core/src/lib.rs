@@ -34,7 +34,7 @@ pub const WORLD_UNITS_PER_METER: i32 = 100;
 /// Largest magnitude of either component of an aim direction. Aim is a direction only: its
 /// length carries no meaning, so `[1, 0]` and `[1000, 0]` aim the same way.
 pub const AIM_COMPONENT_LIMIT: i16 = 1_000;
-pub const SAVE_STATE_SCHEMA_VERSION: u16 = 10;
+pub const SAVE_STATE_SCHEMA_VERSION: u16 = 11;
 // 2: directional multi-target strike volumes and obstruction by fixed geometry.
 // 3: directional shield guard, block and guard break.
 // 4: post-block counterattack opportunity.
@@ -43,7 +43,8 @@ pub const SAVE_STATE_SCHEMA_VERSION: u16 = 10;
 // 7: reward chests, line-of-sight interaction and reasoned interaction results.
 // 8: enemy engagement: aggro, leash and return, target hysteresis, separation (#109).
 // 9: aim intent separate from movement and optional target lock (#103).
-pub const SAVE_STATE_RULES_VERSION: u16 = 9;
+// 10: ranged spacing and monster projectiles on the shared arrow path (#108).
+pub const SAVE_STATE_RULES_VERSION: u16 = 10;
 // physics-engine::World::step(1) integrates velocity as world units per simulation tick.
 // At 60 Hz and 100 world units per meter, 7 units/tick is 4.2 m/s rather than
 // the previous 260 units/tick (156 m/s).
@@ -209,6 +210,10 @@ const MONSTER_BODY_BASE: u64 = 1 << 33;
 const _: () = assert!(MONSTER_BODY_BASE > PLAYER_BODY_BASE + u32::MAX as u64);
 const MONSTER_BODY_HALF_EXTENTS: Vec3i = Vec3i::new(30, 50, 30);
 const MONSTER_HURTBOX_HALF_EXTENTS: Vec3i = Vec3i::new(40, 50, 40);
+/// Player hurt boxes exist only for monster shots' ray queries, never in the world.
+const PLAYER_HURTBOX_BASE: u64 = 1 << 34;
+const _: () = assert!(PLAYER_HURTBOX_BASE > MONSTER_BODY_BASE + u32::MAX as u64);
+const PLAYER_HURTBOX_HALF_EXTENTS: Vec3i = Vec3i::new(40, 50, 40);
 #[cfg(test)]
 const PRIMARY_STAGGER_TICKS: u8 = 4;
 #[cfg(test)]
@@ -369,9 +374,10 @@ pub enum Weapon {
 }
 
 /// A named, deterministic workbench scenario. Every scenario is the normal generated dungeon
-/// for its seed plus an exact placement in the first combat room (room 2): the player at the
-/// room centre facing +x and the room's generated monster at an authored offset, with an
-/// optional authored pillar. Scenarios never add rules; they only arrange the real runtime.
+/// for its seed plus an exact placement in one combat room: the first one (room 2), or the
+/// first room the content gives the scenario's enemy. The player stands at the room centre
+/// facing +x and the room's generated monster at an authored offset, with an optional
+/// authored pillar. Scenarios never add rules; they only arrange the real runtime.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ScenarioId {
@@ -388,16 +394,22 @@ pub enum ScenarioId {
     Archery,
     /// The distant target behind a pillar, for arrows stopped by walls.
     ArcheryObstructed,
+    /// A ranged enemy in its preferred band, shooting and backing off (#108).
+    Ranged,
+    /// A heavy enemy inside its reach, winding up its long telegraphed slam (#108).
+    Heavy,
 }
 
 impl ScenarioId {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 8] = [
         Self::Dungeon,
         Self::Dummy,
         Self::Enemy,
         Self::Obstructed,
         Self::Archery,
         Self::ArcheryObstructed,
+        Self::Ranged,
+        Self::Heavy,
     ];
 
     /// The URL/query name, identical to the serialised form.
@@ -409,6 +421,8 @@ impl ScenarioId {
             Self::Obstructed => "obstructed",
             Self::Archery => "archery",
             Self::ArcheryObstructed => "archeryObstructed",
+            Self::Ranged => "ranged",
+            Self::Heavy => "heavy",
         }
     }
 
@@ -424,8 +438,31 @@ impl ScenarioId {
             Self::Dungeon => None,
             Self::Dummy | Self::Obstructed => Some(200),
             Self::Enemy => Some(150),
-            Self::Archery | Self::ArcheryObstructed => Some(500),
+            Self::Archery | Self::ArcheryObstructed | Self::Ranged => Some(500),
+            Self::Heavy => Some(150),
         }
+    }
+
+    /// The monster definition whose first room the scenario is arranged in; the others
+    /// use the first combat room.
+    const fn enemy(self) -> Option<&'static str> {
+        match self {
+            Self::Ranged => Some("monster.archer"),
+            Self::Heavy => Some("monster.bruiser"),
+            _ => None,
+        }
+    }
+
+    /// The room the scenario is arranged in: a function of seed and content.
+    fn room(self, monsters: &[MonsterState]) -> Result<RoomId, GameError> {
+        let Some(enemy) = self.enemy() else {
+            return Ok(SCENARIO_ROOM);
+        };
+        monsters
+            .iter()
+            .find(|monster| monster.definition().id == enemy)
+            .map(|monster| monster.room_id)
+            .ok_or_else(|| GameError::new(format!("no combat room holds a {enemy}")))
     }
 
     /// Offset of an authored pillar between player and target.
@@ -520,12 +557,14 @@ pub struct StrikeEventSnapshot {
     pub result: StrikeResult,
 }
 
-/// One authoritative arrow in flight.
+/// One authoritative projectile in flight: a player's arrow, or a ranged monster's shot
+/// (#108). Both fly the same path; a player's arrow hits monsters, a monster's shot hits
+/// players.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ArrowSnapshot {
     pub id: u64,
-    pub owner_id: PlayerId,
+    pub source: StrikeSource,
     pub launched_at_tick: u64,
     pub position: [i32; 3],
     /// World units travelled per tick; committed at release and never steered.
@@ -725,6 +764,18 @@ pub struct MonsterActionSnapshot {
     pub ticks_remaining: u8,
     pub target_player_id: PlayerId,
     pub range: i32,
+    /// How the attack lands, so presentation telegraphs a ring or a line of fire.
+    pub delivery: AttackDelivery,
+}
+
+/// How a monster attack reaches its target (#108).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AttackDelivery {
+    /// Resolves the strike around the monster when the active phase opens.
+    Strike,
+    /// Launches a projectile at the target when the active phase opens.
+    Projectile,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -893,6 +944,8 @@ pub enum MonsterBehavior {
     Attacking,
     /// Engaged and moved toward its target this tick.
     Pursuing,
+    /// Engaged and backed away from its target this tick to keep its spacing (#108).
+    Retreating,
     /// Engaged but stood still this tick: about to strike, provoked this tick, or without
     /// a route to a place it could strike from.
     Holding,
@@ -1067,6 +1120,8 @@ pub struct MonsterSaveState {
     /// Whether steering moved the body in the tick the save was taken after: the one
     /// input of the published behaviour that the rest of the state does not determine.
     pub steered: bool,
+    /// Whether that movement backed away from the target to keep spacing (#108).
+    pub retreating: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -1129,6 +1184,11 @@ impl MonsterActionState {
             target_player_id: self.target_player_id,
             range: i32::try_from(definition.strike.reach)
                 .expect("monster attack range must fit i32"),
+            delivery: if definition.projectile.is_some() {
+                AttackDelivery::Projectile
+            } else {
+                AttackDelivery::Strike
+            },
         }
     }
 }
@@ -1223,6 +1283,11 @@ struct MonsterState {
     engagement: Engagement,
     /// Whether steering gave the body a velocity in the last tick.
     steered: bool,
+    /// Whether that velocity backed away from the target (#108).
+    retreating: bool,
+    /// Transient within a tick, never saved: steering wanted to back away this tick and
+    /// found no way to, so the attack may start from inside the retreat range.
+    cornered: bool,
 }
 
 impl MonsterState {
@@ -1238,6 +1303,8 @@ impl MonsterState {
             post: None,
             engagement: Engagement::Idle,
             steered: false,
+            retreating: false,
+            cornered: false,
         }
     }
 
@@ -1259,6 +1326,9 @@ impl MonsterState {
         } else {
             match self.engagement {
                 Engagement::Idle => MonsterBehavior::Idle,
+                Engagement::Engaged { .. } if steered && self.retreating => {
+                    MonsterBehavior::Retreating
+                }
                 Engagement::Engaged { .. } if steered => MonsterBehavior::Pursuing,
                 Engagement::Engaged { .. } => MonsterBehavior::Holding,
                 Engagement::Searching { .. } => MonsterBehavior::Searching,
@@ -1294,6 +1364,10 @@ enum Steering {
     Hold,
     /// Toward a place within strike reach of the engaged target.
     Pursue {
+        target: Vec3i,
+    },
+    /// Away from an engaged target that came nearer than the retreat range (#108).
+    Retreat {
         target: Vec3i,
     },
     /// Back to the post.
@@ -1365,6 +1439,9 @@ pub struct NavigationWork {
     /// Exact per-tick plans: the final approach from a goal cell, a target the field cannot
     /// reach or serve, and every plan of the per-tick reference.
     pub exact_plans: u64,
+    /// Exact plans that back a spacing monster away from its target (#108). Not repaths:
+    /// they plan away from a target, which the retained fields never serve.
+    pub retreat_plans: u64,
     /// Physics ray queries made by the planners.
     pub physics_queries: u64,
     /// Room grids rasterized from the fixed bodies.
@@ -1386,6 +1463,7 @@ impl NavigationWork {
             expansions: self.expansions - earlier.expansions,
             field_searches: self.field_searches - earlier.field_searches,
             exact_plans: self.exact_plans - earlier.exact_plans,
+            retreat_plans: self.retreat_plans - earlier.retreat_plans,
             physics_queries: self.physics_queries - earlier.physics_queries,
             grid_builds: self.grid_builds - earlier.grid_builds,
             field_builds: self.field_builds - earlier.field_builds,
@@ -1397,6 +1475,7 @@ impl NavigationWork {
         self.expansions += other.expansions;
         self.field_searches += other.field_searches;
         self.exact_plans += other.exact_plans;
+        self.retreat_plans += other.retreat_plans;
         self.physics_queries += other.physics_queries;
         self.grid_builds += other.grid_builds;
         self.field_builds += other.field_builds;
@@ -1555,17 +1634,18 @@ impl ArpgGame {
         let Some(target_offset) = scenario.target_offset() else {
             return Ok(game);
         };
+        let room_id = scenario.room(&game.monsters)?;
         let (center_x, center_z) = game
             .rooms
             .iter()
-            .find(|room| room.id == SCENARIO_ROOM)
+            .find(|room| room.id == room_id)
             .map(RoomSnapshot::center)
             .ok_or_else(|| GameError::new("scenario room is missing"))?;
         let mut placed = 0;
         for monster in game
             .monsters
             .iter_mut()
-            .filter(|monster| monster.room_id == SCENARIO_ROOM)
+            .filter(|monster| monster.room_id == room_id)
         {
             // The first monster is the authored target; any others wait in a far corner.
             monster.position = if placed == 0 {
@@ -1589,10 +1669,11 @@ impl ArpgGame {
         if scenario == ScenarioId::Dungeon {
             return Ok(game);
         }
+        let room_id = scenario.room(&game.monsters)?;
         let (center_x, center_z) = game
             .rooms
             .iter()
-            .find(|room| room.id == SCENARIO_ROOM)
+            .find(|room| room.id == room_id)
             .map(RoomSnapshot::center)
             .ok_or_else(|| GameError::new("scenario room is missing"))?;
         // Spawn points are layout: players joining a restored scenario arrive where they
@@ -1690,6 +1771,7 @@ impl ArpgGame {
                     post: monster.post.map(vec_to_array),
                     engagement: monster.engagement,
                     steered: monster.steered,
+                    retreating: monster.retreating,
                 })
                 .collect(),
             ground_loot: self
@@ -1856,6 +1938,13 @@ impl ArpgGame {
             if !engagement_valid {
                 return Err(GameError::new("saved monster engagement is invalid"));
             }
+            if monster.retreating
+                && (!monster.steered
+                    || definition.retreat_range.is_none()
+                    || !matches!(monster.engagement, Engagement::Engaged { .. }))
+            {
+                return Err(GameError::new("saved monster retreat is invalid"));
+            }
             if let Some(action) = monster.action {
                 let maximum_ticks = match action.phase {
                     ActionPhase::Windup => definition.windup_ticks,
@@ -1908,6 +1997,7 @@ impl ArpgGame {
             monster.post = saved.post.map(array_to_vec);
             monster.engagement = saved.engagement;
             monster.steered = saved.steered;
+            monster.retreating = saved.retreating;
         }
         if !monster_states.is_empty() {
             return Err(GameError::new("save contains unknown monster ids"));
@@ -1950,16 +2040,44 @@ impl ArpgGame {
         for arrow in &save.arrows {
             let in_order = previous_arrow_id.is_none_or(|previous| arrow.id > previous);
             previous_arrow_id = Some(arrow.id);
+            // (lifetime, ticks flown before the save tick, launch possible). A player's
+            // arrow launched during tick L flies from that tick on; a monster's shot
+            // launched during tick L flies from tick L + 1 on.
+            let flight = match arrow.source {
+                StrikeSource::Player(owner_id) => Some((
+                    content().bow.arrow_lifetime_ticks,
+                    0,
+                    owner_id != 0 && Self::arrow_launch_is_possible(arrow),
+                )),
+                StrikeSource::Monster(monster_id) => game
+                    .monsters
+                    .iter()
+                    .find(|monster| monster.id == monster_id)
+                    .map(MonsterState::definition)
+                    .and_then(|definition| {
+                        let projectile = definition.projectile?;
+                        Some((
+                            projectile.lifetime_ticks,
+                            1,
+                            arrow.damage == definition.damage
+                                && projectile_velocity_is_possible(
+                                    arrow.velocity,
+                                    projectile.speed,
+                                ),
+                        ))
+                    }),
+            };
+            let Some((lifetime, unflown, possible)) = flight else {
+                return Err(GameError::new("save contains an invalid arrow"));
+            };
             if !in_order
                 || arrow.id < ARROW_ID_BASE
                 || arrow.id >= save.next_arrow_id
-                || arrow.owner_id == 0
                 || arrow.launched_at_tick >= save.tick
-                || !(1..=content().bow.arrow_lifetime_ticks).contains(&arrow.ticks_remaining)
-                // An arrow launched during tick L has flown (tick - L) ticks of its lifetime.
+                || !(1..=lifetime).contains(&arrow.ticks_remaining)
                 || save.tick - arrow.launched_at_tick
-                    != u64::from(content().bow.arrow_lifetime_ticks - arrow.ticks_remaining)
-                || !Self::arrow_launch_is_possible(arrow)
+                    != u64::from(lifetime - arrow.ticks_remaining) + unflown
+                || !possible
                 || !game.dungeon_contains(arrow.position, Vec3i::ZERO)
             {
                 return Err(GameError::new("save contains an invalid arrow"));
@@ -3229,7 +3347,7 @@ impl ArpgGame {
             .ok_or_else(|| GameError::new("arrow id overflow"))?;
         self.arrows.push(ArrowSnapshot {
             id,
-            owner_id: player_id,
+            source: StrikeSource::Player(player_id),
             launched_at_tick: self.tick,
             position: vec_to_array(position),
             velocity: [velocity_x, 0, velocity_z],
@@ -3239,10 +3357,12 @@ impl ArpgGame {
         Ok(())
     }
 
-    /// Moves every arrow along its committed segment for one tick. The physics-engine ray
-    /// query over fixed geometry and monster hurt boxes chooses the first contact; equal
-    /// contact times prefer the lower body id, so walls (10 000+) win ties against monster
-    /// hurt boxes (40 000+). A non-piercing arrow stops at its first contact.
+    /// Moves every projectile along its committed segment for one tick. The physics-engine
+    /// ray query over fixed geometry and the opposing side's hurt boxes chooses the first
+    /// contact: a player's arrow meets monster hurt boxes, a monster's shot player hurt
+    /// boxes. Equal contact times prefer the lower body id, so walls (10 000+) win ties
+    /// against hurt boxes (monsters 40 000+, players 2^34+). A projectile stops at its
+    /// first contact.
     fn advance_arrows(&mut self) -> Result<(), GameError> {
         if self.arrows.is_empty() {
             return Ok(());
@@ -3256,19 +3376,34 @@ impl ArpgGame {
         let arrows = std::mem::take(&mut self.arrows);
         let mut remaining = Vec::with_capacity(arrows.len());
         for mut arrow in arrows {
-            // Rebuilt per arrow: an earlier arrow this tick may have killed a monster.
-            let hurtboxes = self
-                .monsters
-                .iter()
-                .filter(|monster| monster.health > 0 && active_rooms.contains(&monster.room_id))
-                .map(|monster| {
-                    RigidBody::fixed(
-                        BodyId(MONSTER_HURTBOX_BASE + u64::from(monster.id)),
-                        monster.position,
-                        MONSTER_HURTBOX_HALF_EXTENTS,
-                    )
-                })
-                .collect::<Vec<_>>();
+            // Rebuilt per arrow: an earlier arrow this tick may have killed its target.
+            let hurtboxes = match arrow.source {
+                StrikeSource::Player(_) => self
+                    .monsters
+                    .iter()
+                    .filter(|monster| monster.health > 0 && active_rooms.contains(&monster.room_id))
+                    .map(|monster| {
+                        RigidBody::fixed(
+                            BodyId(MONSTER_HURTBOX_BASE + u64::from(monster.id)),
+                            monster.position,
+                            MONSTER_HURTBOX_HALF_EXTENTS,
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+                StrikeSource::Monster(_) => self
+                    .players
+                    .iter()
+                    .filter(|(_, state)| state.health > 0)
+                    .filter_map(|(&player_id, _)| {
+                        let body = self.world.body(Self::player_body_id(player_id))?;
+                        Some(RigidBody::fixed(
+                            BodyId(PLAYER_HURTBOX_BASE + u64::from(player_id)),
+                            body.position(),
+                            PLAYER_HURTBOX_HALF_EXTENTS,
+                        ))
+                    })
+                    .collect::<Vec<_>>(),
+            };
             let origin = array_to_vec(arrow.position);
             let velocity = array_to_vec(arrow.velocity);
             let fixed = self
@@ -3278,6 +3413,11 @@ impl ArpgGame {
             let hit = ray_cast_first(fixed.chain(hurtboxes.iter()), Ray::new(origin, velocity), 1)
                 .map_err(physics_error)?;
             match hit {
+                Some(hit) if hit.body.0 >= PLAYER_HURTBOX_BASE => {
+                    let player_id = PlayerId::try_from(hit.body.0 - PLAYER_HURTBOX_BASE)
+                        .expect("hurt box ids come from player ids");
+                    self.resolve_projectile_hit(arrow, player_id)?;
+                }
                 Some(hit) if hit.body.0 >= MONSTER_HURTBOX_BASE => {
                     let monster_id = u32::try_from(hit.body.0 - MONSTER_HURTBOX_BASE)
                         .expect("hurt box ids come from monster ids");
@@ -3301,13 +3441,16 @@ impl ArpgGame {
         Ok(())
     }
 
-    /// Routes an arrow impact through the shared strike outcome path.
+    /// Routes a player's arrow impact through the shared strike outcome path.
     fn resolve_arrow_hit(
         &mut self,
         arrow: ArrowSnapshot,
         monster_id: u32,
     ) -> Result<(), GameError> {
-        let shooter_present = self.players.contains_key(&arrow.owner_id);
+        let StrikeSource::Player(owner_id) = arrow.source else {
+            return Err(GameError::new("a monster's shot cannot hit a monster"));
+        };
+        let shooter_present = self.players.contains_key(&owner_id);
         let monster = self
             .monsters
             .iter_mut()
@@ -3319,7 +3462,7 @@ impl ArpgGame {
             monster.stagger_ticks_remaining = content().bow.arrow_stagger_ticks;
             monster.action = None;
             if shooter_present {
-                monster.provoke(arrow.owner_id);
+                monster.provoke(owner_id);
             }
         }
         let defeated = monster.health == 0;
@@ -3329,7 +3472,7 @@ impl ArpgGame {
         self.push_strike_outcome(StrikeOutcome {
             order: 0,
             strike: StrikeId {
-                source: StrikeSource::Player(arrow.owner_id),
+                source: arrow.source,
                 tick: arrow.launched_at_tick,
             },
             definition: "bow.arrow",
@@ -3338,12 +3481,101 @@ impl ArpgGame {
         });
         if defeated {
             // A departed shooter's arrow still kills, but nobody is credited.
-            if self.players.contains_key(&arrow.owner_id) {
-                self.award_experience(arrow.owner_id, reward)?;
+            if self.players.contains_key(&owner_id) {
+                self.award_experience(owner_id, reward)?;
             }
             self.spawn_ground_loot(position)?;
         }
         self.reconcile_encounters()
+    }
+
+    /// Launches a ranged monster's shot (#108) from its centre at where its target stands
+    /// as the active phase opens. The direction is committed here and never steered; the
+    /// shot first moves on the next tick.
+    fn launch_monster_projectile(
+        &mut self,
+        monster_id: u32,
+        target_player_id: PlayerId,
+    ) -> Result<(), GameError> {
+        let Some((position, definition)) = self
+            .monsters
+            .iter()
+            .find(|monster| monster.id == monster_id && monster.health > 0)
+            .map(|monster| (monster.position, monster.definition()))
+        else {
+            return Ok(());
+        };
+        let Some(projectile) = definition.projectile else {
+            return Err(GameError::new("monster attack has no projectile"));
+        };
+        let target = self
+            .players
+            .get(&target_player_id)
+            .filter(|state| state.health > 0)
+            .and_then(|_| self.world.body(Self::player_body_id(target_player_id)))
+            .map(RigidBody::position);
+        let Some(target) = target else {
+            return Ok(());
+        };
+        let Some(velocity) = projectile_velocity(
+            i64::from(target.x - position.x),
+            i64::from(target.z - position.z),
+            projectile.speed,
+        ) else {
+            return Ok(());
+        };
+        if self.arrows.len() >= usize::from(content().bow.max_live_arrows) {
+            self.arrows.remove(0);
+        }
+        let id = self.next_arrow_id;
+        self.next_arrow_id = id
+            .checked_add(1)
+            .ok_or_else(|| GameError::new("arrow id overflow"))?;
+        self.arrows.push(ArrowSnapshot {
+            id,
+            source: StrikeSource::Monster(monster_id),
+            launched_at_tick: self.tick,
+            position: vec_to_array(position),
+            velocity: vec_to_array(velocity),
+            damage: definition.damage,
+            ticks_remaining: projectile.lifetime_ticks,
+        });
+        Ok(())
+    }
+
+    /// Routes a monster's shot that reached `player_id` through the shared monster hit
+    /// path: its strike definition decides block and guard cost, its damage the hurt.
+    fn resolve_projectile_hit(
+        &mut self,
+        arrow: ArrowSnapshot,
+        player_id: PlayerId,
+    ) -> Result<(), GameError> {
+        let StrikeSource::Monster(monster_id) = arrow.source else {
+            return Err(GameError::new("a player's arrow cannot hit a player"));
+        };
+        let definition = self
+            .monsters
+            .iter()
+            .find(|monster| monster.id == monster_id)
+            .ok_or_else(|| GameError::new("shot from an unknown monster"))?
+            .definition();
+        let defender = self
+            .world
+            .body(Self::player_body_id(player_id))
+            .ok_or_else(|| GameError::new("player physics body is missing"))?
+            .position();
+        self.land_monster_hit(
+            StrikeId {
+                source: arrow.source,
+                tick: arrow.launched_at_tick,
+            },
+            definition.strike,
+            arrow.damage,
+            player_id,
+            defender,
+            // The shot arrives from where it was at the start of this tick.
+            array_to_vec(arrow.position),
+        )
     }
 
     fn resolve_monster_attack(
@@ -3438,55 +3670,87 @@ impl ArpgGame {
             tick: self.tick,
         };
         for (target, obstructed) in contacts {
-            let result = if obstructed {
-                StrikeResult::Obstructed
+            if obstructed {
+                self.push_strike_outcome(StrikeOutcome {
+                    order: 0,
+                    strike,
+                    definition: definition.id,
+                    target,
+                    result: StrikeResult::Obstructed,
+                });
             } else {
-                let player = self
-                    .players
-                    .get_mut(&target_player_id)
-                    .ok_or_else(|| GameError::new("monster attack references an unknown player"))?;
-                if let Some(result) =
-                    Self::guard_outcome(player, definition, target_position, monster_position)
-                {
-                    result
-                } else {
-                    let previous_health = player.health;
-                    player.health = player.health.saturating_sub(monster_damage);
-                    player.hurt_ticks_remaining = PLAYER_HURT_TICKS;
-                    player.action = None;
-                    player.guard.stance = None;
-                    // A hit lowers a drawn bow immediately, before any release can arrive.
-                    player.draw_ticks = None;
-                    StrikeResult::Hit {
-                        damage: previous_health - player.health,
-                        defeated: player.health == 0,
-                    }
+                self.land_monster_hit(
+                    strike,
+                    definition,
+                    monster_damage,
+                    target_player_id,
+                    target_position,
+                    monster_position,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// A monster strike or shot that reached `player_id` unobstructed: the shield first,
+    /// then damage, then the counter opportunity a block grants. Melee and projectiles
+    /// share this path.
+    fn land_monster_hit(
+        &mut self,
+        strike: StrikeId,
+        definition: StrikeDefinition,
+        damage: u16,
+        player_id: PlayerId,
+        defender: Vec3i,
+        attacker: Vec3i,
+    ) -> Result<(), GameError> {
+        let StrikeSource::Monster(monster_id) = strike.source else {
+            return Err(GameError::new("monster hit from a player source"));
+        };
+        let tick = self.tick;
+        let player = self
+            .players
+            .get_mut(&player_id)
+            .ok_or_else(|| GameError::new("monster attack references an unknown player"))?;
+        let result =
+            if let Some(result) = Self::guard_outcome(player, definition, defender, attacker) {
+                result
+            } else {
+                let previous_health = player.health;
+                player.health = player.health.saturating_sub(damage);
+                player.hurt_ticks_remaining = PLAYER_HURT_TICKS;
+                player.action = None;
+                player.guard.stance = None;
+                // A hit lowers a drawn bow immediately, before any release can arrive.
+                player.draw_ticks = None;
+                StrikeResult::Hit {
+                    damage: previous_health - player.health,
+                    defeated: player.health == 0,
                 }
             };
-            let tick = self.tick;
-            if let Some(player) = self.players.get_mut(&target_player_id) {
-                match result {
-                    StrikeResult::Blocked { .. } => {
-                        player.counter = Some(CounterOpportunity::grant(monster_id, tick));
-                    }
-                    StrikeResult::Hit { .. } | StrikeResult::GuardBroken => player.counter = None,
-                    StrikeResult::Obstructed => {}
-                }
+        match result {
+            StrikeResult::Blocked { .. } => {
+                player.counter = Some(CounterOpportunity::grant(monster_id, tick));
             }
-            self.push_strike_outcome(StrikeOutcome {
-                order: 0,
-                strike,
-                definition: definition.id,
-                target,
-                result,
-            });
+            StrikeResult::Hit { .. } | StrikeResult::GuardBroken => player.counter = None,
+            StrikeResult::Obstructed => {}
         }
+        self.push_strike_outcome(StrikeOutcome {
+            order: 0,
+            strike,
+            definition: definition.id,
+            target: StrikeTarget::Player(player_id),
+            result,
+        });
         Ok(())
     }
 
     /// Gives monsters in running encounters a physics body and sets each body's velocity
     /// from its behaviour: pursuers follow a room-grid path, everything else holds still.
     fn steer_monsters(&mut self) -> Result<(), GameError> {
+        for monster in &mut self.monsters {
+            monster.cornered = false;
+        }
         #[cfg(test)]
         if self.monsters_without_bodies {
             return Ok(());
@@ -3557,9 +3821,11 @@ impl ArpgGame {
             let definition = monster.definition();
             let (goal, goal_reach) = match steering {
                 Steering::Hold => {
-                    velocities.push((index, body_id, Vec3i::ZERO));
+                    velocities.push((index, body_id, Vec3i::ZERO, steering));
                     continue;
                 }
+                // The band is checked against the threat itself; reach is unused.
+                Steering::Retreat { target } => (target, 0),
                 Steering::Pursue { target } => {
                     work.pursuit_ticks += 1;
                     // End inside reach so the attack range check passes on arrival.
@@ -3588,6 +3854,25 @@ impl ArpgGame {
                 // Returning is rare and short-lived: the exact plan, without a line test.
                 work.exact_plans += 1;
                 grid.find_path(start, goal_xz, goal_reach, |_| true, &mut work.expansions)
+            } else if let Some(retreat) = definition
+                .retreat_range
+                .filter(|_| matches!(steering, Steering::Retreat { .. }))
+            {
+                // Backing off (#108) is short-lived too: an exact plan into the band from
+                // one cell beyond the retreat range to one cell inside reach, with the
+                // attack's own line test, through cells no nearer to the target.
+                work.retreat_plans += 1;
+                let band = (
+                    retreat + i64::from(NAV_CELL_SIZE),
+                    definition.strike.reach - i64::from(NAV_CELL_SIZE),
+                );
+                let clear_line = |(x, z): (i32, i32)| {
+                    work.physics_queries += 1;
+                    !self
+                        .strike_obstructed(Vec3i::new(x, monster.position.y, z), goal)
+                        .unwrap_or(true)
+                };
+                grid.find_retreat(start, goal_xz, band, clear_line, &mut work.expansions)
             } else {
                 let route = grid
                     .target_cell(goal_xz)
@@ -3624,27 +3909,39 @@ impl ArpgGame {
                 }
             };
             let velocity = path
-                .and_then(|path| path_point(grid, monster.position, &path))
-                .map_or(Vec3i::ZERO, |point| {
+                .as_deref()
+                .and_then(|path| Some((path_point(grid, monster.position, path)?, path.last()?)))
+                .map_or(Vec3i::ZERO, |(point, &(end_x, end_z))| {
+                    // A retreat crowds around its destination, a pursuit around its target.
+                    let crowd_goal = if let Steering::Retreat { .. } = steering {
+                        Vec3i::new(end_x, goal.y, end_z)
+                    } else {
+                        goal
+                    };
                     separated_velocity(
                         monster,
-                        goal,
+                        crowd_goal,
                         point,
                         definition.pursuit_speed,
                         &bodies,
                         definition.separation_range,
                     )
                 });
-            velocities.push((index, body_id, velocity));
+            velocities.push((index, body_id, velocity, steering));
         }
         cache.fields.retain(|key, _| chased_fields.contains(key));
         self.navigation = cache;
         self.navigation_work.add(work);
         for monster in &mut self.monsters {
             monster.steered = false;
+            monster.retreating = false;
         }
-        for (index, body_id, velocity) in velocities {
-            self.monsters[index].steered = velocity != Vec3i::ZERO;
+        for (index, body_id, velocity, steering) in velocities {
+            let monster = &mut self.monsters[index];
+            let retreat = matches!(steering, Steering::Retreat { .. });
+            monster.steered = velocity != Vec3i::ZERO;
+            monster.retreating = retreat && monster.steered;
+            monster.cornered = retreat && !monster.steered;
             self.world
                 .set_velocity(body_id, velocity)
                 .map_err(physics_error)?;
@@ -3679,6 +3976,15 @@ impl ArpgGame {
             .map(|&(_, _, position)| position)
     }
 
+    /// Whether a monster that keeps spacing (#108) stands nearer to `target` than its
+    /// retreat range.
+    fn inside_retreat_range(monster: &MonsterState, target: Vec3i) -> bool {
+        monster
+            .definition()
+            .retreat_range
+            .is_some_and(|range| xz_distance_sq(monster.position, target) < range * range)
+    }
+
     /// Whether `monster` could start its attack on a player at `target` now: within strike
     /// reach with a clear strike line.
     fn can_strike(&self, monster: &MonsterState, target: Vec3i) -> Result<bool, GameError> {
@@ -3701,6 +4007,9 @@ impl ArpgGame {
         Ok(match monster.engagement {
             Engagement::Engaged { target_player_id } => {
                 match Self::target_in_room(monster, targets, target_player_id) {
+                    Some(target) if Self::inside_retreat_range(monster, target) => {
+                        Steering::Retreat { target }
+                    }
                     Some(target) if !self.can_strike(monster, target)? => {
                         Steering::Pursue { target }
                     }
@@ -3898,11 +4207,18 @@ impl ArpgGame {
                 }
             } else {
                 let post = *monster.post.get_or_insert(monster.position);
+                // Steering found no retreat from the target it was engaged on; a switch to
+                // another target makes that result stale.
+                let cornered_target = monster.engaged_target().filter(|_| monster.cornered);
                 monster.engagement = self.next_engagement(&monster, post, &targets)?;
+                let cornered =
+                    cornered_target.is_some() && monster.engaged_target() == cornered_target;
                 // Only the engaged target is attacked; an obstructed one is pursued
-                // instead of winding up into a wall.
+                // instead of winding up into a wall. A monster that keeps spacing attacks
+                // from its band, or from where it stands when it found no way back (#108).
                 if let Some(target_player_id) = monster.engaged_target()
                     && let Some(target) = Self::target_in_room(&monster, &targets, target_player_id)
+                    && (cornered || !Self::inside_retreat_range(&monster, target))
                     && self.can_strike(&monster, target)?
                 {
                     monster.action = Some(MonsterActionState {
@@ -3916,7 +4232,14 @@ impl ArpgGame {
         }
 
         for (monster_id, target_player_id) in hits {
-            self.resolve_monster_attack(monster_id, target_player_id)?;
+            let shoots = self.monsters.iter().any(|monster| {
+                monster.id == monster_id && monster.definition().projectile.is_some()
+            });
+            if shoots {
+                self.launch_monster_projectile(monster_id, target_player_id)?;
+            } else {
+                self.resolve_monster_attack(monster_id, target_player_id)?;
+            }
         }
         Ok(())
     }
@@ -4347,7 +4670,7 @@ impl AuthoritativeGame for ArpgGame {
         }));
 
         Ok(ArpgSnapshot {
-            schema_version: 18,
+            schema_version: 19,
             run_seed: self.run_seed,
             tick: self.tick,
             world_units_per_meter: WORLD_UNITS_PER_METER,
@@ -4785,6 +5108,36 @@ fn scaled_velocity(dx: i64, dz: i64, speed: i64) -> Vec3i {
     }
 }
 
+/// A monster shot's velocity along (dx, dz) at `speed` per tick, truncated toward zero, so
+/// its length is within two units below `speed` (#108). `None` for a zero direction.
+fn projectile_velocity(dx: i64, dz: i64, speed: i32) -> Option<Vec3i> {
+    // The length in 1/1024 units keeps the rounding of the direction far below a unit.
+    let length = isqrt((dx * dx + dz * dz) << 20);
+    if length == 0 {
+        return None;
+    }
+    let speed = i64::from(speed);
+    let component = |delta: i64| i32::try_from(delta * speed * 1_024 / length).unwrap_or(0);
+    let velocity = Vec3i::new(component(dx), 0, component(dz));
+    if velocity != Vec3i::ZERO {
+        return Some(velocity);
+    }
+    let speed = i32::try_from(speed).unwrap_or(0);
+    Some(if dx.abs() >= dz.abs() {
+        Vec3i::new(dx.signum() as i32 * speed, 0, 0)
+    } else {
+        Vec3i::new(0, 0, dz.signum() as i32 * speed)
+    })
+}
+
+/// Whether `velocity` is one a shot at `speed` can have.
+fn projectile_velocity_is_possible(velocity: [i32; 3], speed: i32) -> bool {
+    let [x, y, z] = velocity.map(i64::from);
+    let length = isqrt(x * x + z * z);
+    let speed = i64::from(speed);
+    y == 0 && length <= speed && length >= (speed - 2).max(1)
+}
+
 /// Fixed-point unit for steering directions.
 const STEERING_UNIT: i64 = 1_024;
 /// How much harder a blocker ahead pushes sideways than straight away.
@@ -4911,6 +5264,8 @@ mod tests {
 
     const BRUTE: &str = "monster.brute";
     const SKIRMISHER: &str = "monster.skirmisher";
+    const ARCHER: &str = "monster.archer";
+    const BRUISER: &str = "monster.bruiser";
 
     /// Canonical index of a monster definition in the built-in content.
     fn definition_index(id: &str) -> usize {
@@ -6986,7 +7341,7 @@ mod tests {
         }
         assert_eq!(game.arrows.len(), 1);
         let arrow = game.arrows[0];
-        assert_eq!(arrow.owner_id, 1);
+        assert_eq!(arrow.source, StrikeSource::Player(1));
         assert_eq!(arrow.damage, ARROW_FULL_DAMAGE);
         assert_eq!(arrow.velocity, [ARROW_FULL_SPEED, 0, 0]);
         // Launched from the body centre during the action step, then moved by the same
@@ -7076,7 +7431,7 @@ mod tests {
         let (mut game, x, z) = bow_arena();
         game.arrows.push(ArrowSnapshot {
             id: game.next_arrow_id,
-            owner_id: 1,
+            source: StrikeSource::Player(1),
             launched_at_tick: game.tick,
             position: [x, PLAYER_Y, z],
             velocity: [0, 0, 1],
@@ -7928,7 +8283,12 @@ mod tests {
                     });
                     continue;
                 };
-                let room = snapshot.rooms.iter().find(|room| room.id == 2).unwrap();
+                let room_id = scenario.room(&game.monsters).unwrap();
+                let room = snapshot
+                    .rooms
+                    .iter()
+                    .find(|room| room.id == room_id)
+                    .unwrap();
                 assert_eq!(
                     room.encounter_state,
                     RoomEncounterState::Active,
@@ -7939,9 +8299,14 @@ mod tests {
                 let target = snapshot
                     .monsters
                     .iter()
-                    .find(|monster| monster.room_id == 2)
+                    .find(|monster| monster.room_id == room_id)
                     .unwrap();
                 assert_eq!(target.position, [x + offset, PLAYER_Y, z]);
+                assert_eq!(
+                    target.definition,
+                    scenario.enemy().unwrap_or(BRUTE),
+                    "{scenario:?}/{seed}"
+                );
                 let pillars = snapshot
                     .static_colliders
                     .iter()
@@ -8661,9 +9026,9 @@ mod tests {
                 rooms,
                 [
                     (2, BRUTE),
-                    (3, BRUTE),
+                    (3, ARCHER),
                     (4, SKIRMISHER),
-                    (5, BRUTE),
+                    (5, BRUISER),
                     (6, SKIRMISHER)
                 ],
                 "seed {seed}"
@@ -8993,7 +9358,7 @@ mod tests {
         game.add_player(1).unwrap();
         let snapshot = game.snapshot().unwrap();
         let generated = generate_dungeon(snapshot.run_seed);
-        assert_eq!(snapshot.schema_version, 18);
+        assert_eq!(snapshot.schema_version, 19);
         assert_eq!(snapshot.run_seed, 0xDEAD_BEEF);
         assert_eq!(game.run_seed(), snapshot.run_seed);
         assert_eq!(snapshot.rooms, generated.rooms);
@@ -10151,7 +10516,9 @@ mod tests {
         }
         for id in 1..=rng.between(1, 3) {
             let spot = free_spot(&mut rng, MONSTER_BODY_HALF_EXTENTS, 700);
-            place_monster(&mut game, id as u32, spot.x, spot.z);
+            // Melee, ranged and heavy pursuers share the planner (#108).
+            let definition = [BRUTE, ARCHER, BRUISER][(id as usize - 1) % 3];
+            place_monster_of(&mut game, id as u32, definition, spot.x, spot.z);
         }
         let late_pillar = free_spot(&mut rng, Vec3i::new(40, 50, 40), 450);
         let mut snapshots = vec![game.snapshot().unwrap()];
@@ -10370,5 +10737,516 @@ mod tests {
             restored.advance_tick().unwrap();
             assert_eq!(restored.snapshot().unwrap(), game.snapshot().unwrap());
         }
+    }
+
+    // Enemy roles (#108): ranged spacing and a heavy telegraphed attack, selected by
+    // content on the shared locomotion, engagement and strike paths.
+
+    fn archer() -> &'static MonsterDefinition {
+        content().monster(definition_index(ARCHER))
+    }
+
+    fn bruiser() -> &'static MonsterDefinition {
+        content().monster(definition_index(BRUISER))
+    }
+
+    /// Asserts that monster `id` stands inside its room and touches no fixed body.
+    fn assert_inside_room_and_clear_of_fixed_bodies(game: &ArpgGame, id: u32, tick: u32) {
+        let monster = game.monsters.iter().find(|m| m.id == id).unwrap();
+        let room = game.rooms.iter().find(|r| r.id == monster.room_id).unwrap();
+        assert!(
+            room.contains_xz_with_margin(monster.position, MONSTER_BODY_HALF_EXTENTS.x),
+            "tick {tick}: {:?} left room {}",
+            monster.position,
+            room.id
+        );
+        for body in game.world.bodies().filter(|b| b.kind() == BodyKind::Fixed) {
+            assert!(
+                !overlaps_xz(
+                    monster.position,
+                    MONSTER_BODY_HALF_EXTENTS,
+                    body.position(),
+                    body.half_extents()
+                ),
+                "tick {tick}: {:?} overlaps fixed body {:?}",
+                monster.position,
+                body.id()
+            );
+        }
+    }
+
+    fn monster_shots(snapshot: &ArpgSnapshot, id: u32) -> Vec<StrikeEventSnapshot> {
+        snapshot
+            .strike_events
+            .iter()
+            .filter(|event| event.source == StrikeSource::Monster(id))
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn the_default_dungeon_places_melee_ranged_and_heavy_roles_that_differ_in_play() {
+        // Each role starts 500 units from the same player in the same room.
+        let mut first_windups = BTreeMap::new();
+        for definition in [BRUTE, ARCHER, BRUISER] {
+            let (mut game, x, z) = strike_arena();
+            place_monster_of(&mut game, 1, definition, x + 500, z);
+            let start = (1..=400)
+                .find(|_| {
+                    game.advance_tick().unwrap();
+                    game.monsters[0].action.is_some()
+                })
+                .expect("every role attacks");
+            let snapshot = game.snapshot().unwrap();
+            let action = snapshot.monsters[0].action.unwrap();
+            let distance = isqrt(xz_distance_sq(
+                game.monsters[0].position,
+                player_position(&game),
+            ));
+            first_windups.insert(definition, (start, distance, action));
+        }
+        let (brute_start, brute_distance, brute_action) = first_windups[BRUTE];
+        let (archer_start, archer_distance, archer_action) = first_windups[ARCHER];
+        let (bruiser_start, bruiser_distance, bruiser_action) = first_windups[BRUISER];
+        // Melee closes in and attacks at claw reach.
+        assert!(brute_distance <= brute().strike.reach);
+        assert_eq!(brute_action.delivery, AttackDelivery::Strike);
+        // Ranged attacks at once from its band, far outside any melee reach.
+        assert_eq!(archer_start, 1);
+        assert!(archer_distance >= archer().retreat_range.unwrap());
+        assert!(archer_distance > 2 * brute().strike.reach);
+        assert_eq!(archer_action.delivery, AttackDelivery::Projectile);
+        // Heavy arrives last and telegraphs far longer than melee.
+        assert!(bruiser_start > brute_start, "{first_windups:?}");
+        assert!(bruiser_distance <= bruiser().strike.reach);
+        assert_eq!(bruiser_action.delivery, AttackDelivery::Strike);
+        assert_eq!(bruiser_action.ticks_remaining, bruiser().windup_ticks);
+        assert!(bruiser().windup_ticks >= 2 * brute().windup_ticks);
+        assert!(bruiser().damage >= 2 * brute().damage);
+        assert!(bruiser().strike.guard_cost >= content().guard.max_points);
+    }
+
+    #[test]
+    fn an_archer_backs_off_around_a_wall_into_its_band_and_never_enters_fixed_bodies() {
+        let (mut game, x, z) = strike_arena();
+        place_monster_of(&mut game, 1, ARCHER, x + 420, z);
+        // A wall right behind the archer: it backs off sideways, never into the wall.
+        place_blocker(&mut game, 0, x + 520, z, Vec3i::new(20, 50, 220));
+        let (retreat, reach) = (archer().retreat_range.unwrap(), archer().strike.reach);
+        let mut retreats = 0;
+        let mut shots = 0;
+        let mut attacked_inside_range = false;
+        for tick in 0..360 {
+            match tick {
+                // The player walks up to the archer once its first shot is in recovery.
+                60 => command_as(&mut game, 1, ArpgCommand::SetMovement { x: 1, z: 0 }),
+                90 => command_as(&mut game, 1, ArpgCommand::SetMovement { x: 0, z: 0 }),
+                _ => {}
+            }
+            let was_free = game.monsters[0].action.is_none();
+            game.advance_tick().unwrap();
+            assert_inside_room_and_clear_of_fixed_bodies(&game, 1, tick);
+            let snapshot = game.snapshot().unwrap();
+            let monster = &snapshot.monsters[0];
+            if monster.behavior == MonsterBehavior::Retreating {
+                retreats += 1;
+                assert_eq!(monster.target_player_id, Some(1));
+            }
+            if was_free && game.monsters[0].action.is_some() {
+                let distance_sq = xz_distance_sq(game.monsters[0].position, player_position(&game));
+                attacked_inside_range |= distance_sq < retreat * retreat;
+            }
+            shots += monster_shots(&snapshot, 1).len();
+        }
+        assert!(retreats > 5, "{retreats}");
+        assert!(
+            !attacked_inside_range,
+            "an archer with room to back off never fires up close"
+        );
+        assert!(shots >= 3, "{shots}");
+        let distance = isqrt(xz_distance_sq(
+            game.monsters[0].position,
+            player_position(&game),
+        ));
+        assert!(
+            (retreat..=reach).contains(&distance),
+            "ends in its band: {distance}"
+        );
+    }
+
+    #[test]
+    fn a_cornered_archer_shoots_from_where_it_stands() {
+        let (mut game, _, _) = strike_arena();
+        let room = game
+            .rooms
+            .iter()
+            .find(|r| r.id == STRIKE_ROOM)
+            .unwrap()
+            .clone();
+        let corner = Vec3i::new(room.max_x - 90, PLAYER_Y, room.max_z - 90);
+        place_monster_of(&mut game, 1, ARCHER, corner.x, corner.z);
+        place_player(&mut game, 1, corner.x - 180, corner.z - 180);
+        let retreat = archer().retreat_range.unwrap();
+        let fired_up_close = (0..120).any(|tick| {
+            game.advance_tick().unwrap();
+            assert_inside_room_and_clear_of_fixed_bodies(&game, 1, tick);
+            game.arrows
+                .iter()
+                .any(|arrow| arrow.source == StrikeSource::Monster(1))
+                && xz_distance_sq(game.monsters[0].position, player_position(&game))
+                    < retreat * retreat
+        });
+        assert!(fired_up_close);
+    }
+
+    fn ranged_scenario() -> ArpgGame {
+        let mut game = ArpgGame::new_scenario(ScenarioId::Ranged, 42).unwrap();
+        game.add_player(1).unwrap();
+        game
+    }
+
+    /// Advances until a monster shot is in flight; returns it.
+    fn advance_until_shot(game: &mut ArpgGame) -> ArrowSnapshot {
+        (0..120)
+            .find_map(|_| {
+                game.advance_tick().unwrap();
+                game.arrows
+                    .iter()
+                    .find(|arrow| matches!(arrow.source, StrikeSource::Monster(_)))
+                    .copied()
+            })
+            .expect("the archer shoots")
+    }
+
+    #[test]
+    fn archer_shots_fly_the_shared_arrow_path_and_hit_through_the_monster_strike() {
+        let mut game = ranged_scenario();
+        let id = game
+            .monsters
+            .iter()
+            .find(|m| m.definition().id == ARCHER)
+            .unwrap()
+            .id;
+        let shot = advance_until_shot(&mut game);
+        let definition = archer();
+        let projectile = definition.projectile.unwrap();
+        assert_eq!(shot.source, StrikeSource::Monster(id));
+        // Engaged and winding up at the end of tick 0, it launches as the active phase
+        // opens, from the archer toward the player (-x).
+        assert_eq!(shot.launched_at_tick, u64::from(definition.windup_ticks));
+        assert_eq!(shot.velocity, [-projectile.speed, 0, 0]);
+        assert_eq!(shot.damage, definition.damage);
+        assert_eq!(shot.ticks_remaining, projectile.lifetime_ticks);
+        let hit = (0..40)
+            .find_map(|_| {
+                game.advance_tick().unwrap();
+                monster_shots(&game.snapshot().unwrap(), id).pop()
+            })
+            .expect("the shot lands");
+        assert_eq!(hit.definition, "monster.bolt");
+        assert_eq!(hit.strike_tick, shot.launched_at_tick);
+        assert_eq!(hit.target, StrikeTarget::Player(1));
+        assert_eq!(
+            hit.result,
+            StrikeResult::Hit {
+                damage: definition.damage,
+                defeated: false
+            }
+        );
+        let snapshot = game.snapshot().unwrap();
+        assert_eq!(
+            snapshot.players[0].health,
+            BASE_MAX_HEALTH - definition.damage
+        );
+        assert!(snapshot.arrows.is_empty());
+    }
+
+    #[test]
+    fn a_raised_shield_blocks_an_archer_shot_and_walls_stop_it() {
+        let mut blocked = ranged_scenario();
+        let id = blocked
+            .monsters
+            .iter()
+            .find(|m| m.definition().id == ARCHER)
+            .unwrap()
+            .id;
+        command_as(&mut blocked, 1, ArpgCommand::SetGuard { raised: true });
+        advance_until_shot(&mut blocked);
+        let block = (0..40)
+            .find_map(|_| {
+                blocked.advance_tick().unwrap();
+                monster_shots(&blocked.snapshot().unwrap(), id).pop()
+            })
+            .unwrap();
+        let guard_cost = archer().strike.guard_cost;
+        assert_eq!(
+            block.result,
+            StrikeResult::Blocked {
+                guard_damage: guard_cost
+            }
+        );
+        let player = &blocked.snapshot().unwrap().players[0];
+        assert_eq!(player.health, BASE_MAX_HEALTH);
+        assert_eq!(player.guard_points, MAX_GUARD_POINTS - guard_cost);
+
+        // A pillar raised into the shot's path after release stops it.
+        let mut walled = ranged_scenario();
+        let shot = advance_until_shot(&mut walled);
+        let player = player_position(&walled);
+        place_blocker(
+            &mut walled,
+            0,
+            (shot.position[0] + player.x) / 2,
+            player.z,
+            Vec3i::new(20, 50, 80),
+        );
+        for _ in 0..40 {
+            walled.advance_tick().unwrap();
+            assert!(monster_shots(&walled.snapshot().unwrap(), id).is_empty());
+        }
+        assert!(walled.arrows.is_empty());
+        assert_eq!(
+            walled.snapshot().unwrap().players[0].health,
+            BASE_MAX_HEALTH
+        );
+    }
+
+    fn heavy_scenario() -> (ArpgGame, u32) {
+        let mut game = ArpgGame::new_scenario(ScenarioId::Heavy, 42).unwrap();
+        game.add_player(1).unwrap();
+        let id = game
+            .monsters
+            .iter()
+            .find(|m| m.definition().id == BRUISER)
+            .unwrap()
+            .id;
+        (game, id)
+    }
+
+    fn monster_by_id(snapshot: &ArpgSnapshot, id: u32) -> &MonsterSnapshot {
+        snapshot.monsters.iter().find(|m| m.id == id).unwrap()
+    }
+
+    #[test]
+    fn a_bruiser_commits_to_its_long_telegraph_and_breaks_a_raised_guard() {
+        let definition = bruiser();
+        let (mut game, id) = heavy_scenario();
+        command_as(&mut game, 1, ArpgCommand::SetGuard { raised: true });
+        game.advance_tick().unwrap();
+        let telegraph = game.snapshot().unwrap();
+        let start = monster_by_id(&telegraph, id).clone();
+        let action = start.action.unwrap();
+        assert_eq!(action.phase, ActionPhase::Windup);
+        assert_eq!(action.ticks_remaining, definition.windup_ticks);
+        assert_eq!(i64::from(action.range), definition.strike.reach);
+        assert_eq!(action.delivery, AttackDelivery::Strike);
+        // The whole wind-up holds still and lands nothing.
+        for _ in 1..definition.windup_ticks {
+            game.advance_tick().unwrap();
+            let snapshot = game.snapshot().unwrap();
+            let monster = monster_by_id(&snapshot, id);
+            assert_eq!(monster.position, start.position);
+            assert_eq!(monster.behavior, MonsterBehavior::Attacking);
+            assert!(snapshot.strike_events.is_empty());
+        }
+        game.advance_tick().unwrap();
+        let impact = game.snapshot().unwrap();
+        assert_eq!(
+            monster_shots(&impact, id)[0].result,
+            StrikeResult::GuardBroken
+        );
+        assert_eq!(impact.players[0].health, BASE_MAX_HEALTH);
+        assert_eq!(impact.players[0].guard_points, 0);
+    }
+
+    #[test]
+    fn stepping_out_of_a_bruiser_telegraph_makes_the_slam_miss() {
+        let definition = bruiser();
+        let (mut game, id) = heavy_scenario();
+        game.advance_tick().unwrap();
+        command_as(&mut game, 1, ArpgCommand::SetMovement { x: -1, z: 0 });
+        let mut events = Vec::new();
+        for _ in 0..definition.windup_ticks + 2 {
+            game.advance_tick().unwrap();
+            events.extend(monster_shots(&game.snapshot().unwrap(), id));
+        }
+        assert!(events.is_empty(), "{events:?}");
+        assert_eq!(game.snapshot().unwrap().players[0].health, BASE_MAX_HEALTH);
+    }
+
+    #[test]
+    fn interrupting_a_bruiser_windup_cancels_the_slam_and_it_winds_up_anew() {
+        let definition = bruiser();
+        let (mut game, id) = heavy_scenario();
+        game.advance_tick().unwrap();
+        let slam_tick = game.tick + u64::from(definition.windup_ticks);
+        for _ in 0..10 {
+            game.advance_tick().unwrap();
+        }
+        command_as(&mut game, 1, ArpgCommand::PrimaryAttack);
+        let mut interrupted = false;
+        let mut slams = Vec::new();
+        let mut rewound = None;
+        while game.tick < slam_tick + 40 {
+            game.advance_tick().unwrap();
+            let snapshot = game.snapshot().unwrap();
+            let monster = monster_by_id(&snapshot, id);
+            interrupted |= monster.behavior == MonsterBehavior::Staggered;
+            slams.extend(
+                monster_shots(&snapshot, id)
+                    .into_iter()
+                    .map(|e| e.strike_tick),
+            );
+            if interrupted
+                && rewound.is_none()
+                && let Some(action) = monster.action
+            {
+                rewound = Some(action);
+            }
+        }
+        assert!(interrupted);
+        assert!(
+            !slams.contains(&slam_tick),
+            "the cancelled slam never lands: {slams:?}"
+        );
+        let rewound = rewound.expect("it winds up again");
+        assert_eq!(rewound.phase, ActionPhase::Windup);
+        assert_eq!(rewound.ticks_remaining, definition.windup_ticks);
+        assert_eq!(rewound.target_player_id, 1);
+    }
+
+    /// Runs `game` and a JSON round trip of its save side by side for `ticks` ticks.
+    fn assert_save_continues_identically(game: &mut ArpgGame, ticks: u32) {
+        let json = serde_json::to_string(&game.save_state().unwrap()).unwrap();
+        let mut restored = ArpgGame::from_save_state(serde_json::from_str(&json).unwrap()).unwrap();
+        assert_eq!(restored.snapshot().unwrap(), game.snapshot().unwrap());
+        for tick in 0..ticks {
+            game.advance_tick().unwrap();
+            restored.advance_tick().unwrap();
+            assert_eq!(
+                restored.snapshot().unwrap(),
+                game.snapshot().unwrap(),
+                "tick {tick}"
+            );
+        }
+    }
+
+    #[test]
+    fn saves_mid_shot_mid_retreat_and_mid_telegraph_continue_like_the_uninterrupted_game() {
+        let mut flying = ranged_scenario();
+        advance_until_shot(&mut flying);
+        flying.advance_tick().unwrap();
+        assert_save_continues_identically(&mut flying, 150);
+
+        let mut retreating = ranged_scenario();
+        command_as(&mut retreating, 1, ArpgCommand::SetMovement { x: 1, z: 0 });
+        let found = (0..200).any(|_| {
+            retreating.advance_tick().unwrap();
+            retreating.monsters.iter().any(|m| m.retreating)
+        });
+        assert!(found, "the archer backs off from the advancing player");
+        assert_save_continues_identically(&mut retreating, 150);
+
+        let (mut telegraph, _) = heavy_scenario();
+        for _ in 0..20 {
+            telegraph.advance_tick().unwrap();
+        }
+        assert_save_continues_identically(&mut telegraph, 150);
+    }
+
+    #[test]
+    fn saved_shots_and_retreats_are_validated_against_the_monster_definition() {
+        let mut game = ranged_scenario();
+        advance_until_shot(&mut game);
+        game.advance_tick().unwrap();
+        let save = game.save_state().unwrap();
+        assert!(ArpgGame::from_save_state(save.clone()).is_ok());
+        let invalid = |mutate: &dyn Fn(&mut ArpgSaveState)| {
+            let mut save = save.clone();
+            mutate(&mut save);
+            ArpgGame::from_save_state(save).is_err()
+        };
+        assert!(invalid(&|save| save.arrows[0].damage += 1));
+        assert!(invalid(&|save| save.arrows[0].velocity[0] *= 2));
+        assert!(invalid(&|save| save.arrows[0].ticks_remaining -= 1));
+        assert!(invalid(
+            &|save| save.arrows[0].source = StrikeSource::Monster(1)
+        ));
+        assert!(invalid(
+            &|save| save.arrows[0].source = StrikeSource::Monster(99)
+        ));
+        assert!(invalid(&|save| {
+            let monster = save.monsters.iter_mut().find(|m| m.room_id == 3).unwrap();
+            monster.retreating = true;
+            monster.steered = false;
+        }));
+        assert!(invalid(&|save| {
+            let brute = save.monsters.iter_mut().find(|m| m.room_id == 2).unwrap();
+            brute.engagement = Engagement::Engaged {
+                target_player_id: 1,
+            };
+            brute.steered = true;
+            brute.retreating = true;
+        }));
+    }
+
+    #[test]
+    fn role_scenarios_replay_identically_and_show_their_role() {
+        let reproduction = |scenario, commands: Vec<(u64, ArpgCommand)>| Reproduction {
+            scenario,
+            seed: 42,
+            players: vec![1],
+            ticks: 240,
+            commands: commands
+                .into_iter()
+                .enumerate()
+                .map(|(index, (tick, command))| ReproductionCommand {
+                    tick,
+                    player_id: 1,
+                    sequence: u32::try_from(index + 1).unwrap(),
+                    command,
+                })
+                .collect(),
+        };
+        let ranged = reproduction(
+            ScenarioId::Ranged,
+            vec![
+                (60, ArpgCommand::SetMovement { x: 1, z: 0 }),
+                (100, ArpgCommand::SetMovement { x: 0, z: 0 }),
+            ],
+        );
+        let heavy = reproduction(ScenarioId::Heavy, vec![(20, ArpgCommand::PrimaryAttack)]);
+        for (case, expected) in [
+            (
+                &ranged,
+                [MonsterBehavior::Retreating, MonsterBehavior::Attacking],
+            ),
+            (
+                &heavy,
+                [MonsterBehavior::Staggered, MonsterBehavior::Attacking],
+            ),
+        ] {
+            let first = replay_reproduction(case).unwrap();
+            assert_eq!(first, replay_reproduction(case).unwrap());
+            let behaviours = first
+                .iter()
+                .flat_map(|snapshot| &snapshot.monsters)
+                .map(|monster| monster.behavior)
+                .collect::<Vec<_>>();
+            for behaviour in expected {
+                assert!(
+                    behaviours.contains(&behaviour),
+                    "{:?}: {behaviour:?}",
+                    case.scenario
+                );
+            }
+        }
+        let bolts = replay_reproduction(&ranged)
+            .unwrap()
+            .iter()
+            .flat_map(|snapshot| snapshot.strike_events.clone())
+            .filter(|event| event.definition == "monster.bolt")
+            .count();
+        assert!(bolts >= 2, "{bolts}");
     }
 }

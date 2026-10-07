@@ -6,7 +6,7 @@ use std::fmt;
 use arpg_core::{ArpgCommand, ArpgSnapshot};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-pub const PROTOCOL_VERSION: u16 = 16;
+pub const PROTOCOL_VERSION: u16 = 17;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProtocolError {
@@ -100,7 +100,7 @@ mod tests {
         let command = ArpgCommand::SetMovement { x: -1, z: 1 };
         let bytes = protocol.encode_command(&command).unwrap();
         let encoded = String::from_utf8(bytes.clone()).unwrap();
-        assert!(encoded.contains("\"protocolVersion\":16"));
+        assert!(encoded.contains("\"protocolVersion\":17"));
         assert_eq!(protocol.decode_command(&bytes).unwrap(), command);
 
         let guard = ArpgCommand::SetGuard { raised: true };
@@ -150,7 +150,7 @@ mod tests {
         let decoded = protocol.decode_snapshot(&bytes).unwrap();
         assert_eq!(decoded, snapshot);
         assert_eq!(decoded.run_seed, 0xCAFE_BABE);
-        assert_eq!(decoded.schema_version, 18);
+        assert_eq!(decoded.schema_version, 19);
     }
 
     #[test]

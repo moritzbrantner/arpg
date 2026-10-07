@@ -180,7 +180,15 @@ test("monsters publish their authoritative behaviour and engaged target", () => 
   const decoded = decodeSnapshot(encode({ ...payload, monsters: [monster] }));
   expect(decoded.monsters[0].behavior).toBe("pursuing");
   expect(decoded.monsters[0].targetPlayerId).toBe(1);
-  for (const behavior of ["returning", "searching", "holding", "idle", "dormant", "dead"])
+  for (const behavior of [
+    "retreating",
+    "returning",
+    "searching",
+    "holding",
+    "idle",
+    "dormant",
+    "dead",
+  ])
     expect(
       decodeSnapshot(
         encode({ ...payload, monsters: [{ ...monster, behavior, targetPlayerId: null }] }),
@@ -199,7 +207,7 @@ test("monsters publish their authoritative behaviour and engaged target", () => 
     expect(() => decodeSnapshot(encode({ ...payload, monsters: [candidate] }))).toThrow();
   expect(() =>
     decodeSnapshot(
-      JSON.stringify({ protocolVersion: 14, payload: { ...payload, monsters: [monster] } }),
+      JSON.stringify({ protocolVersion: 16, payload: { ...payload, monsters: [monster] } }),
     ),
   ).toThrow("Unsupported");
 });
@@ -212,6 +220,49 @@ test("monsters publish their content definition and maximum health", () => {
     "monster.skirmisher",
   ]);
   expect(decoded.monsters[1].maxHealth).toBe(60);
+});
+
+test("monster attacks publish how they land and shots share the arrow list", () => {
+  const shooting = {
+    ...monster,
+    definition: "monster.archer",
+    health: 50,
+    maxHealth: 50,
+    behavior: "attacking",
+    action: {
+      phase: "windup",
+      ticksRemaining: 24,
+      targetPlayerId: 1,
+      range: 640,
+      delivery: "projectile",
+    },
+  };
+  const shot = {
+    id: 3,
+    source: { kind: "monster", id: 1 },
+    launchedAtTick: 24,
+    position: [500, 50, 0],
+    velocity: [-20, 0, 0],
+    damage: 8,
+    ticksRemaining: 40,
+  };
+  const arrow = { ...shot, id: 4, source: { kind: "player", id: 1 } };
+  const decoded = decodeSnapshot(
+    encode({ ...payload, monsters: [shooting], arrows: [shot, arrow], scenario: "ranged" }),
+  );
+  expect(decoded.monsters[0].action.delivery).toBe("projectile");
+  expect(decoded.arrows.map(({ source }) => source.kind)).toEqual(["monster", "player"]);
+  expect(decodeSnapshot(encode({ ...payload, scenario: "heavy" })).scenario).toBe("heavy");
+  for (const candidate of [
+    { ...payload, monsters: [{ ...shooting, action: { ...shooting.action, delivery: "beam" } }] },
+    {
+      ...payload,
+      monsters: [{ ...shooting, action: { ...shooting.action, delivery: undefined } }],
+    },
+    { ...payload, arrows: [{ ...shot, source: undefined, ownerId: 1 }] },
+    { ...payload, arrows: [{ ...shot, source: { kind: "trap", id: 1 } }] },
+  ])
+    expect(() => decodeSnapshot(encode(candidate))).toThrow();
 });
 
 test("a content revision mismatch names both revisions; a match passes", () => {
