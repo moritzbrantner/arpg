@@ -581,6 +581,17 @@ test("restoring a save that held guard releases it for this client", () => {
   ]);
 });
 
+test("aim that could not be dispatched yet is sent once the session can play", () => {
+  const { runtime, games } = harness();
+  // No session yet: the command is dropped, so the direction must not count as sent.
+  runtime.setAim([700, 700]);
+  runtime.startLocal({ seed: 1 });
+  runtime.setAim([700, 700]);
+  expect(games[0].commands.map((command) => command.payload)).toEqual([
+    { type: "setAim", direction: [700, 700] },
+  ]);
+});
+
 test("aim intent is sent when it changes and cleared on focus loss and restore", () => {
   const { runtime, games } = harness();
   runtime.startLocal({ seed: 1 });

@@ -277,13 +277,14 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
     return next;
   };
 
-  const dispatch = (command: Record<string, unknown>) => {
-    if (disposed() || state.lifecycle === "idle" || state.lifecycle === "failed") return;
+  // Whether the command reached the authority (a connecting session drops it).
+  const dispatch = (command: Record<string, unknown>): boolean => {
+    if (disposed() || state.lifecycle === "idle" || state.lifecycle === "failed") return false;
     const playerId = state.playerId;
     try {
       const encoded = encodeCommand(command);
       if (state.mode === "guest") {
-        if (!peer || !playerId || !peer.hostParticipantId) return;
+        if (!peer || !playerId || !peer.hostParticipantId) return false;
         peer.sendReliable(peer.hostParticipantId, {
           kind: "command",
           sequence: ++sequence,
@@ -291,16 +292,18 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
         });
       } else if (state.mode === "dedicated") {
         const session = dedicated;
-        if (!session || !playerId) return;
+        if (!session || !playerId) return false;
         void session.sendCommand(++sequence, textEncoder.encode(encoded)).catch((error) => {
           if (dedicated === session) status(`Dedicated command failed: ${error}`);
         });
       } else {
-        if (!game || !playerId) return;
+        if (!game || !playerId) return false;
         game.applyCommand(playerId, ++sequence, encoded);
       }
+      return true;
     } catch (error) {
       status(String(error));
+      return false;
     }
   };
 
@@ -567,8 +570,10 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
         (aim && direction && aim[0] === direction[0] && aim[1] === direction[1])
       )
         return;
-      aim = direction ? [direction[0], direction[1]] : null;
-      dispatch({ type: "setAim", direction: aim });
+      const next: AimDirection = direction ? [direction[0], direction[1]] : null;
+      // Remember the direction only once it reached the authority, so a session that was
+      // still connecting receives the same direction on the next pointer event.
+      if (dispatch({ type: "setAim", direction: next })) aim = next;
     },
 
     // Locks the nearest target or cycles the lock; the authority owns eligibility and order.
