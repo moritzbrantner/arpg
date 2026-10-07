@@ -6,7 +6,7 @@ use std::fmt;
 use arpg_core::{ArpgCommand, ArpgSnapshot};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-pub const PROTOCOL_VERSION: u16 = 13;
+pub const PROTOCOL_VERSION: u16 = 14;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProtocolError {
@@ -100,7 +100,7 @@ mod tests {
         let command = ArpgCommand::SetMovement { x: -1, z: 1 };
         let bytes = protocol.encode_command(&command).unwrap();
         let encoded = String::from_utf8(bytes.clone()).unwrap();
-        assert!(encoded.contains("\"protocolVersion\":13"));
+        assert!(encoded.contains("\"protocolVersion\":14"));
         assert_eq!(protocol.decode_command(&bytes).unwrap(), command);
 
         let guard = ArpgCommand::SetGuard { raised: true };
@@ -123,6 +123,32 @@ mod tests {
         let decoded = protocol.decode_snapshot(&bytes).unwrap();
         assert_eq!(decoded, snapshot);
         assert_eq!(decoded.run_seed, 0xCAFE_BABE);
-        assert_eq!(decoded.schema_version, 15);
+        assert_eq!(decoded.schema_version, 16);
+    }
+
+    #[test]
+    fn monster_behaviour_and_target_are_published_in_camel_case() {
+        let mut game = ArpgGame::new_scenario(arpg_core::ScenarioId::Dummy, 42).unwrap();
+        game.add_player(1).unwrap();
+        for _ in 0..3 {
+            game.advance_tick().unwrap();
+        }
+        let snapshot = game.snapshot().unwrap();
+        let bytes = JsonProtocol.encode_snapshot(&snapshot).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let monsters = value["payload"]["monsters"].as_array().unwrap();
+        let chaser = monsters
+            .iter()
+            .find(|monster| monster["roomId"] == 2)
+            .unwrap();
+        assert_eq!(chaser["behavior"], "pursuing");
+        assert_eq!(chaser["targetPlayerId"], 1);
+        let dormant = monsters
+            .iter()
+            .find(|monster| monster["roomId"] == 3)
+            .unwrap();
+        assert_eq!(dormant["behavior"], "dormant");
+        assert!(dormant["targetPlayerId"].is_null());
+        assert_eq!(JsonProtocol.decode_snapshot(&bytes).unwrap(), snapshot);
     }
 }

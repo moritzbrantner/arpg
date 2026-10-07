@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{ActionKind, ComboInput};
 
-pub const CONTENT_FORMAT_VERSION: u16 = 2;
+pub const CONTENT_FORMAT_VERSION: u16 = 3;
 /// Touching monster and player bodies keep their centres up to √2 times their
 /// combined XZ half extents apart (85 units), and pursuit stops one navigation
 /// cell inside strike reach, so a monster strike must reach past both.
@@ -105,6 +105,16 @@ pub struct MonsterData {
     pub experience_reward: u32,
     /// Pursuit speed in world units per tick.
     pub pursuit_speed: u8,
+    /// A monster at rest engages a living player of its room within this distance.
+    pub aggro_range: u16,
+    /// An engaged monster farther than this from its post breaks off and returns.
+    pub leash_range: u16,
+    /// A competing player must be this much nearer than the current target to take over.
+    pub target_switch_margin: u16,
+    /// Ticks a monster that lost its target holds before it looks for another.
+    pub reacquire_ticks: u8,
+    /// Moving monsters steer apart from other monsters within this centre distance.
+    pub separation_range: u16,
 }
 
 /// One invariant violation, with the definition path that broke it.
@@ -162,6 +172,11 @@ pub(crate) struct MonsterDefinition {
     pub damage: u16,
     pub experience_reward: u32,
     pub pursuit_speed: i32,
+    pub aggro_range: i64,
+    pub leash_range: i64,
+    pub target_switch_margin: i64,
+    pub reacquire_ticks: u8,
+    pub separation_range: i64,
 }
 
 /// A validated bundle with resolved references.
@@ -430,6 +445,30 @@ impl ContentBundle {
                 if monster.pursuit_speed == 0 {
                     fail(path.clone(), "pursuit speed must be positive");
                 }
+                let reach = strike_by_id
+                    .get(monster.strike.as_str())
+                    .map_or(0, |strike| strike.reach);
+                if i64::from(monster.aggro_range) < reach {
+                    fail(
+                        path.clone(),
+                        "aggroRange must reach at least as far as the strike",
+                    );
+                }
+                if monster.leash_range <= monster.aggro_range {
+                    fail(path.clone(), "leashRange must exceed aggroRange");
+                }
+                if monster.target_switch_margin > monster.aggro_range {
+                    fail(
+                        path.clone(),
+                        "targetSwitchMargin must not exceed aggroRange",
+                    );
+                }
+                if monster.reacquire_ticks == 0 {
+                    fail(path.clone(), "reacquireTicks must be positive");
+                }
+                if monster.separation_range > 400 {
+                    fail(path.clone(), "separationRange must be within 0..=400");
+                }
                 if strike_by_id
                     .get(monster.strike.as_str())
                     .is_some_and(|strike| strike.reach < MIN_MONSTER_STRIKE_REACH)
@@ -451,6 +490,11 @@ impl ContentBundle {
                         damage: monster.damage,
                         experience_reward: monster.experience_reward,
                         pursuit_speed: i32::from(monster.pursuit_speed),
+                        aggro_range: i64::from(monster.aggro_range),
+                        leash_range: i64::from(monster.leash_range),
+                        target_switch_margin: i64::from(monster.target_switch_margin),
+                        reacquire_ticks: monster.reacquire_ticks,
+                        separation_range: i64::from(monster.separation_range),
                     }),
                     None => {
                         fail(path, "references an unknown strike");
@@ -607,6 +651,25 @@ mod tests {
                 .any(|error| error.contains("at least 105 units"))
         );
 
+        let tethered = errors(|bundle| {
+            let brute = &mut bundle.monsters[0];
+            brute.aggro_range = 100;
+            brute.leash_range = 100;
+            brute.reacquire_ticks = 0;
+            brute.target_switch_margin = 101;
+        });
+        for invariant in [
+            "leashRange must exceed aggroRange",
+            "reacquireTicks must be positive",
+            "aggroRange must reach at least as far as the strike",
+            "targetSwitchMargin must not exceed aggroRange",
+        ] {
+            assert!(
+                tethered.iter().any(|error| error.contains(invariant)),
+                "{invariant}: {tethered:?}"
+            );
+        }
+
         let long = errors(|bundle| bundle.strikes[0].id = "s".repeat(65));
         assert!(long.iter().any(|error| error.contains("1..=64 ASCII")));
 
@@ -623,8 +686,11 @@ mod tests {
     #[test]
     fn an_older_format_bundle_reports_its_version_before_missing_fields() {
         let previous = include_str!("../content/base.json")
-            .replace("\"formatVersion\": 2", "\"formatVersion\": 1")
-            .replace(", \"pursuitSpeed\": 4", "");
+            .replace("\"formatVersion\": 3", "\"formatVersion\": 2")
+            .replace(
+                ", \"aggroRange\": 1200, \"leashRange\": 1800, \"targetSwitchMargin\": 150, \"reacquireTicks\": 20, \"separationRange\": 120",
+                "",
+            );
 
         let errors = ContentBundle::from_json(&previous).unwrap_err();
 
@@ -633,7 +699,7 @@ mod tests {
         assert!(
             errors[0]
                 .message
-                .contains("unsupported content format version 1")
+                .contains("unsupported content format version 2")
         );
     }
 }

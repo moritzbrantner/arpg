@@ -31,14 +31,15 @@ pub const TICK_HZ: u16 = 60;
 const PHYSICS_TICKS_PER_GAME_TICK: i32 = 1;
 pub const MAX_PLAYERS: usize = 4;
 pub const WORLD_UNITS_PER_METER: i32 = 100;
-pub const SAVE_STATE_SCHEMA_VERSION: u16 = 8;
+pub const SAVE_STATE_SCHEMA_VERSION: u16 = 9;
 // 2: directional multi-target strike volumes and obstruction by fixed geometry.
 // 3: directional shield guard, block and guard break.
 // 4: post-block counterattack opportunity.
 // 5: authored light/heavy combo transitions.
 // 6: bow loadout, draw/release and authoritative arrows.
 // 7: reward chests, line-of-sight interaction and reasoned interaction results.
-pub const SAVE_STATE_RULES_VERSION: u16 = 7;
+// 8: enemy engagement: aggro, leash and return, target hysteresis, separation (#109).
+pub const SAVE_STATE_RULES_VERSION: u16 = 8;
 // physics-engine::World::step(1) integrates velocity as world units per simulation tick.
 // At 60 Hz and 100 world units per meter, 7 units/tick is 4.2 m/s rather than
 // the previous 260 units/tick (156 m/s).
@@ -210,6 +211,8 @@ const DOOR_EDGE_MARGIN: i32 = 250;
 const ROOM_SPAWN_MARGIN: i32 = 220;
 const PLAYER_SPAWN_OFFSET: i32 = 60;
 const ROOM_ACTIVATION_MARGIN: i32 = 30;
+/// A returning monster within this distance of its post is home (two navigation cells).
+const POST_ARRIVAL_DISTANCE: i64 = 2 * NAV_CELL_SIZE as i64;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GameError {
@@ -798,6 +801,54 @@ pub struct MonsterSnapshot {
     pub alive: bool,
     pub action: Option<MonsterActionSnapshot>,
     pub reaction: Option<MonsterReactionSnapshot>,
+    /// What the monster did in the tick that produced this snapshot (#109).
+    pub behavior: MonsterBehavior,
+    /// The player it is engaged with, while alive, engaged and in a running encounter.
+    pub target_player_id: Option<PlayerId>,
+}
+
+/// A monster's engagement with the players of its room (#109). Authoritative and saved;
+/// it changes only at the end of a tick in which the monster is free (alive, in a running
+/// encounter, neither staggered nor acting), or when a player's strike provokes it.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "mode",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum Engagement {
+    /// At rest: engages the nearest living player of its room within aggro range.
+    #[default]
+    Idle,
+    /// Pursues and attacks `target_player_id`, which it keeps unless a competitor is nearer
+    /// by more than the switch margin (or attackable while the target is not).
+    Engaged { target_player_id: PlayerId },
+    /// Lost its target (death, departure); holds for `ticks_remaining` free ticks, then
+    /// engages whoever is in aggro range or returns to its post.
+    Searching { ticks_remaining: u8 },
+    /// Broke off at the leash (or found nobody); walks back to its post and ignores
+    /// players until it arrives.
+    Returning,
+}
+
+/// Published per-tick monster behaviour, so presentation never infers it from motion.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MonsterBehavior {
+    Dead,
+    /// Its room's encounter is not running.
+    Dormant,
+    Staggered,
+    /// In an attack's wind-up, active or recovery phase (see `action`).
+    Attacking,
+    /// Engaged and moved toward its target this tick.
+    Pursuing,
+    /// Engaged but stood still this tick: about to strike, provoked this tick, or without
+    /// a route to a place it could strike from.
+    Holding,
+    Searching,
+    Returning,
+    Idle,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -957,6 +1008,13 @@ pub struct MonsterSaveState {
     pub health: u16,
     pub action: Option<MonsterActionSaveState>,
     pub stagger_ticks_remaining: u8,
+    /// Where the monster stood when its encounter first evaluated it; leash and return
+    /// measure from here.
+    pub post: Option<[i32; 3]>,
+    pub engagement: Engagement,
+    /// Whether steering moved the body in the tick the save was taken after: the one
+    /// input of the published behaviour that the rest of the state does not determine.
+    pub steered: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -1103,24 +1161,82 @@ struct MonsterState {
     health: u16,
     action: Option<MonsterActionState>,
     stagger_ticks_remaining: u8,
+    post: Option<Vec3i>,
+    engagement: Engagement,
+    /// Whether steering gave the body a velocity in the last tick.
+    steered: bool,
 }
 
-/// What a monster does this tick, derived from authoritative state (#65). Attacks keep
-/// their own phase machine (`MonsterActionState`); pursuit only moves between them.
+impl MonsterState {
+    fn new(id: u32, room_id: RoomId, position: Vec3i) -> Self {
+        Self {
+            id,
+            room_id,
+            position,
+            health: content().monster.health,
+            action: None,
+            stagger_ticks_remaining: 0,
+            post: None,
+            engagement: Engagement::Idle,
+            steered: false,
+        }
+    }
+
+    /// The published behaviour: a function of authoritative state and whether the body
+    /// was steered this tick.
+    fn derived_behavior(&self, active: bool, steered: bool) -> MonsterBehavior {
+        if self.health == 0 {
+            MonsterBehavior::Dead
+        } else if !active {
+            MonsterBehavior::Dormant
+        } else if self.stagger_ticks_remaining > 0 {
+            MonsterBehavior::Staggered
+        } else if self.action.is_some() {
+            MonsterBehavior::Attacking
+        } else {
+            match self.engagement {
+                Engagement::Idle => MonsterBehavior::Idle,
+                Engagement::Engaged { .. } if steered => MonsterBehavior::Pursuing,
+                Engagement::Engaged { .. } => MonsterBehavior::Holding,
+                Engagement::Searching { .. } => MonsterBehavior::Searching,
+                Engagement::Returning => MonsterBehavior::Returning,
+            }
+        }
+    }
+
+    /// A player's hit turns a resting or searching monster on its attacker. An engaged
+    /// monster keeps its target (hysteresis); a returning one ignores it until home.
+    fn provoke(&mut self, player_id: PlayerId) {
+        if matches!(
+            self.engagement,
+            Engagement::Idle | Engagement::Searching { .. }
+        ) {
+            self.engagement = Engagement::Engaged {
+                target_player_id: player_id,
+            };
+        }
+    }
+
+    fn engaged_target(&self) -> Option<PlayerId> {
+        match self.engagement {
+            Engagement::Engaged { target_player_id } => Some(target_player_id),
+            _ => None,
+        }
+    }
+}
+
+/// How a free monster's body moves this tick (#65, #109).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum MonsterBehavior {
-    Dead,
-    /// Its room's encounter is not running.
-    Dormant,
-    Staggered,
-    Attacking,
-    /// In strike reach of its target with a clear line; the attack starts this tick.
-    Engaging,
-    Pursuing {
+enum Steering {
+    Hold,
+    /// Toward a place within strike reach of the engaged target.
+    Pursue {
         target: Vec3i,
     },
-    /// No living player in its room.
-    Idle,
+    /// Back to the post.
+    Return {
+        post: Vec3i,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1504,6 +1620,9 @@ impl ArpgGame {
                         target_player_id: action.target_player_id,
                     }),
                     stagger_ticks_remaining: monster.stagger_ticks_remaining,
+                    post: monster.post.map(vec_to_array),
+                    engagement: monster.engagement,
+                    steered: monster.steered,
                 })
                 .collect(),
             ground_loot: self
@@ -1646,6 +1765,16 @@ impl ArpgGame {
             if monster.stagger_ticks_remaining > max_stagger {
                 return Err(GameError::new("saved monster stagger reaction is invalid"));
             }
+            let engagement_valid = match monster.engagement {
+                Engagement::Idle | Engagement::Returning => true,
+                Engagement::Engaged { target_player_id } => target_player_id != 0,
+                Engagement::Searching { ticks_remaining } => {
+                    (1..=content().monster.reacquire_ticks).contains(&ticks_remaining)
+                }
+            };
+            if !engagement_valid {
+                return Err(GameError::new("saved monster engagement is invalid"));
+            }
             if let Some(action) = monster.action {
                 let maximum_ticks = match action.phase {
                     ActionPhase::Windup => content().monster.windup_ticks,
@@ -1677,7 +1806,14 @@ impl ArpgGame {
                     && saved.position[1] == PLAYER_Y
                     && room.contains_xz_with_margin(array_to_vec(saved.position), 0)
             });
-            if !room_contains_monster {
+            let post_in_room = saved.post.is_none_or(|post| {
+                game.rooms.iter().any(|room| {
+                    room.id == saved.room_id
+                        && post[1] == PLAYER_Y
+                        && room.contains_xz_with_margin(array_to_vec(post), 0)
+                })
+            });
+            if !room_contains_monster || !post_in_room {
                 return Err(GameError::new("saved monster position is outside its room"));
             }
             monster.position = array_to_vec(saved.position);
@@ -1688,6 +1824,9 @@ impl ArpgGame {
                 target_player_id: action.target_player_id,
             });
             monster.stagger_ticks_remaining = saved.stagger_ticks_remaining;
+            monster.post = saved.post.map(array_to_vec);
+            monster.engagement = saved.engagement;
+            monster.steered = saved.steered;
         }
         if !monster_states.is_empty() {
             return Err(GameError::new("save contains unknown monster ids"));
@@ -2595,6 +2734,7 @@ impl ArpgGame {
                 if monster.health > 0 {
                     monster.stagger_ticks_remaining = stagger_ticks;
                     monster.action = None;
+                    monster.provoke(player_id);
                 }
                 let defeated = previous_health > 0 && monster.health == 0;
                 if defeated {
@@ -2801,6 +2941,7 @@ impl ArpgGame {
         arrow: ArrowSnapshot,
         monster_id: u32,
     ) -> Result<(), GameError> {
+        let shooter_present = self.players.contains_key(&arrow.owner_id);
         let monster = self
             .monsters
             .iter_mut()
@@ -2811,6 +2952,9 @@ impl ArpgGame {
         if monster.health > 0 {
             monster.stagger_ticks_remaining = ARROW_STAGGER_TICKS;
             monster.action = None;
+            if shooter_present {
+                monster.provoke(arrow.owner_id);
+            }
         }
         let defeated = monster.health == 0;
         let position = monster.position;
@@ -3003,10 +3147,10 @@ impl ArpgGame {
         }
 
         let targets = self.monster_targets();
-        let reach = content().monster.strike.reach;
+        let definition = content().monster;
         // End inside reach so the attack range check passes on arrival.
-        let goal_reach = reach - i64::from(NAV_CELL_SIZE);
-        let speed = content().monster.pursuit_speed;
+        let goal_reach = definition.strike.reach - i64::from(NAV_CELL_SIZE);
+        let speed = definition.pursuit_speed;
         #[cfg(test)]
         let mode = self.navigation_mode;
         #[cfg(not(test))]
@@ -3017,86 +3161,113 @@ impl ArpgGame {
         if mode != NavigationMode::Retained {
             self.navigation = NavigationCache::default();
         }
+        // Bodies other movers keep apart from, from positions before this tick's step.
+        let bodies = self
+            .monsters
+            .iter()
+            .filter(|monster| self.world.body(Self::monster_body_id(monster.id)).is_some())
+            .map(|monster| (monster.id, monster.room_id, monster.position))
+            .collect::<Vec<_>>();
         let mut cache = std::mem::take(&mut self.navigation);
         let mut work = NavigationWork::default();
         let mut obstacles_checked = false;
         let mut chased_fields = BTreeSet::new();
         let mut velocities = Vec::new();
-        for monster in &self.monsters {
+        for (index, monster) in self.monsters.iter().enumerate() {
             let body_id = Self::monster_body_id(monster.id);
             if self.world.body(body_id).is_none() {
                 continue;
             }
-            let velocity = match self.monster_behavior(monster, &active_rooms, &targets) {
-                MonsterBehavior::Pursuing { target } => {
-                    work.pursuit_ticks += 1;
-                    if !obstacles_checked {
-                        obstacles_checked = true;
-                        let obstacles = self.fixed_footprints();
-                        if obstacles != cache.obstacles {
-                            cache = NavigationCache {
-                                obstacles,
-                                ..NavigationCache::default()
-                            };
-                        }
-                    }
-                    let grid = cache.grids.entry(monster.room_id).or_insert_with(|| {
-                        work.grid_builds += 1;
-                        self.room_grid(monster.room_id, &cache.obstacles)
-                    });
-                    let start = (monster.position.x, monster.position.z);
-                    let target_xz = (target.x, target.z);
-                    let route = grid
-                        .target_cell(target_xz)
-                        .filter(|_| use_fields)
-                        .map(|cell| {
-                            let key = (monster.room_id, cell);
-                            chased_fields.insert(key);
-                            let field = cache.fields.entry(key).or_insert_with(|| {
-                                work.field_builds += 1;
-                                grid.target_field(cell, goal_reach, &cache.obstacles)
-                            });
-                            let mut field_work = FieldWork::default();
-                            let route = grid.field_route(field, start, &mut field_work);
-                            work.field_searches += field_work.searches;
-                            work.expansions += field_work.expansions;
-                            route
-                        });
-                    let path = match route {
-                        Some(FieldRoute::Path(path)) => Some(path),
-                        Some(FieldRoute::NoStartCell | FieldRoute::NoRoute) => None,
-                        // The exact plan finishes the approach from a strict goal and decides
-                        // what the field cannot.
-                        None | Some(FieldRoute::AtGoal | FieldRoute::Unknown) => {
-                            work.exact_plans += 1;
-                            // The attack's own line test: the physics ray against fixed bodies.
-                            let clear_line = |(x, z): (i32, i32)| {
-                                work.physics_queries += 1;
-                                !self
-                                    .strike_obstructed(Vec3i::new(x, monster.position.y, z), target)
-                                    .unwrap_or(true)
-                            };
-                            grid.find_path(
-                                start,
-                                target_xz,
-                                goal_reach,
-                                clear_line,
-                                &mut work.expansions,
-                            )
-                        }
-                    };
-                    path.map_or(Vec3i::ZERO, |path| {
-                        pursuit_velocity(grid, monster.position, &path, speed)
-                    })
+            let steering = self.steering(monster, &targets)?;
+            let (goal, goal_reach) = match steering {
+                Steering::Hold => {
+                    velocities.push((index, body_id, Vec3i::ZERO));
+                    continue;
                 }
-                _ => Vec3i::ZERO,
+                Steering::Pursue { target } => {
+                    work.pursuit_ticks += 1;
+                    (target, goal_reach)
+                }
+                // Any free cell whose centre is within one cell of the post.
+                Steering::Return { post } => (post, i64::from(NAV_CELL_SIZE)),
             };
-            velocities.push((body_id, velocity));
+            if !obstacles_checked {
+                obstacles_checked = true;
+                let obstacles = self.fixed_footprints();
+                if obstacles != cache.obstacles {
+                    cache = NavigationCache {
+                        obstacles,
+                        ..NavigationCache::default()
+                    };
+                }
+            }
+            let grid = cache.grids.entry(monster.room_id).or_insert_with(|| {
+                work.grid_builds += 1;
+                self.room_grid(monster.room_id, &cache.obstacles)
+            });
+            let start = (monster.position.x, monster.position.z);
+            let goal_xz = (goal.x, goal.z);
+            let path = if let Steering::Return { .. } = steering {
+                // Returning is rare and short-lived: the exact plan, without a line test.
+                work.exact_plans += 1;
+                grid.find_path(start, goal_xz, goal_reach, |_| true, &mut work.expansions)
+            } else {
+                let route = grid
+                    .target_cell(goal_xz)
+                    .filter(|_| use_fields)
+                    .map(|cell| {
+                        let key = (monster.room_id, cell);
+                        chased_fields.insert(key);
+                        let field = cache.fields.entry(key).or_insert_with(|| {
+                            work.field_builds += 1;
+                            grid.target_field(cell, goal_reach, &cache.obstacles)
+                        });
+                        let mut field_work = FieldWork::default();
+                        let route = grid.field_route(field, start, &mut field_work);
+                        work.field_searches += field_work.searches;
+                        work.expansions += field_work.expansions;
+                        route
+                    });
+                match route {
+                    Some(FieldRoute::Path(path)) => Some(path),
+                    Some(FieldRoute::NoStartCell | FieldRoute::NoRoute) => None,
+                    // The exact plan finishes the approach from a strict goal and decides
+                    // what the field cannot.
+                    None | Some(FieldRoute::AtGoal | FieldRoute::Unknown) => {
+                        work.exact_plans += 1;
+                        // The attack's own line test: the physics ray against fixed bodies.
+                        let clear_line = |(x, z): (i32, i32)| {
+                            work.physics_queries += 1;
+                            !self
+                                .strike_obstructed(Vec3i::new(x, monster.position.y, z), goal)
+                                .unwrap_or(true)
+                        };
+                        grid.find_path(start, goal_xz, goal_reach, clear_line, &mut work.expansions)
+                    }
+                }
+            };
+            let velocity = path
+                .and_then(|path| path_point(grid, monster.position, &path))
+                .map_or(Vec3i::ZERO, |point| {
+                    separated_velocity(
+                        monster,
+                        goal,
+                        point,
+                        speed,
+                        &bodies,
+                        definition.separation_range,
+                    )
+                });
+            velocities.push((index, body_id, velocity));
         }
         cache.fields.retain(|key, _| chased_fields.contains(key));
         self.navigation = cache;
         self.navigation_work.add(work);
-        for (body_id, velocity) in velocities {
+        for monster in &mut self.monsters {
+            monster.steered = false;
+        }
+        for (index, body_id, velocity) in velocities {
+            self.monsters[index].steered = velocity != Vec3i::ZERO;
             self.world
                 .set_velocity(body_id, velocity)
                 .map_err(physics_error)?;
@@ -3117,51 +3288,156 @@ impl ArpgGame {
             .collect()
     }
 
-    fn monster_behavior(
+    /// Where `target_player_id` stands if it is a living player in `monster`'s room.
+    fn target_in_room(
+        monster: &MonsterState,
+        targets: &[(PlayerId, RoomId, Vec3i)],
+        target_player_id: PlayerId,
+    ) -> Option<Vec3i> {
+        targets
+            .iter()
+            .find(|&&(player_id, room_id, _)| {
+                player_id == target_player_id && room_id == monster.room_id
+            })
+            .map(|&(_, _, position)| position)
+    }
+
+    /// Whether `monster` could start its attack on a player at `target` now: within strike
+    /// reach with a clear strike line.
+    fn can_strike(&self, monster: &MonsterState, target: Vec3i) -> Result<bool, GameError> {
+        let reach = content().monster.strike.reach;
+        Ok(xz_distance_sq(monster.position, target) <= reach * reach
+            && !self.strike_obstructed(monster.position, target)?)
+    }
+
+    /// How a monster with a body moves this tick, from its engagement (#109). Staggered,
+    /// attacking and dead monsters hold; an engaged monster that can already strike its
+    /// target holds for the attack, which starts at the end of the tick.
+    fn steering(
         &self,
         monster: &MonsterState,
-        active_rooms: &BTreeSet<RoomId>,
         targets: &[(PlayerId, RoomId, Vec3i)],
-    ) -> MonsterBehavior {
-        if monster.health == 0 {
-            return MonsterBehavior::Dead;
+    ) -> Result<Steering, GameError> {
+        if monster.health == 0 || monster.stagger_ticks_remaining > 0 || monster.action.is_some() {
+            return Ok(Steering::Hold);
         }
-        if !active_rooms.contains(&monster.room_id) {
-            return MonsterBehavior::Dormant;
+        Ok(match monster.engagement {
+            Engagement::Engaged { target_player_id } => {
+                match Self::target_in_room(monster, targets, target_player_id) {
+                    Some(target) if !self.can_strike(monster, target)? => {
+                        Steering::Pursue { target }
+                    }
+                    // In reach, or the target is gone (the end of the tick notices).
+                    _ => Steering::Hold,
+                }
+            }
+            Engagement::Returning => Steering::Return {
+                post: monster.post.unwrap_or(monster.position),
+            },
+            Engagement::Idle | Engagement::Searching { .. } => Steering::Hold,
+        })
+    }
+
+    /// The best player for `monster` to engage among `candidates`: one it can strike now
+    /// first, then the nearest, then the lowest id. Each entry is (id, position, squared
+    /// distance).
+    fn best_candidate(
+        &self,
+        monster: &MonsterState,
+        candidates: impl Iterator<Item = (PlayerId, Vec3i, i64)>,
+    ) -> Result<Option<(bool, i64, PlayerId)>, GameError> {
+        let mut best = None;
+        for (player_id, position, distance_sq) in candidates {
+            let key = (!self.can_strike(monster, position)?, distance_sq, player_id);
+            if best.is_none_or(|best| key < best) {
+                best = Some(key);
+            }
         }
-        if monster.stagger_ticks_remaining > 0 {
-            return MonsterBehavior::Staggered;
-        }
-        if monster.action.is_some() {
-            return MonsterBehavior::Attacking;
-        }
-        // Nearest living player in the room first, then id.
-        let mut candidates: Vec<(i64, PlayerId, Vec3i)> = targets
+        Ok(best.map(|(blocked, distance_sq, player_id)| (!blocked, distance_sq, player_id)))
+    }
+
+    /// The engagement policy (#109), evaluated at the end of every tick in which `monster`
+    /// is free. A pure function of authoritative state: positions, its post, its current
+    /// engagement and whether it was steered this tick.
+    fn next_engagement(
+        &self,
+        monster: &MonsterState,
+        post: Vec3i,
+        targets: &[(PlayerId, RoomId, Vec3i)],
+    ) -> Result<Engagement, GameError> {
+        let definition = content().monster;
+        let aggro_sq = definition.aggro_range * definition.aggro_range;
+        let in_aggro_range = targets
             .iter()
-            .filter(|(_, room_id, _)| *room_id == monster.room_id)
+            .filter(|&&(_, room_id, _)| room_id == monster.room_id)
             .map(|&(player_id, _, position)| {
-                let dx = i64::from(position.x - monster.position.x);
-                let dz = i64::from(position.z - monster.position.z);
-                (dx * dx + dz * dz, player_id, position)
+                (
+                    player_id,
+                    position,
+                    xz_distance_sq(monster.position, position),
+                )
             })
-            .collect();
-        candidates.sort_unstable_by_key(|&(distance_sq, player_id, _)| (distance_sq, player_id));
-        let Some(&(_, _, nearest)) = candidates.first() else {
-            return MonsterBehavior::Idle;
-        };
-        // The attack's eligibility first: any player in reach with a clear line is engaged
-        // where the monster stands, as the wind-up would choose; otherwise chase the nearest.
-        let reach = content().monster.strike.reach;
-        let attackable = candidates.iter().any(|&(distance_sq, _, position)| {
-            distance_sq <= reach * reach
-                && !self
-                    .strike_obstructed(monster.position, position)
-                    .unwrap_or(true)
-        });
-        if attackable {
-            MonsterBehavior::Engaging
-        } else {
-            MonsterBehavior::Pursuing { target: nearest }
+            .filter(|&(_, _, distance_sq)| distance_sq <= aggro_sq);
+        let from_post_sq = xz_distance_sq(monster.position, post);
+        let away_from_post = from_post_sq > POST_ARRIVAL_DISTANCE * POST_ARRIVAL_DISTANCE;
+        match monster.engagement {
+            Engagement::Engaged { target_player_id } => {
+                let Some(current) = Self::target_in_room(monster, targets, target_player_id) else {
+                    return Ok(Engagement::Searching {
+                        ticks_remaining: definition.reacquire_ticks,
+                    });
+                };
+                if from_post_sq > definition.leash_range * definition.leash_range {
+                    return Ok(Engagement::Returning);
+                }
+                let challenger = self.best_candidate(
+                    monster,
+                    in_aggro_range.filter(|&(player_id, _, _)| player_id != target_player_id),
+                )?;
+                let Some((challenger_strikes, challenger_sq, challenger_id)) = challenger else {
+                    return Ok(monster.engagement);
+                };
+                let current_strikes = self.can_strike(monster, current)?;
+                let takes_over = if challenger_strikes == current_strikes {
+                    isqrt(challenger_sq) + definition.target_switch_margin
+                        < isqrt(xz_distance_sq(monster.position, current))
+                } else {
+                    challenger_strikes
+                };
+                Ok(if takes_over {
+                    Engagement::Engaged {
+                        target_player_id: challenger_id,
+                    }
+                } else {
+                    monster.engagement
+                })
+            }
+            Engagement::Searching { ticks_remaining } if ticks_remaining > 1 => {
+                Ok(Engagement::Searching {
+                    ticks_remaining: ticks_remaining - 1,
+                })
+            }
+            // Still on the way home; a returner that could not move has no way back and
+            // rests where it stands.
+            Engagement::Returning if away_from_post => Ok(if monster.steered {
+                Engagement::Returning
+            } else {
+                Engagement::Idle
+            }),
+            Engagement::Idle | Engagement::Searching { .. } | Engagement::Returning => {
+                let found = self.best_candidate(monster, in_aggro_range)?;
+                Ok(match found {
+                    Some((_, _, player_id)) => Engagement::Engaged {
+                        target_player_id: player_id,
+                    },
+                    None if away_from_post
+                        && matches!(monster.engagement, Engagement::Searching { .. }) =>
+                    {
+                        Engagement::Returning
+                    }
+                    None => Engagement::Idle,
+                })
+            }
         }
     }
 
@@ -3201,6 +3477,8 @@ impl ArpgGame {
         )
     }
 
+    /// Advances monster attacks, then runs the engagement policy for every free monster and
+    /// starts an attack on its engaged target when it can strike, and publishes behaviour.
     fn advance_monster_actions(&mut self) -> Result<(), GameError> {
         let active_rooms = self
             .rooms
@@ -3209,75 +3487,55 @@ impl ArpgGame {
             .map(|room| room.id)
             .collect::<BTreeSet<_>>();
         let targets = self.monster_targets();
-        // Pairs with a clear strike line: an obstructed monster keeps pursuing instead of
-        // winding up into a wall.
-        let mut clear_lines = BTreeSet::new();
-        for monster in &self.monsters {
-            for &(player_id, room_id, position) in &targets {
-                if room_id == monster.room_id
-                    && !self.strike_obstructed(monster.position, position)?
-                {
-                    clear_lines.insert((monster.id, player_id));
-                }
-            }
-        }
+        let definition = content().monster;
 
         let mut hits = Vec::new();
-        for monster in &mut self.monsters {
-            if monster.health == 0
-                || monster.stagger_ticks_remaining > 0
-                || !active_rooms.contains(&monster.room_id)
-            {
+        for index in 0..self.monsters.len() {
+            let mut monster = self.monsters[index];
+            let active = active_rooms.contains(&monster.room_id);
+            if monster.health == 0 || monster.stagger_ticks_remaining > 0 || !active {
                 if monster.stagger_ticks_remaining > 0 || monster.health == 0 {
                     monster.action = None;
                 }
-                continue;
-            }
-
-            if let Some(mut action) = monster.action {
+            } else if let Some(mut action) = monster.action {
                 if action.ticks_remaining > 1 {
                     action.ticks_remaining -= 1;
                     monster.action = Some(action);
-                    continue;
+                } else {
+                    match action.phase {
+                        ActionPhase::Windup => {
+                            action.phase = ActionPhase::Active;
+                            action.ticks_remaining = definition.active_ticks;
+                            monster.action = Some(action);
+                            hits.push((monster.id, action.target_player_id));
+                        }
+                        ActionPhase::Active => {
+                            action.phase = ActionPhase::Recovery;
+                            action.ticks_remaining = definition.recovery_ticks;
+                            monster.action = Some(action);
+                        }
+                        ActionPhase::Recovery => {
+                            monster.action = None;
+                        }
+                    }
                 }
-                match action.phase {
-                    ActionPhase::Windup => {
-                        action.phase = ActionPhase::Active;
-                        action.ticks_remaining = content().monster.active_ticks;
-                        monster.action = Some(action);
-                        hits.push((monster.id, action.target_player_id));
-                    }
-                    ActionPhase::Active => {
-                        action.phase = ActionPhase::Recovery;
-                        action.ticks_remaining = content().monster.recovery_ticks;
-                        monster.action = Some(action);
-                    }
-                    ActionPhase::Recovery => {
-                        monster.action = None;
-                    }
+            } else {
+                let post = *monster.post.get_or_insert(monster.position);
+                monster.engagement = self.next_engagement(&monster, post, &targets)?;
+                // Only the engaged target is attacked; an obstructed one is pursued
+                // instead of winding up into a wall.
+                if let Some(target_player_id) = monster.engaged_target()
+                    && let Some(target) = Self::target_in_room(&monster, &targets, target_player_id)
+                    && self.can_strike(&monster, target)?
+                {
+                    monster.action = Some(MonsterActionState {
+                        phase: ActionPhase::Windup,
+                        ticks_remaining: definition.windup_ticks,
+                        target_player_id,
+                    });
                 }
-                continue;
             }
-
-            let range_sq = content().monster.strike.reach * content().monster.strike.reach;
-            let target = targets
-                .iter()
-                .filter(|(_, room_id, _)| *room_id == monster.room_id)
-                .filter(|(player_id, _, _)| clear_lines.contains(&(monster.id, *player_id)))
-                .filter_map(|&(player_id, _, position)| {
-                    let dx = i64::from(position.x - monster.position.x);
-                    let dz = i64::from(position.z - monster.position.z);
-                    let distance_sq = dx * dx + dz * dz;
-                    (distance_sq <= range_sq).then_some((distance_sq, player_id))
-                })
-                .min_by_key(|(distance_sq, player_id)| (*distance_sq, *player_id));
-            if let Some((_, target_player_id)) = target {
-                monster.action = Some(MonsterActionState {
-                    phase: ActionPhase::Windup,
-                    ticks_remaining: content().monster.windup_ticks,
-                    target_player_id,
-                });
-            }
+            self.monsters[index] = monster;
         }
 
         for (monster_id, target_player_id) in hits {
@@ -3662,6 +3920,12 @@ impl AuthoritativeGame for ArpgGame {
                 })
             })
             .collect::<Result<Vec<_>, GameError>>()?;
+        let active_rooms = self
+            .rooms
+            .iter()
+            .filter(|room| room.encounter_state == RoomEncounterState::Active)
+            .map(|room| room.id)
+            .collect::<BTreeSet<_>>();
         let mut static_colliders = self.static_colliders.clone();
         static_colliders.extend(self.doors.iter().filter(|door| door.locked).map(|door| {
             StaticColliderSnapshot {
@@ -3673,7 +3937,7 @@ impl AuthoritativeGame for ArpgGame {
         }));
 
         Ok(ArpgSnapshot {
-            schema_version: 15,
+            schema_version: 16,
             run_seed: self.run_seed,
             tick: self.tick,
             world_units_per_meter: WORLD_UNITS_PER_METER,
@@ -3696,6 +3960,11 @@ impl AuthoritativeGame for ArpgGame {
                             ticks_remaining: monster.stagger_ticks_remaining,
                         },
                     ),
+                    behavior: monster
+                        .derived_behavior(active_rooms.contains(&monster.room_id), monster.steered),
+                    target_player_id: monster
+                        .engaged_target()
+                        .filter(|_| monster.health > 0 && active_rooms.contains(&monster.room_id)),
                 })
                 .collect(),
             ground_loot: self
@@ -3933,23 +4202,20 @@ fn generated_monsters(rooms: &[RoomSnapshot], rng: &mut DungeonRng) -> Vec<Monst
         .iter()
         .filter(|room| room.kind == RoomKind::Combat)
         .enumerate()
-        .map(|(index, room)| MonsterState {
-            id: u32::try_from(index + 1).expect("monster id must fit u32"),
-            room_id: room.id,
-            position: Vec3i::new(
-                rng.range_i32(
-                    room.min_x + ROOM_SPAWN_MARGIN,
-                    room.max_x - ROOM_SPAWN_MARGIN,
-                ),
-                PLAYER_Y,
-                rng.range_i32(
-                    room.min_z + ROOM_SPAWN_MARGIN,
-                    room.max_z - ROOM_SPAWN_MARGIN,
-                ),
-            ),
-            health: content().monster.health,
-            action: None,
-            stagger_ticks_remaining: 0,
+        .map(|(index, room)| {
+            let x = rng.range_i32(
+                room.min_x + ROOM_SPAWN_MARGIN,
+                room.max_x - ROOM_SPAWN_MARGIN,
+            );
+            let z = rng.range_i32(
+                room.min_z + ROOM_SPAWN_MARGIN,
+                room.max_z - ROOM_SPAWN_MARGIN,
+            );
+            MonsterState::new(
+                u32::try_from(index + 1).expect("monster id must fit u32"),
+                room.id,
+                Vec3i::new(x, PLAYER_Y, z),
+            )
         })
         .collect()
 }
@@ -4060,25 +4326,36 @@ const fn array_to_vec(value: [i32; 3]) -> Vec3i {
     Vec3i::new(value[0], value[1], value[2])
 }
 
-/// Velocity toward the farthest path point in direct line, at most `speed` per tick.
-fn pursuit_velocity(grid: &RoomGrid, position: Vec3i, path: &[(i32, i32)], speed: i32) -> Vec3i {
+/// The farthest path point in direct line from `position`.
+fn path_point(grid: &RoomGrid, position: Vec3i, path: &[(i32, i32)]) -> Option<(i32, i32)> {
     let from = (position.x, position.z);
-    let Some(&(x, z)) = path
-        .iter()
+    path.iter()
         .rev()
         .find(|&&point| grid.segment_is_free(from, point))
         // Pressed against an obstacle: first step out to the path's free start cell.
         .or_else(|| path.first())
-    else {
-        return Vec3i::ZERO;
-    };
-    let dx = i64::from(x - position.x);
-    let dz = i64::from(z - position.z);
+        .copied()
+}
+
+/// Velocity toward the farthest path point in direct line, at most `speed` per tick.
+#[cfg(test)]
+fn pursuit_velocity(grid: &RoomGrid, position: Vec3i, path: &[(i32, i32)], speed: i32) -> Vec3i {
+    path_point(grid, position, path).map_or(Vec3i::ZERO, |(x, z)| {
+        scaled_velocity(
+            i64::from(x - position.x),
+            i64::from(z - position.z),
+            i64::from(speed),
+        )
+    })
+}
+
+/// A velocity along (dx, dz) of at most `speed` and at most the vector's own length.
+fn scaled_velocity(dx: i64, dz: i64, speed: i64) -> Vec3i {
     let length = isqrt(dx * dx + dz * dz);
     if length == 0 {
         return Vec3i::ZERO;
     }
-    let speed = i64::from(speed).min(length);
+    let speed = speed.min(length);
     let component = |delta: i64| i32::try_from(delta * speed / length).unwrap_or(0);
     let velocity = Vec3i::new(component(dx), 0, component(dz));
     if velocity != Vec3i::ZERO {
@@ -4091,6 +4368,126 @@ fn pursuit_velocity(grid: &RoomGrid, position: Vec3i, path: &[(i32, i32)], speed
     } else {
         Vec3i::new(0, 0, dz.signum() as i32)
     }
+}
+
+/// Fixed-point unit for steering directions.
+const STEERING_UNIT: i64 = 1_024;
+/// How much harder a blocker ahead pushes sideways than straight away.
+const SIDESTEP_WEIGHT: i64 = 3;
+
+/// Local separation (#109): the velocity toward `point`, bent away from other monster
+/// bodies of the same room within `range`. Each neighbour pushes straight away with a
+/// strength that grows linearly as the gap closes. A neighbour ahead of the mover also
+/// pushes it sideways, `SIDESTEP_WEIGHT` times as hard, so a pursuer walks around a
+/// monster in its way instead of queueing behind it. All sidesteps of one mover go to the
+/// same side: the side with fewer monsters nearer to `goal` than the mover (around the
+/// crowd toward free space), else the side the neighbours' pushes lean to, else the side
+/// of the first blocker it is on, else by id. Physics keeps bodies from overlapping;
+/// separation keeps pursuers from stacking up on one approach. With no neighbour in range
+/// this is exactly the plain pursuit velocity.
+fn separated_velocity(
+    monster: &MonsterState,
+    goal: Vec3i,
+    point: (i32, i32),
+    speed: i32,
+    bodies: &[(u32, RoomId, Vec3i)],
+    range: i64,
+) -> Vec3i {
+    let position = monster.position;
+    let to_point = (
+        i64::from(point.0 - position.x),
+        i64::from(point.1 - position.z),
+    );
+    // (id, unit vector away from the neighbour, strength), all in steering units.
+    let neighbours = bodies
+        .iter()
+        .filter(|&&(id, room_id, other)| {
+            id != monster.id
+                && room_id == monster.room_id
+                && xz_distance_sq(position, other) < range * range
+        })
+        .map(|&(other_id, _, other)| {
+            let away = (
+                i64::from(position.x - other.x),
+                i64::from(position.z - other.z),
+            );
+            let distance = isqrt(away.0 * away.0 + away.1 * away.1);
+            let away = if distance == 0 {
+                // Coincident centres: the lower id steps toward -x.
+                let sign = if monster.id < other_id { -1 } else { 1 };
+                (sign * STEERING_UNIT, 0)
+            } else {
+                (
+                    away.0 * STEERING_UNIT / distance,
+                    away.1 * STEERING_UNIT / distance,
+                )
+            };
+            (other_id, away, (range - distance) * STEERING_UNIT / range)
+        })
+        .collect::<Vec<_>>();
+    if neighbours.is_empty() {
+        return scaled_velocity(to_point.0, to_point.1, i64::from(speed));
+    }
+    let length = isqrt(to_point.0 * to_point.0 + to_point.1 * to_point.1);
+    let direction = if length == 0 {
+        (0, 0)
+    } else {
+        (
+            to_point.0 * STEERING_UNIT / length,
+            to_point.1 * STEERING_UNIT / length,
+        )
+    };
+    let left = (-direction.1, direction.0);
+    let lateral = |away: (i64, i64)| left.0 * away.0 + left.1 * away.1;
+    let lean = neighbours
+        .iter()
+        .map(|&(_, away, strength)| lateral(away) * strength)
+        .sum::<i64>();
+    let blockers = neighbours
+        .iter()
+        .filter(|&&(_, away, _)| direction.0 * away.0 + direction.1 * away.1 < 0)
+        .collect::<Vec<_>>();
+    // Monsters nearer the goal on the mover's left minus those on its right.
+    let goal_distance_sq = xz_distance_sq(position, goal);
+    let crowding = bodies
+        .iter()
+        .filter(|&&(id, room_id, other)| {
+            id != monster.id
+                && room_id == monster.room_id
+                && xz_distance_sq(other, goal) < goal_distance_sq
+        })
+        .map(|&(_, _, other)| {
+            -lateral((
+                i64::from(position.x - other.x),
+                i64::from(position.z - other.z),
+            ))
+            .signum()
+        })
+        .sum::<i64>();
+    let side = match (-crowding.signum(), lean.signum(), blockers.first()) {
+        (0, 0, Some(&&(other_id, away, _))) => match lateral(away).signum() {
+            0 if monster.id < other_id => 1,
+            0 => -1,
+            sign => sign,
+        },
+        (0, sign, _) | (sign, _, _) => sign,
+    };
+    let mut steer = direction;
+    for &(_, away, strength) in &neighbours {
+        steer.0 += away.0 * strength / STEERING_UNIT;
+        steer.1 += away.1 * strength / STEERING_UNIT;
+    }
+    for &&(_, _, strength) in &blockers {
+        steer.0 += SIDESTEP_WEIGHT * side * left.0 * strength / STEERING_UNIT;
+        steer.1 += SIDESTEP_WEIGHT * side * left.1 * strength / STEERING_UNIT;
+    }
+    scaled_velocity(steer.0, steer.1, i64::from(speed))
+}
+
+fn xz_distance_sq(a: Vec3i, b: Vec3i) -> i64 {
+    let dx = i64::from(a.x - b.x);
+    let dz = i64::from(a.z - b.z);
+    dx * dx + dz * dz
 }
 
 #[cfg(test)]
@@ -4838,14 +5235,11 @@ mod tests {
     }
 
     fn place_monster(game: &mut ArpgGame, id: u32, x: i32, z: i32) {
-        game.monsters.push(MonsterState {
+        game.monsters.push(MonsterState::new(
             id,
-            room_id: STRIKE_ROOM,
-            position: Vec3i::new(x, PLAYER_Y, z),
-            health: 100,
-            action: None,
-            stagger_ticks_remaining: 0,
-        });
+            STRIKE_ROOM,
+            Vec3i::new(x, PLAYER_Y, z),
+        ));
     }
 
     fn place_blocker(game: &mut ArpgGame, index: u64, x: i32, z: i32, half_extents: Vec3i) {
@@ -7383,7 +7777,7 @@ mod tests {
         game.add_player(1).unwrap();
         let snapshot = game.snapshot().unwrap();
         let generated = generate_dungeon(snapshot.run_seed);
-        assert_eq!(snapshot.schema_version, 15);
+        assert_eq!(snapshot.schema_version, 16);
         assert_eq!(snapshot.run_seed, 0xDEAD_BEEF);
         assert_eq!(game.run_seed(), snapshot.run_seed);
         assert_eq!(snapshot.rooms, generated.rooms);
@@ -7788,12 +8182,6 @@ mod tests {
             .position()
     }
 
-    fn xz_distance_sq(a: Vec3i, b: Vec3i) -> i64 {
-        let dx = i64::from(a.x - b.x);
-        let dz = i64::from(a.z - b.z);
-        dx * dx + dz * dz
-    }
-
     fn overlaps_xz(center: Vec3i, half: Vec3i, other: Vec3i, other_half: Vec3i) -> bool {
         (center.x - other.x).abs() < half.x + other_half.x
             && (center.z - other.z).abs() < half.z + other_half.z
@@ -8014,6 +8402,474 @@ mod tests {
         assert!(game.world.body(ArpgGame::monster_body_id(2)).is_some());
     }
 
+    fn monster_state(game: &ArpgGame, id: u32) -> MonsterState {
+        *game
+            .monsters
+            .iter()
+            .find(|monster| monster.id == id)
+            .unwrap()
+    }
+
+    /// The published behaviour and engaged target of monster `id`.
+    fn published(game: &ArpgGame, id: u32) -> (MonsterBehavior, Option<PlayerId>) {
+        let snapshot = game.snapshot().unwrap();
+        let monster = snapshot
+            .monsters
+            .iter()
+            .find(|monster| monster.id == id)
+            .unwrap();
+        (monster.behavior, monster.target_player_id)
+    }
+
+    fn place_player(game: &mut ArpgGame, id: PlayerId, x: i32, z: i32) {
+        game.world
+            .set_position(ArpgGame::player_body_id(id), Vec3i::new(x, PLAYER_Y, z))
+            .unwrap();
+    }
+
+    fn add_player_at(game: &mut ArpgGame, id: PlayerId, x: i32, z: i32) {
+        game.add_player(id).unwrap();
+        place_player(game, id, x, z);
+    }
+
+    fn next_sequence(game: &ArpgGame, id: PlayerId) -> u32 {
+        game.last_sequences[&id] + 1
+    }
+
+    fn command_as(game: &mut ArpgGame, id: PlayerId, command: ArpgCommand) {
+        let sequence = next_sequence(game, id);
+        game.apply_command(PlayerCommand::new(id, sequence, command).unwrap())
+            .unwrap();
+    }
+
+    #[test]
+    fn two_competing_targets_switch_only_beyond_the_hysteresis_margin() {
+        let (mut game, x, z) = strike_arena();
+        place_monster(&mut game, 1, x + 600, z);
+        game.advance_tick().unwrap();
+        // It notices its target at the end of a tick and sets out in the next.
+        assert_eq!(published(&game, 1), (MonsterBehavior::Holding, Some(1)));
+        game.advance_tick().unwrap();
+        assert_eq!(published(&game, 1), (MonsterBehavior::Pursuing, Some(1)));
+
+        // A second player arrives nearer than the target, but by less than the margin.
+        let margin = content().monster.target_switch_margin;
+        let monster = monster_position(&game, 1);
+        let current = isqrt(xz_distance_sq(monster, player_position(&game)));
+        let offset = i32::try_from(current - margin + 30).unwrap();
+        add_player_at(&mut game, 2, monster.x, monster.z + offset);
+        for _ in 0..20 {
+            game.advance_tick().unwrap();
+            assert_eq!(published(&game, 1), (MonsterBehavior::Pursuing, Some(1)));
+        }
+
+        // Now clearly nearer: it takes over.
+        let monster = monster_position(&game, 1);
+        let current = isqrt(xz_distance_sq(monster, player_position(&game)));
+        let offset = i32::try_from(current - margin - 30).unwrap();
+        place_player(&mut game, 2, monster.x, monster.z + offset);
+        game.advance_tick().unwrap();
+        assert_eq!(monster_state(&game, 1).engaged_target(), Some(2));
+
+        // Player 1 coming back to an equal distance does not take it back.
+        let monster = monster_position(&game, 1);
+        place_player(&mut game, 1, monster.x, monster.z - offset);
+        for _ in 0..10 {
+            game.advance_tick().unwrap();
+            assert_eq!(monster_state(&game, 1).engaged_target(), Some(2));
+        }
+
+        // A competitor it can strike at once beats a target it cannot.
+        let monster = monster_position(&game, 1);
+        place_player(&mut game, 1, monster.x - 120, monster.z);
+        game.advance_tick().unwrap();
+        let state = monster_state(&game, 1);
+        assert_eq!(state.engaged_target(), Some(1));
+        assert_eq!(state.action.unwrap().target_player_id, 1);
+        assert_eq!(published(&game, 1).0, MonsterBehavior::Attacking);
+    }
+
+    #[test]
+    fn a_crowd_surrounds_its_target_without_overlapping_bodies() {
+        let (mut game, x, z) = strike_arena();
+        // The target outlasts the test; only the approach matters here.
+        game.players.get_mut(&1).unwrap().health = u16::MAX;
+        let mut id = 0;
+        for column in 0..4 {
+            for row in 0..2 {
+                id += 1;
+                place_monster(&mut game, id, x + 450 + column * 70, z - 35 + row * 70);
+            }
+        }
+        let mut attackers = BTreeSet::new();
+        for _ in 0..360 {
+            game.advance_tick().unwrap();
+            let player = player_position(&game);
+            for (index, monster) in game.monsters.iter().enumerate() {
+                for other in &game.monsters[index + 1..] {
+                    assert!(
+                        !overlaps_xz(
+                            monster.position,
+                            MONSTER_BODY_HALF_EXTENTS,
+                            other.position,
+                            MONSTER_BODY_HALF_EXTENTS
+                        ),
+                        "tick {}: monsters {} and {} overlap",
+                        game.tick,
+                        monster.id,
+                        other.id
+                    );
+                }
+                assert!(!overlaps_xz(
+                    monster.position,
+                    MONSTER_BODY_HALF_EXTENTS,
+                    player,
+                    PLAYER_HALF_EXTENTS
+                ));
+                if monster.action.is_some() {
+                    attackers.insert(monster.id);
+                }
+            }
+        }
+        // Separation spreads them around the target instead of queueing on one side.
+        assert!(attackers.len() >= 6, "attackers {attackers:?}");
+    }
+
+    #[test]
+    fn a_lost_target_is_searched_for_then_another_is_reacquired() {
+        let (mut game, x, z) = strike_arena();
+        add_player_at(&mut game, 2, x - 400, z + 300);
+        place_monster(&mut game, 1, x + 500, z);
+        for _ in 0..3 {
+            game.advance_tick().unwrap();
+        }
+        assert_eq!(published(&game, 1), (MonsterBehavior::Pursuing, Some(1)));
+
+        // The target dies: the monster stops, searches, then engages the other player.
+        game.players.get_mut(&1).unwrap().health = 0;
+        game.advance_tick().unwrap();
+        let held_at = monster_position(&game, 1);
+        let reacquire = content().monster.reacquire_ticks;
+        assert_eq!(
+            monster_state(&game, 1).engagement,
+            Engagement::Searching {
+                ticks_remaining: reacquire
+            }
+        );
+        for _ in 1..reacquire {
+            game.advance_tick().unwrap();
+            assert_eq!(published(&game, 1), (MonsterBehavior::Searching, None));
+            assert_eq!(monster_position(&game, 1), held_at);
+        }
+        game.advance_tick().unwrap();
+        assert_eq!(published(&game, 1), (MonsterBehavior::Holding, Some(2)));
+        game.advance_tick().unwrap();
+        assert_eq!(published(&game, 1), (MonsterBehavior::Pursuing, Some(2)));
+
+        // Its new target disconnects mid-chase and rejoins during the search.
+        assert!(game.remove_player(2));
+        game.advance_tick().unwrap();
+        assert_eq!(published(&game, 1), (MonsterBehavior::Searching, None));
+        let monster = monster_position(&game, 1);
+        add_player_at(&mut game, 2, monster.x - 500, monster.z);
+        for _ in 1..reacquire {
+            game.advance_tick().unwrap();
+            assert_eq!(published(&game, 1).0, MonsterBehavior::Searching);
+        }
+        game.advance_tick().unwrap();
+        assert_eq!(published(&game, 1), (MonsterBehavior::Holding, Some(2)));
+        assert!(ticks_until_windup(&mut game, 1, 400).is_some());
+        assert_eq!(monster_state(&game, 1).action.unwrap().target_player_id, 2);
+    }
+
+    #[test]
+    fn a_struck_monster_turns_on_its_attacker_unless_already_engaged() {
+        let (mut game, x, z) = strike_arena();
+        place_monster(&mut game, 1, x + 200, z);
+        game.monsters[0].engagement = Engagement::Searching { ticks_remaining: 5 };
+        // Facing +x: the light swing (reach 220) hits the monster at 200.
+        run_action(&mut game, 1, 1, ArpgCommand::PrimaryAttack);
+        let state = monster_state(&game, 1);
+        assert!(state.health < content().monster.health);
+        assert_eq!(state.engaged_target(), Some(1));
+
+        let (mut game, x, z) = strike_arena();
+        // Player 1, the striker, is not nearer than the target by the switch margin.
+        add_player_at(&mut game, 2, x + 200, z + 300);
+        place_monster(&mut game, 1, x + 200, z);
+        game.monsters[0].engagement = Engagement::Engaged {
+            target_player_id: 2,
+        };
+        run_action(&mut game, 1, 1, ArpgCommand::PrimaryAttack);
+        assert_eq!(monster_state(&game, 1).engaged_target(), Some(2));
+    }
+
+    #[test]
+    fn an_interrupted_windup_resumes_pursuit_of_the_same_target() {
+        let (mut game, x, z) = strike_arena();
+        // Player 2 stands in its own sword reach but outside the claw's, facing the monster.
+        add_player_at(&mut game, 2, x + 150, z + 200);
+        command_as(&mut game, 2, ArpgCommand::SetMovement { x: 0, z: -1 });
+        command_as(&mut game, 2, ArpgCommand::SetMovement { x: 0, z: 0 });
+        place_monster(&mut game, 1, x + 150, z);
+        game.advance_tick().unwrap();
+        let windup = monster_state(&game, 1).action.unwrap();
+        assert_eq!(
+            (windup.phase, windup.target_player_id),
+            (ActionPhase::Windup, 1)
+        );
+
+        // Player 1 backs off while player 2 interrupts the wind-up.
+        command_as(&mut game, 1, ArpgCommand::SetMovement { x: -1, z: 0 });
+        command_as(&mut game, 2, ArpgCommand::PrimaryAttack);
+        let staggered = (1..=10)
+            .find(|_| {
+                game.advance_tick().unwrap();
+                monster_state(&game, 1).stagger_ticks_remaining > 0
+            })
+            .expect("the strike lands before the claw");
+        assert!(staggered < usize::from(content().monster.windup_ticks));
+        assert_eq!(published(&game, 1), (MonsterBehavior::Staggered, Some(1)));
+        let held_at = monster_position(&game, 1);
+        while monster_state(&game, 1).stagger_ticks_remaining > 0 {
+            assert_eq!(monster_position(&game, 1), held_at);
+            game.advance_tick().unwrap();
+        }
+
+        // Free again, it chases the same target: no search, no switch to player 2.
+        let resumed = (1..=3)
+            .find(|_| {
+                game.advance_tick().unwrap();
+                published(&game, 1) == (MonsterBehavior::Pursuing, Some(1))
+            })
+            .expect("pursuit resumes");
+        assert!(resumed <= 2);
+        command_as(&mut game, 1, ArpgCommand::SetMovement { x: 0, z: 0 });
+        assert!(ticks_until_windup(&mut game, 1, 400).is_some());
+        assert_eq!(monster_state(&game, 1).action.unwrap().target_player_id, 1);
+    }
+
+    #[test]
+    fn a_leashed_monster_returns_to_its_post_ignoring_players_until_home() {
+        let (mut game, x, _) = strike_arena();
+        let room = game
+            .rooms
+            .iter()
+            .find(|room| room.id == STRIKE_ROOM)
+            .unwrap()
+            .clone();
+        let post = Vec3i::new(room.min_x + 150, PLAYER_Y, room.min_z + 150);
+        let start = Vec3i::new(room.max_x - 150, PLAYER_Y, room.max_z - 150);
+        let leash = content().monster.leash_range;
+        assert!(xz_distance_sq(post, start) > leash * leash);
+        place_monster(&mut game, 1, start.x, start.z);
+        game.monsters[0].post = Some(post);
+        game.monsters[0].engagement = Engagement::Engaged {
+            target_player_id: 1,
+        };
+        // Beyond the leash, it breaks off at the end of its first tick.
+        game.advance_tick().unwrap();
+        assert_eq!(published(&game, 1), (MonsterBehavior::Returning, None));
+
+        // On the way home it walks past a player in reach without attacking.
+        for _ in 0..40 {
+            let monster = monster_position(&game, 1);
+            place_player(&mut game, 1, monster.x + 100, monster.z + 100);
+            let before = xz_distance_sq(monster_position(&game, 1), post);
+            game.advance_tick().unwrap();
+            assert_eq!(published(&game, 1), (MonsterBehavior::Returning, None));
+            assert!(monster_state(&game, 1).action.is_none());
+            assert!(xz_distance_sq(monster_position(&game, 1), post) < before);
+        }
+
+        // Home again with nobody in aggro range, it rests; then re-engages a player.
+        place_player(&mut game, 1, x + 600, room.max_z - 150);
+        let aggro = content().monster.aggro_range;
+        assert!(xz_distance_sq(post, player_position(&game)) > aggro * aggro);
+        let home = (1..=600)
+            .find(|_| {
+                game.advance_tick().unwrap();
+                published(&game, 1).0 == MonsterBehavior::Idle
+            })
+            .expect("it gets home");
+        assert!(home > 1);
+        assert!(
+            xz_distance_sq(monster_position(&game, 1), post)
+                <= POST_ARRIVAL_DISTANCE * POST_ARRIVAL_DISTANCE
+        );
+        game.advance_tick().unwrap();
+        assert_eq!(published(&game, 1).0, MonsterBehavior::Idle);
+        place_player(&mut game, 1, post.x + 400, post.z + 300);
+        game.advance_tick().unwrap();
+        assert_eq!(published(&game, 1), (MonsterBehavior::Holding, Some(1)));
+    }
+
+    #[test]
+    fn a_monster_that_finds_nobody_after_a_search_returns_to_its_post() {
+        let (mut game, x, z) = strike_arena();
+        place_monster(&mut game, 1, x + 500, z);
+        for _ in 0..80 {
+            game.advance_tick().unwrap();
+        }
+        let post = monster_state(&game, 1).post.unwrap();
+        assert_eq!(post, Vec3i::new(x + 500, PLAYER_Y, z));
+        assert!(xz_distance_sq(monster_position(&game, 1), post) > 200 * 200);
+        assert!(game.remove_player(1));
+        for _ in 0..=content().monster.reacquire_ticks {
+            game.advance_tick().unwrap();
+        }
+        assert_eq!(published(&game, 1), (MonsterBehavior::Returning, None));
+        let home = (1..=200).find(|_| {
+            game.advance_tick().unwrap();
+            published(&game, 1).0 == MonsterBehavior::Idle
+        });
+        assert!(home.is_some());
+    }
+
+    /// A seeded chase in the strike arena: three pursuers and a target walking a square.
+    /// With `drop_bodies_at`, every monster body is removed from the world at that tick.
+    fn body_chase(drop_bodies_at: Option<u32>) -> Vec<ArpgSnapshot> {
+        let (mut game, x, z) = strike_arena();
+        place_monster(&mut game, 1, x + 600, z);
+        place_monster(&mut game, 2, x + 600, z + 120);
+        place_monster(&mut game, 3, x - 600, z - 200);
+        let mut snapshots = Vec::new();
+        for tick in 0..160_u32 {
+            if tick % 30 == 0 {
+                let (dx, dz) = [(1, 0), (0, 1), (-1, 0), (0, -1)][(tick / 30) as usize % 4];
+                command_as(&mut game, 1, ArpgCommand::SetMovement { x: dx, z: dz });
+            }
+            if Some(tick) == drop_bodies_at {
+                for id in 1..=3 {
+                    assert!(
+                        game.world
+                            .remove_body(ArpgGame::monster_body_id(id))
+                            .is_some()
+                    );
+                }
+            }
+            game.advance_tick().unwrap();
+            snapshots.push(game.snapshot().unwrap());
+        }
+        snapshots
+    }
+
+    #[test]
+    fn monster_bodies_removed_mid_chase_are_rebuilt_without_changing_the_game() {
+        let uninterrupted = body_chase(None);
+        assert!(uninterrupted[50].monsters.iter().all(|monster| {
+            monster.behavior == MonsterBehavior::Pursuing && monster.target_player_id == Some(1)
+        }));
+        for tick in [40, 50, 90] {
+            assert_eq!(body_chase(Some(tick)), uninterrupted, "dropped at {tick}");
+        }
+    }
+
+    #[test]
+    fn engagement_survives_save_and_load_exactly() {
+        // The room's generated monster: saves only accept the generated monster set.
+        let mut game = ArpgGame::new_with_seed(42).unwrap();
+        let room = game
+            .rooms
+            .iter()
+            .find(|room| room.id == STRIKE_ROOM)
+            .unwrap()
+            .clone();
+        let (x, z) = room.center();
+        game.player_spawns[0] = Vec3i::new(x, PLAYER_Y, z);
+        game.add_player(1).unwrap();
+        add_player_at(&mut game, 2, room.min_x + 100, room.max_z - 100);
+        let id = game
+            .monsters
+            .iter()
+            .find(|monster| monster.room_id == STRIKE_ROOM)
+            .unwrap()
+            .id;
+        game.monsters
+            .iter_mut()
+            .find(|monster| monster.id == id)
+            .unwrap()
+            .position = Vec3i::new(room.max_x - 120, PLAYER_Y, z);
+        game.reconcile_encounters().unwrap();
+        // The target dies at tick 60; player 2 is out of aggro range, so the monster
+        // searches, then returns to its post.
+        let step = |game: &mut ArpgGame, tick: u32| {
+            if tick == 60 {
+                game.players.get_mut(&1).unwrap().health = 0;
+            }
+            game.advance_tick().unwrap();
+        };
+        let mut saves = Vec::new();
+        let mut reference = Vec::new();
+        for tick in 0..260_u32 {
+            step(&mut game, tick);
+            if [30, 65, 90, 120].contains(&tick) {
+                saves.push((reference.len(), game.save_state().unwrap()));
+            }
+            reference.push(game.snapshot().unwrap());
+        }
+        let behaviours = saves
+            .iter()
+            .map(|&(index, _)| reference[index].monsters[usize::try_from(id - 1).unwrap()].behavior)
+            .collect::<Vec<_>>();
+        assert!(
+            behaviours.contains(&MonsterBehavior::Pursuing),
+            "{behaviours:?}"
+        );
+        assert!(
+            behaviours.contains(&MonsterBehavior::Searching),
+            "{behaviours:?}"
+        );
+        assert!(
+            behaviours.contains(&MonsterBehavior::Returning),
+            "{behaviours:?}"
+        );
+        for (index, save) in saves {
+            let json = serde_json::to_string(&save).unwrap();
+            let mut restored =
+                ArpgGame::from_save_state(serde_json::from_str(&json).unwrap()).unwrap();
+            let mut expected = reference[index].clone();
+            // Strike and interaction events are transient (not saved).
+            expected.strike_events.clear();
+            expected.interaction_events.clear();
+            assert_eq!(restored.snapshot().unwrap(), expected, "load at {index}");
+            for (tick, expected) in reference.iter().enumerate().skip(index + 1) {
+                step(&mut restored, u32::try_from(tick).unwrap());
+                assert_eq!(&restored.snapshot().unwrap(), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn saves_reject_invalid_engagement() {
+        let mut game = ArpgGame::new_with_seed(42).unwrap();
+        game.add_player(1).unwrap();
+        let save = game.save_state().unwrap();
+        let tamper = |change: &dyn Fn(&mut MonsterSaveState)| {
+            let mut tampered = save.clone();
+            change(&mut tampered.monsters[0]);
+            ArpgGame::from_save_state(tampered)
+        };
+        assert!(tamper(&|monster| monster.engagement = Engagement::Returning).is_ok());
+        assert!(
+            tamper(&|monster| monster.engagement = Engagement::Engaged {
+                target_player_id: 0
+            })
+            .is_err()
+        );
+        assert!(
+            tamper(&|monster| monster.engagement = Engagement::Searching { ticks_remaining: 0 })
+                .is_err()
+        );
+        assert!(
+            tamper(&|monster| monster.engagement = Engagement::Searching {
+                ticks_remaining: content().monster.reacquire_ticks + 1
+            })
+            .is_err()
+        );
+        assert!(tamper(&|monster| monster.post = Some([0, PLAYER_Y, 99_999])).is_err());
+    }
+
     /// Deterministic xorshift for randomized pursuit scenarios.
     struct ScenarioRng(u64);
 
@@ -8111,12 +8967,13 @@ mod tests {
     #[test]
     fn retained_and_per_tick_pursuers_set_out_alike() {
         // Whether a pursuer moves on its first tick depends only on reachability, which the
-        // retained planner shares with the per-tick reference.
+        // retained planner shares with the per-tick reference. A resting monster engages at
+        // the end of its first tick and sets out in the second.
         let moved = |snapshots: &[ArpgSnapshot]| {
-            snapshots[0]
+            snapshots[1]
                 .monsters
                 .iter()
-                .zip(&snapshots[1].monsters)
+                .zip(&snapshots[2].monsters)
                 .map(|(before, after)| before.position != after.position)
                 .collect::<Vec<_>>()
         };
@@ -8124,7 +8981,7 @@ mod tests {
         for seed in 100..160 {
             let (retained, _) = random_chase(seed, NavigationMode::Retained);
             let (reference, _) = random_chase(seed, NavigationMode::PerTickReference);
-            assert_eq!(retained[0], reference[0]);
+            assert_eq!(retained[..2], reference[..2]);
             assert_eq!(moved(&retained), moved(&reference), "seed {seed}");
             moving += moved(&retained).iter().filter(|&&moved| moved).count();
         }
