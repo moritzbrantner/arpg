@@ -70,6 +70,22 @@ import { createGameClientRuntime } from "./game-client-runtime.ts";
 import { createActiveCueTracker } from "./frame-cues.js";
 import "./styles.css";
 
+// Monster body colours and head cues by published behaviour (#109); attack phases and
+// stagger keep their own colours.
+const MONSTER_BEHAVIOR_COLORS: Record<string, string> = {
+  pursuing: "#a3483b",
+  holding: "#8f4037",
+  searching: "#8a6a3c",
+  returning: "#5f5866",
+  idle: "#73433d",
+};
+const MONSTER_BEHAVIOR_CUES: Record<string, string> = {
+  pursuing: "#ff7a59",
+  holding: "#ff7a59",
+  searching: "#f2c14e",
+  returning: "#9a9aa8",
+};
+
 const gameplayContext = { op: "context", id: "gameplay" };
 
 const physical = (id, action, code, when = gameplayContext) => ({
@@ -355,7 +371,7 @@ function buildFrame(snapshot, focusPlayerId, width, height, focusPlayerAccent = 
                 ? "#c85b46"
                 : phase === "recovery"
                   ? "#6e3934"
-                  : "#8f4037";
+                  : (MONSTER_BEHAVIOR_COLORS[monster.behavior] ?? "#8f4037");
         const nodes = [
           {
             id: `monster-${monster.id}`,
@@ -364,6 +380,15 @@ function buildFrame(snapshot, focusPlayerId, width, height, focusPlayerAccent = 
             transform: { translation },
           },
         ];
+        // The authoritative behaviour, not motion, picks the cue above the head.
+        const cue = MONSTER_BEHAVIOR_CUES[monster.behavior];
+        if (cue)
+          nodes.push({
+            id: `monster-${monster.id}-behavior`,
+            geometry: { kind: "sphere", radius: 0.09 },
+            color: cue,
+            transform: { translation: [translation[0], translation[1] + 0.62, translation[2]] },
+          });
         if ((phase === "windup" || phase === "active") && monster.action?.range) {
           const radius = monster.action.range / scale;
           const telegraphColor = phase === "active" ? "#f06a4e" : "#824239";

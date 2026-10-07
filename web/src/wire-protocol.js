@@ -1,6 +1,6 @@
-// Browser projection of the arpg-protocol v13 envelope. This adapter validates
+// Browser projection of the arpg-protocol v14 envelope. This adapter validates
 // only data consumed by presentation; gameplay rules remain in arpg-core.
-export const PROTOCOL_VERSION = 13;
+export const PROTOCOL_VERSION = 14;
 const MAX_SNAPSHOT_CHARACTERS = 65_535;
 const integer = (value) => Number.isSafeInteger(value);
 const nonNegative = (value) => integer(value) && value >= 0;
@@ -41,6 +41,18 @@ const interactionResult = (value) =>
     nonNegative(value.gold)) ||
   (value?.kind === "refused" && interactionRefusals.has(value.reason));
 const comboInputs = new Set(["light", "heavy"]);
+// Authoritative per-tick monster behaviour; presentation animates it, never derives it.
+export const MONSTER_BEHAVIORS = new Set([
+  "dead",
+  "dormant",
+  "staggered",
+  "attacking",
+  "pursuing",
+  "holding",
+  "searching",
+  "returning",
+  "idle",
+]);
 const playerReactions = new Set(["hurt", "blocked", "guardBroken"]);
 const guardPhases = new Set(["raising", "raised"]);
 const optional = (value, validate) => value === null || value === undefined || validate(value);
@@ -160,7 +172,9 @@ export function decodeSnapshot(encoded) {
           monster.action,
           (value) => action(value) && nonNegative(value.targetPlayerId) && nonNegative(value.range),
         ) &&
-        optional(monster.reaction, (value) => reaction(value, "stagger")),
+        optional(monster.reaction, (value) => reaction(value, "stagger")) &&
+        MONSTER_BEHAVIORS.has(monster.behavior) &&
+        optional(monster.targetPlayerId, nonNegative),
     ) &&
     list(
       "rooms",
