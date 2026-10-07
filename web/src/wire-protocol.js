@@ -1,6 +1,6 @@
-// Browser projection of the arpg-protocol v15 envelope. This adapter validates
+// Browser projection of the arpg-protocol v16 envelope. This adapter validates
 // only data consumed by presentation; gameplay rules remain in arpg-core.
-export const PROTOCOL_VERSION = 15;
+export const PROTOCOL_VERSION = 16;
 const MAX_SNAPSHOT_CHARACTERS = 65_535;
 const integer = (value) => Number.isSafeInteger(value);
 const nonNegative = (value) => integer(value) && value >= 0;
@@ -25,6 +25,8 @@ const scenarios = new Set([
   "obstructed",
   "archery",
   "archeryObstructed",
+  "ranged",
+  "heavy",
 ]);
 const parties = new Set(["player", "monster"]);
 const strikeResults = new Set(["hit", "blocked", "guardBroken", "obstructed"]);
@@ -50,6 +52,7 @@ export const MONSTER_BEHAVIORS = new Set([
   "staggered",
   "attacking",
   "pursuing",
+  "retreating",
   "holding",
   "searching",
   "returning",
@@ -58,6 +61,8 @@ export const MONSTER_BEHAVIORS = new Set([
 const playerReactions = new Set(["hurt", "blocked", "guardBroken"]);
 const guardPhases = new Set(["raising", "raised"]);
 const optional = (value, validate) => value === null || value === undefined || validate(value);
+// How a monster attack lands: around the monster, or as a shot at its target.
+const deliveries = new Set(["strike", "projectile"]);
 const action = (value) => phases.has(value?.phase) && nonNegative(value.ticksRemaining);
 const reaction = (value, kind) => value?.kind === kind && nonNegative(value.ticksRemaining);
 
@@ -170,7 +175,7 @@ export function decodeSnapshot(encoded) {
       "arrows",
       (arrow) =>
         nonNegative(arrow?.id) &&
-        nonNegative(arrow.ownerId) &&
+        party(arrow.source) &&
         vector(arrow.position, 3) &&
         vector(arrow.velocity, 3) &&
         nonNegative(arrow.ticksRemaining),
@@ -187,7 +192,11 @@ export function decodeSnapshot(encoded) {
         typeof monster.alive === "boolean" &&
         optional(
           monster.action,
-          (value) => action(value) && nonNegative(value.targetPlayerId) && nonNegative(value.range),
+          (value) =>
+            action(value) &&
+            nonNegative(value.targetPlayerId) &&
+            nonNegative(value.range) &&
+            deliveries.has(value.delivery),
         ) &&
         optional(monster.reaction, (value) => reaction(value, "stagger")) &&
         MONSTER_BEHAVIORS.has(monster.behavior) &&

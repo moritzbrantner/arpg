@@ -305,6 +305,8 @@ export function TrainingDiagnostics({ store, playerId }) {
     snapshot?.monsters.filter((monster) => monster.alive && monster.action).length ?? 0;
   const pursuingMonsterCount =
     snapshot?.monsters.filter((monster) => monster.behavior === "pursuing").length ?? 0;
+  const retreatingMonsterCount =
+    snapshot?.monsters.filter((monster) => monster.behavior === "retreating").length ?? 0;
   const playerActionLabel = player?.action
     ? [
         player.action.kind,
@@ -331,6 +333,10 @@ export function TrainingDiagnostics({ store, playerId }) {
       <div>
         <dt>Pursuing</dt>
         <dd>{pursuingMonsterCount}</dd>
+      </div>
+      <div>
+        <dt>Retreating</dt>
+        <dd>{retreatingMonsterCount}</dd>
       </div>
       <div>
         <dt>Player action</dt>
