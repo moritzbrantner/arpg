@@ -2987,6 +2987,21 @@ impl ArpgGame {
     }
 
     /// Drops locks that no longer hold and turns locked players towards their targets.
+    fn face_held_locks(&mut self) -> Result<(), GameError> {
+        let locked = self
+            .players
+            .iter()
+            .filter(|(_, state)| state.locked_monster_id.is_some())
+            .map(|(&id, _)| id)
+            .collect::<Vec<_>>();
+        for player_id in locked {
+            if self.lock_holds(player_id)? {
+                self.refresh_facing(player_id)?;
+            }
+        }
+        Ok(())
+    }
+
     fn revalidate_target_locks(&mut self) -> Result<(), GameError> {
         let locked = self
             .players
@@ -4246,6 +4261,10 @@ impl AuthoritativeGame for ArpgGame {
         self.reconcile_encounters()?;
         self.advance_actions()?;
         self.advance_arrows()?;
+        // Monster strikes resolve guards against the facing: a locked player has moved this
+        // tick, so face the target from the new position first. Losing a lock still happens
+        // once, at the end of the tick.
+        self.face_held_locks()?;
         self.advance_monster_actions()?;
         self.revalidate_target_locks()?;
         self.tick = self
@@ -7652,6 +7671,28 @@ mod tests {
             targets(&outcomes),
             vec![(StrikeTarget::Monster(1), LIGHT_HIT)]
         );
+    }
+
+    #[test]
+    fn a_held_lock_faces_the_target_from_where_physics_left_the_player() {
+        // Monster strikes resolve guards against this facing within the same tick.
+        let (mut game, x, z) = strike_arena();
+        place_monster(&mut game, 1, x, z - 150);
+        command(&mut game, ArpgCommand::CycleTarget);
+        assert_eq!(locked(&game), Some(1));
+        let state = &game.players[&1];
+        assert_eq!((state.facing_x, state.facing_z), (0, -1));
+
+        // The player ends a physics step east of the target.
+        game.world
+            .set_position(
+                ArpgGame::player_body_id(1),
+                Vec3i::new(x + 150, PLAYER_Y, z - 150),
+            )
+            .unwrap();
+        game.face_held_locks().unwrap();
+        let state = &game.players[&1];
+        assert_eq!((state.facing_x, state.facing_z), (-1, 0));
     }
 
     #[test]
