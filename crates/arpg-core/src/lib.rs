@@ -8766,6 +8766,29 @@ mod tests {
     }
 
     #[test]
+    fn a_displaced_pursuer_keeps_its_target_and_resumes_from_where_it_lands() {
+        // Knockback is not a mechanic yet (#63); any displacement of the body must already
+        // leave the engagement intact and the chase continuing from the new position.
+        let (mut game, x, z) = strike_arena();
+        place_monster(&mut game, 1, x + 600, z);
+        for _ in 0..10 {
+            game.advance_tick().unwrap();
+        }
+        assert_eq!(published(&game, 1), (MonsterBehavior::Pursuing, Some(1)));
+        let from = monster_position(&game, 1);
+        let landed = Vec3i::new(from.x + 150, from.y, from.z + 200);
+        game.world
+            .set_position(ArpgGame::monster_body_id(1), landed)
+            .unwrap();
+        game.monsters[0].position = landed;
+        let before = xz_distance_sq(landed, player_position(&game));
+        game.advance_tick().unwrap();
+        assert_eq!(published(&game, 1), (MonsterBehavior::Pursuing, Some(1)));
+        assert!(xz_distance_sq(monster_position(&game, 1), player_position(&game)) < before);
+        assert!(ticks_until_windup(&mut game, 1, 400).is_some());
+    }
+
+    #[test]
     fn engagement_survives_save_and_load_exactly() {
         // The room's generated monster: saves only accept the generated monster set.
         let mut game = ArpgGame::new_with_seed(42).unwrap();
