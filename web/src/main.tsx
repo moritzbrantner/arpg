@@ -262,9 +262,12 @@ function buildFrame(snapshot, focusPlayerId, width, height, focusPlayerAccent = 
     ...snapshot.players.flatMap((player) => {
       const position = player.position.map((value) => value / scale);
       // The exact committed or intended direction when aim or a lock owns it.
+      // A target lock takes precedence over aim, as in the core: show the authoritative facing.
       const facing = player.action
         ? (player.action.aim ?? player.action.facing)
-        : (player.aim ?? player.facing ?? [1, 0]);
+        : player.lockedMonsterId != null
+          ? (player.facing ?? [1, 0])
+          : (player.aim ?? player.facing ?? [1, 0]);
       const facingLength = Math.hypot(facing[0], facing[1]) || 1;
       const facingX = facing[0] / facingLength;
       const facingZ = facing[1] / facingLength;
@@ -902,7 +905,8 @@ function App() {
       rect.width,
       rect.height,
     );
-    if (aim) runtime.setAim(aim);
+    // `null` inside the dead zone over the player returns to committed facing.
+    runtime.setAim(aim);
   };
 
   const updateGraphics = (next) => {

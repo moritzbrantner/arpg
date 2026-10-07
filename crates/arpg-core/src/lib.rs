@@ -1778,6 +1778,12 @@ impl ArpgGame {
             Self::validate_facing(player.facing)?;
             if let Some(aim) = player.aim {
                 Self::validate_aim(aim)?;
+                // Without a lock the facing follows the aim exactly (a lock's direction is
+                // refreshed from positions once the save is loaded).
+                let (x, z) = Self::facing_for(aim);
+                if player.locked_monster_id.is_none() && player.facing != [x, z] {
+                    return Err(GameError::new("saved player facing does not match its aim"));
+                }
             }
             if player.health
                 > Self::max_health_for_level(Self::level_for_experience(player.experience))
@@ -7711,6 +7717,15 @@ mod tests {
         wide_aim.players[0].aim = Some([AIM_COMPONENT_LIMIT + 1, 0]);
         let mut unknown_lock = saved.clone();
         unknown_lock.players[0].locked_monster_id = Some(77);
+        // Without a lock the saved facing must follow the aim.
+        let mut stale_facing = saved.clone();
+        stale_facing.players[0].locked_monster_id = None;
+        stale_facing.players[0].action = None;
+        stale_facing.players[0].aim = Some([1000, 0]);
+        stale_facing.players[0].facing = [-1, 0];
+        let mut aligned = stale_facing.clone();
+        aligned.players[0].facing = [1, 0];
+        assert!(ArpgGame::from_save_state(aligned).is_ok());
         let mut mismatched = saved;
         let action = mismatched.players[0].action.as_mut().unwrap();
         action.facing = [-action.facing[0], -action.facing[1]];
@@ -7718,6 +7733,7 @@ mod tests {
             (zero_aim, "aim direction"),
             (wide_aim, "aim direction"),
             (unknown_lock, "target lock"),
+            (stale_facing, "facing does not match its aim"),
             (mismatched, "does not match its aim"),
         ] {
             let error = ArpgGame::from_save_state(corrupt).unwrap_err();
