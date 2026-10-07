@@ -182,8 +182,10 @@ const MAX_LIVE_ARROWS: usize = 32;
 const ARROW_ID_BASE: u64 = 1;
 /// Query-only hurt boxes for monsters, which are game-owned rather than physics bodies.
 const MONSTER_HURTBOX_BASE: u64 = 40_000;
-/// Monster bodies exist while their monster is alive in an Active room (#65).
-const MONSTER_BODY_BASE: u64 = 60_000;
+/// Monster bodies exist while their monster is alive in an Active room (#65). They sit
+/// above every player body (`PLAYER_BODY_BASE + u32`), so no player ID can alias one.
+const MONSTER_BODY_BASE: u64 = 1 << 33;
+const _: () = assert!(MONSTER_BODY_BASE > PLAYER_BODY_BASE + u32::MAX as u64);
 const MONSTER_BODY_HALF_EXTENTS: Vec3i = Vec3i::new(30, 50, 30);
 const MONSTER_HURTBOX_HALF_EXTENTS: Vec3i = Vec3i::new(40, 50, 40);
 #[cfg(test)]
@@ -7806,6 +7808,36 @@ mod tests {
 
         assert_eq!(monster_position(&game, 1), start);
         assert!(game.monsters[0].action.is_none());
+    }
+
+    #[test]
+    fn a_large_player_id_never_aliases_a_monster_body() {
+        // Player 59001 shared BodyId(60001) with monster 1 under the former 60_000 base.
+        let mut game = ArpgGame::new_with_seed(42).unwrap();
+        let (x, z) = game
+            .rooms
+            .iter()
+            .find(|room| room.id == STRIKE_ROOM)
+            .unwrap()
+            .center();
+        game.player_spawns[0] = Vec3i::new(x, PLAYER_Y, z);
+        game.add_player(59_001).unwrap();
+        game.reconcile_encounters().unwrap();
+        game.monsters.clear();
+        place_monster(&mut game, 1, x + 600, z);
+
+        game.advance_tick().unwrap();
+
+        assert_ne!(
+            ArpgGame::monster_body_id(1),
+            ArpgGame::player_body_id(59_001)
+        );
+        assert!(game.world.body(ArpgGame::monster_body_id(1)).is_some());
+        let player = game.world.body(ArpgGame::player_body_id(59_001)).unwrap();
+        assert!(
+            (player.position().x - x).abs() < 100,
+            "the player was not moved to the monster"
+        );
     }
 
     #[test]
