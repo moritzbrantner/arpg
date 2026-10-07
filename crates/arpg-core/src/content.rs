@@ -14,9 +14,26 @@ use serde::{Deserialize, Serialize};
 use crate::{ActionKind, ComboInput};
 
 pub const CONTENT_FORMAT_VERSION: u16 = 2;
-/// Pursuit stops one navigation cell (20 units) inside strike reach, so a monster
-/// strike must reach at least two cells.
-pub(crate) const MIN_MONSTER_STRIKE_REACH: i64 = 40;
+/// Touching monster and player bodies keep their centres up to √2 times their
+/// combined XZ half extents apart (85 units), and pursuit stops one navigation
+/// cell inside strike reach, so a monster strike must reach past both.
+pub(crate) const MIN_MONSTER_STRIKE_REACH: i64 = {
+    let monster = crate::MONSTER_BODY_HALF_EXTENTS;
+    let player = crate::PLAYER_HALF_EXTENTS;
+    let combined = (max_i32(monster.x, monster.z) + max_i32(player.x, player.z)) as i64;
+    let squared = 2 * combined * combined;
+    let root = squared.isqrt();
+    let touching = if root * root == squared {
+        root
+    } else {
+        root + 1
+    };
+    touching + crate::navigation::NAV_CELL_SIZE as i64
+};
+
+const fn max_i32(a: i32, b: i32) -> i32 {
+    if a > b { a } else { b }
+}
 /// Longest definition id; matches the browser projection's bound on published ids.
 pub const MAX_DEFINITION_ID_LENGTH: usize = 64;
 
@@ -419,7 +436,9 @@ impl ContentBundle {
                 {
                     fail(
                         path.clone(),
-                        "monster strike reach must be at least 40 units for pursuit",
+                        &format!(
+                            "monster strike reach must be at least {MIN_MONSTER_STRIKE_REACH} units for pursuit"
+                        ),
                     );
                 }
                 match strike_by_id.get(monster.strike.as_str()) {
@@ -579,12 +598,13 @@ mod tests {
                 .iter_mut()
                 .find(|strike| strike.id == "monster.claw")
                 .unwrap();
-            claw.reach = 20;
+            claw.reach = MIN_MONSTER_STRIKE_REACH - 1;
         });
+        assert_eq!(MIN_MONSTER_STRIKE_REACH, 105);
         assert!(
             short_reach
                 .iter()
-                .any(|error| error.contains("at least 40 units"))
+                .any(|error| error.contains("at least 105 units"))
         );
 
         let long = errors(|bundle| bundle.strikes[0].id = "s".repeat(65));
