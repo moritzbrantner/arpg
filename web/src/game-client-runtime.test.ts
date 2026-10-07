@@ -581,6 +581,44 @@ test("restoring a save that held guard releases it for this client", () => {
   ]);
 });
 
+test("aim intent is sent when it changes and cleared on focus loss and restore", () => {
+  const { runtime, games } = harness();
+  runtime.startLocal({ seed: 1 });
+  runtime.setAim([1000, -400]);
+  runtime.setAim([1000, -400]);
+  runtime.setAim([0, 1000]);
+  runtime.cycleTarget();
+  runtime.releaseInput();
+  runtime.releaseInput();
+  runtime.setAim(null);
+  runtime.clearTarget();
+  expect(games[0].commands.map((command) => command.payload)).toEqual([
+    { type: "setAim", direction: [1000, -400] },
+    { type: "setAim", direction: [0, 1000] },
+    { type: "cycleTarget" },
+    { type: "setAim", direction: null },
+    { type: "clearTarget" },
+  ]);
+
+  runtime.setAim([1, 1]);
+  runtime.startLocal({ seed: 2 });
+  runtime.setAim(null);
+  expect(games[1].commands).toEqual([]);
+
+  const restored = new FakeGame(5);
+  restored.addPlayer(1);
+  runtime.restore({
+    game: restored,
+    controlledPlayerId: 1,
+    lastSequence: 3,
+    movement: [0, 0],
+    aimHeld: true,
+  });
+  expect(restored.commands).toEqual([
+    { playerId: 1, sequence: 4, payload: { type: "setAim", direction: null } },
+  ]);
+});
+
 test("a held bow draw shoots on release and is cancelled, never fired, on focus loss", () => {
   const { runtime, games } = harness();
   runtime.startLocal({ seed: 1 });

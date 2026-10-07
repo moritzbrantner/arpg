@@ -1,7 +1,9 @@
 import { expect, test } from "bun:test";
 import {
   GRAPHICS_KEY,
+  MOUSE_AIM_KEY,
   loadGraphics,
+  loadMouseAim,
   loadProfile,
   persistStoredValue,
   readStoredValue,
@@ -41,4 +43,18 @@ test("profiles are admitted only when the foundation validates them", () => {
   const storage = { getItem: () => JSON.stringify(parsed) };
   expect(loadProfile(() => false, storage)).toEqual({ id: "arpg-player", patches: [] });
   expect(loadProfile(() => true, storage)).toEqual(parsed);
+});
+
+test("mouse aim is opt-in and only an explicit setting enables it", () => {
+  const storage = (value) => ({ getItem: (key) => (key === MOUSE_AIM_KEY ? value : null) });
+  expect(loadMouseAim(storage(null))).toBe(false);
+  expect(loadMouseAim(storage("yes"))).toBe(false);
+  expect(loadMouseAim(storage("on"))).toBe(true);
+  expect(
+    loadMouseAim({
+      getItem: () => {
+        throw new Error("blocked");
+      },
+    }),
+  ).toBe(false);
 });

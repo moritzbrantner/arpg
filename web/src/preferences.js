@@ -2,6 +2,7 @@ export const PROFILE_KEY = "arpg-input-profile-v1";
 export const SETUP_URL_KEY = "arpg-setup-service-url-v1";
 export const DEDICATED_URL_KEY = "arpg-dedicated-url-v1";
 export const GRAPHICS_KEY = "arpg-graphics-v1";
+export const MOUSE_AIM_KEY = "arpg-mouse-aim-v1";
 
 export function readStoredValue(key, fallback, storage) {
   try {
@@ -52,4 +53,9 @@ export function loadProfile(validate, storage) {
     // Invalid local profiles fall back to the registry defaults.
   }
   return { id: "arpg-player", patches: [] };
+}
+
+// Mouse aim is opt-in: by default melee and the bow follow committed facing.
+export function loadMouseAim(storage) {
+  return readStoredValue(MOUSE_AIM_KEY, "off", storage) === "on";
 }
