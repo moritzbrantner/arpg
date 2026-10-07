@@ -13,7 +13,27 @@ use serde::{Deserialize, Serialize};
 
 use crate::{ActionKind, ComboInput};
 
-pub const CONTENT_FORMAT_VERSION: u16 = 1;
+pub const CONTENT_FORMAT_VERSION: u16 = 2;
+/// Touching monster and player bodies keep their centres up to √2 times their
+/// combined XZ half extents apart (85 units), and pursuit stops one navigation
+/// cell inside strike reach, so a monster strike must reach past both.
+pub(crate) const MIN_MONSTER_STRIKE_REACH: i64 = {
+    let monster = crate::MONSTER_BODY_HALF_EXTENTS;
+    let player = crate::PLAYER_HALF_EXTENTS;
+    let combined = (max_i32(monster.x, monster.z) + max_i32(player.x, player.z)) as i64;
+    let squared = 2 * combined * combined;
+    let root = squared.isqrt();
+    let touching = if root * root == squared {
+        root
+    } else {
+        root + 1
+    };
+    touching + crate::navigation::NAV_CELL_SIZE as i64
+};
+
+const fn max_i32(a: i32, b: i32) -> i32 {
+    if a > b { a } else { b }
+}
 /// Longest definition id; matches the browser projection's bound on published ids.
 pub const MAX_DEFINITION_ID_LENGTH: usize = 64;
 
@@ -83,6 +103,8 @@ pub struct MonsterData {
     pub recovery_ticks: u8,
     pub damage: u16,
     pub experience_reward: u32,
+    /// Pursuit speed in world units per tick.
+    pub pursuit_speed: u8,
 }
 
 /// One invariant violation, with the definition path that broke it.
@@ -139,6 +161,7 @@ pub(crate) struct MonsterDefinition {
     pub recovery_ticks: u8,
     pub damage: u16,
     pub experience_reward: u32,
+    pub pursuit_speed: i32,
 }
 
 /// A validated bundle with resolved references.
@@ -189,6 +212,25 @@ fn strikes(kind: ActionKind) -> bool {
 impl ContentBundle {
     /// Parses JSON and orders every collection canonically, so source order never matters.
     pub fn from_json(json: &str) -> Result<Self, Vec<ContentError>> {
+        // Read the format first: an older bundle should report its version, not the
+        // first field the current format added.
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Format {
+            format_version: Option<u16>,
+        }
+        if let Ok(Format {
+            format_version: Some(version),
+        }) = serde_json::from_str::<Format>(json)
+            && version != CONTENT_FORMAT_VERSION
+        {
+            return Err(vec![ContentError {
+                path: "formatVersion".into(),
+                message: format!(
+                    "unsupported content format version {version}; expected {CONTENT_FORMAT_VERSION}"
+                ),
+            }]);
+        }
         let mut bundle: Self = serde_json::from_str(json).map_err(|error| {
             vec![ContentError {
                 path: "$".into(),
@@ -385,6 +427,20 @@ impl ContentBundle {
                 {
                     fail(path.clone(), "every phase needs at least one tick");
                 }
+                if monster.pursuit_speed == 0 {
+                    fail(path.clone(), "pursuit speed must be positive");
+                }
+                if strike_by_id
+                    .get(monster.strike.as_str())
+                    .is_some_and(|strike| strike.reach < MIN_MONSTER_STRIKE_REACH)
+                {
+                    fail(
+                        path.clone(),
+                        &format!(
+                            "monster strike reach must be at least {MIN_MONSTER_STRIKE_REACH} units for pursuit"
+                        ),
+                    );
+                }
                 match strike_by_id.get(monster.strike.as_str()) {
                     Some(strike) => Some(MonsterDefinition {
                         health: monster.health,
@@ -394,6 +450,7 @@ impl ContentBundle {
                         recovery_ticks: monster.recovery_ticks,
                         damage: monster.damage,
                         experience_reward: monster.experience_reward,
+                        pursuit_speed: i32::from(monster.pursuit_speed),
                     }),
                     None => {
                         fail(path, "references an unknown strike");
@@ -535,6 +592,21 @@ mod tests {
                 .any(|error| error.contains("exactly one monster"))
         );
 
+        let short_reach = errors(|bundle| {
+            let claw = bundle
+                .strikes
+                .iter_mut()
+                .find(|strike| strike.id == "monster.claw")
+                .unwrap();
+            claw.reach = MIN_MONSTER_STRIKE_REACH - 1;
+        });
+        assert_eq!(MIN_MONSTER_STRIKE_REACH, 105);
+        assert!(
+            short_reach
+                .iter()
+                .any(|error| error.contains("at least 105 units"))
+        );
+
         let long = errors(|bundle| bundle.strikes[0].id = "s".repeat(65));
         assert!(long.iter().any(|error| error.contains("1..=64 ASCII")));
 
@@ -546,5 +618,22 @@ mod tests {
         );
 
         assert!(ContentBundle::from_json("{\"formatVersion\": 1, \"surprise\": true}").is_err());
+    }
+
+    #[test]
+    fn an_older_format_bundle_reports_its_version_before_missing_fields() {
+        let previous = include_str!("../content/base.json")
+            .replace("\"formatVersion\": 2", "\"formatVersion\": 1")
+            .replace(", \"pursuitSpeed\": 4", "");
+
+        let errors = ContentBundle::from_json(&previous).unwrap_err();
+
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].path, "formatVersion");
+        assert!(
+            errors[0]
+                .message
+                .contains("unsupported content format version 1")
+        );
     }
 }

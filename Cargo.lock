@@ -6,6 +6,7 @@ version = 4
 name = "arpg-core"
 version = "0.1.0"
 dependencies = [
+ "graph-kernels",
  "physics-engine",
  "serde",
  "serde_json",
@@ -168,6 +169,11 @@ dependencies = [
  "cpufeatures 0.3.1",
  "rand_core",
 ]
+
+[[package]]
+name = "collection-kernels"
+version = "0.1.0"
+source = "git+https://github.com/moritzbrantner/rust-kernels.git?rev=45a7571890e1bbffc7f2ff5f517b5c4c7859d17c#45a7571890e1bbffc7f2ff5f517b5c4c7859d17c"
 
 [[package]]
 name = "const-oid"
@@ -388,6 +394,14 @@ dependencies = [
  "r-efi",
  "rand_core",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "graph-kernels"
+version = "0.1.0"
+source = "git+https://github.com/moritzbrantner/rust-kernels.git?rev=45a7571890e1bbffc7f2ff5f517b5c4c7859d17c#45a7571890e1bbffc7f2ff5f517b5c4c7859d17c"
+dependencies = [
+ "collection-kernels",
 ]
 
 [[package]]
