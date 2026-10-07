@@ -13,7 +13,7 @@ pub use content::{
     CONTENT_FORMAT_VERSION, ContentBundle, ContentError, base_bundle, content_revision,
 };
 use content::{ComboTransition, StrikeDefinition, content};
-use navigation::{NAV_CELL_SIZE, Rect, RoomGrid, isqrt};
+use navigation::{Cell, FieldRoute, FieldWork, NAV_CELL_SIZE, Rect, RoomGrid, TargetField, isqrt};
 
 mod content;
 mod navigation;
@@ -1170,14 +1170,106 @@ struct GeneratedDungeon {
     monsters: Vec<MonsterState>,
 }
 
+/// Monster-pursuit navigation work since construction or load (#110). Work evidence only:
+/// none of it is gameplay state, saved, or able to change an outcome.
+///
+/// A *repath* is a retained-field search or an exact plan.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct NavigationWork {
+    /// Monster-ticks spent pursuing.
+    pub pursuit_ticks: u64,
+    /// A* node expansions of retained-field searches and exact plans together.
+    pub expansions: u64,
+    /// Searches of a retained target field: a new target cell, a topology change, or a body
+    /// that left every route the field already knows.
+    pub field_searches: u64,
+    /// Exact per-tick plans: the final approach from a goal cell, a target the field cannot
+    /// reach or serve, and every plan of the per-tick reference.
+    pub exact_plans: u64,
+    /// Physics ray queries made by the planners.
+    pub physics_queries: u64,
+    /// Room grids rasterized from the fixed bodies.
+    pub grid_builds: u64,
+    /// Target fields created (goal cells of one target cell computed).
+    pub field_builds: u64,
+}
+
+impl NavigationWork {
+    pub fn repaths(&self) -> u64 {
+        self.field_searches + self.exact_plans
+    }
+
+    /// Work done since `earlier`, a reading of the same game.
+    #[cfg(test)]
+    fn since(self, earlier: Self) -> Self {
+        Self {
+            pursuit_ticks: self.pursuit_ticks - earlier.pursuit_ticks,
+            expansions: self.expansions - earlier.expansions,
+            field_searches: self.field_searches - earlier.field_searches,
+            exact_plans: self.exact_plans - earlier.exact_plans,
+            physics_queries: self.physics_queries - earlier.physics_queries,
+            grid_builds: self.grid_builds - earlier.grid_builds,
+            field_builds: self.field_builds - earlier.field_builds,
+        }
+    }
+
+    fn add(&mut self, other: Self) {
+        self.pursuit_ticks += other.pursuit_ticks;
+        self.expansions += other.expansions;
+        self.field_searches += other.field_searches;
+        self.exact_plans += other.exact_plans;
+        self.physics_queries += other.physics_queries;
+        self.grid_builds += other.grid_builds;
+        self.field_builds += other.field_builds;
+    }
+}
+
+/// Derived navigation data retained across ticks (#110). It is a cache in the strict
+/// sense: rebuilt on demand from the world's fixed bodies and the targets' cells, never
+/// saved, and dropping it at any tick changes work counts only (see `TargetField`).
+#[derive(Default)]
+struct NavigationCache {
+    /// Footprints of the fixed bodies the grids and fields were built from; any change to
+    /// them (a door locking or unlocking, a fixed body added or removed) drops everything.
+    obstacles: Vec<Rect>,
+    grids: BTreeMap<RoomId, RoomGrid>,
+    /// Fields by room and target cell, kept while a pursuer still chases that cell.
+    fields: BTreeMap<(RoomId, Cell), TargetField>,
+}
+
+impl fmt::Debug for NavigationCache {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NavigationCache")
+            .field("obstacles", &self.obstacles.len())
+            .field("grids", &self.grids.keys().collect::<Vec<_>>())
+            .field("fields", &self.fields.keys().collect::<Vec<_>>())
+            .finish()
+    }
+}
+
+/// How pursuit plans; tests compare the retained planner with its references.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NavigationMode {
+    Retained,
+    /// The retained planner with its cache dropped after every tick: the same outcomes
+    /// must follow.
+    RetainedWithoutCache,
+    /// The #65 per-tick planner: a fresh grid and an exact plan every tick.
+    PerTickReference,
+}
+
 #[derive(Debug)]
 pub struct ArpgGame {
     run_seed: RunSeed,
     tick: u64,
     world: World,
     physics_steps: u64,
-    /// A* expansions spent on monster pursuit; work evidence, not gameplay state.
-    navigation_expansions: u64,
+    navigation_work: NavigationWork,
+    navigation: NavigationCache,
+    #[cfg(test)]
+    navigation_mode: NavigationMode,
     /// Strike-geometry tests pack monsters closer than bodies allow; they keep monsters
     /// out of physics.
     #[cfg(test)]
@@ -1252,7 +1344,10 @@ impl ArpgGame {
             tick: 0,
             world,
             physics_steps: 0,
-            navigation_expansions: 0,
+            navigation_work: NavigationWork::default(),
+            navigation: NavigationCache::default(),
+            #[cfg(test)]
+            navigation_mode: NavigationMode::Retained,
             #[cfg(test)]
             monsters_without_bodies: false,
             players: BTreeMap::new(),
@@ -1923,7 +2018,12 @@ impl ArpgGame {
 
     /// A* node expansions spent on monster pursuit so far.
     pub fn navigation_expansions(&self) -> u64 {
-        self.navigation_expansions
+        self.navigation_work.expansions
+    }
+
+    /// Monster-pursuit navigation work so far: searches, repaths and physics queries.
+    pub fn navigation_work(&self) -> NavigationWork {
+        self.navigation_work
     }
 
     fn monster_body_id(monster_id: u32) -> BodyId {
@@ -2904,10 +3004,24 @@ impl ArpgGame {
 
         let targets = self.monster_targets();
         let reach = content().monster.strike.reach;
+        // End inside reach so the attack range check passes on arrival.
+        let goal_reach = reach - i64::from(NAV_CELL_SIZE);
         let speed = content().monster.pursuit_speed;
-        let mut grids = BTreeMap::new();
+        #[cfg(test)]
+        let mode = self.navigation_mode;
+        #[cfg(not(test))]
+        let use_fields = true;
+        #[cfg(test)]
+        let use_fields = mode != NavigationMode::PerTickReference;
+        #[cfg(test)]
+        if mode != NavigationMode::Retained {
+            self.navigation = NavigationCache::default();
+        }
+        let mut cache = std::mem::take(&mut self.navigation);
+        let mut work = NavigationWork::default();
+        let mut obstacles_checked = false;
+        let mut chased_fields = BTreeSet::new();
         let mut velocities = Vec::new();
-        let mut expansions = 0;
         for monster in &self.monsters {
             let body_id = Self::monster_body_id(monster.id);
             if self.world.body(body_id).is_none() {
@@ -2915,24 +3029,63 @@ impl ArpgGame {
             }
             let velocity = match self.monster_behavior(monster, &active_rooms, &targets) {
                 MonsterBehavior::Pursuing { target } => {
-                    let grid = grids
-                        .entry(monster.room_id)
-                        .or_insert_with(|| self.room_grid(monster.room_id));
-                    // End inside reach so the attack range check passes on arrival.
-                    // The attack's own line test: the physics ray against fixed bodies.
-                    let clear_line = |(x, z): (i32, i32)| {
-                        !self
-                            .strike_obstructed(Vec3i::new(x, monster.position.y, z), target)
-                            .unwrap_or(true)
+                    work.pursuit_ticks += 1;
+                    if !obstacles_checked {
+                        obstacles_checked = true;
+                        let obstacles = self.fixed_footprints();
+                        if obstacles != cache.obstacles {
+                            cache = NavigationCache {
+                                obstacles,
+                                ..NavigationCache::default()
+                            };
+                        }
+                    }
+                    let grid = cache.grids.entry(monster.room_id).or_insert_with(|| {
+                        work.grid_builds += 1;
+                        self.room_grid(monster.room_id, &cache.obstacles)
+                    });
+                    let start = (monster.position.x, monster.position.z);
+                    let target_xz = (target.x, target.z);
+                    let route = grid
+                        .target_cell(target_xz)
+                        .filter(|_| use_fields)
+                        .map(|cell| {
+                            let key = (monster.room_id, cell);
+                            chased_fields.insert(key);
+                            let field = cache.fields.entry(key).or_insert_with(|| {
+                                work.field_builds += 1;
+                                grid.target_field(cell, goal_reach, &cache.obstacles)
+                            });
+                            let mut field_work = FieldWork::default();
+                            let route = grid.field_route(field, start, &mut field_work);
+                            work.field_searches += field_work.searches;
+                            work.expansions += field_work.expansions;
+                            route
+                        });
+                    let path = match route {
+                        Some(FieldRoute::Path(path)) => Some(path),
+                        Some(FieldRoute::NoStartCell | FieldRoute::NoRoute) => None,
+                        // The exact plan finishes the approach from a strict goal and decides
+                        // what the field cannot.
+                        None | Some(FieldRoute::AtGoal | FieldRoute::Unknown) => {
+                            work.exact_plans += 1;
+                            // The attack's own line test: the physics ray against fixed bodies.
+                            let clear_line = |(x, z): (i32, i32)| {
+                                work.physics_queries += 1;
+                                !self
+                                    .strike_obstructed(Vec3i::new(x, monster.position.y, z), target)
+                                    .unwrap_or(true)
+                            };
+                            grid.find_path(
+                                start,
+                                target_xz,
+                                goal_reach,
+                                clear_line,
+                                &mut work.expansions,
+                            )
+                        }
                     };
-                    grid.find_path(
-                        (monster.position.x, monster.position.z),
-                        (target.x, target.z),
-                        reach - i64::from(NAV_CELL_SIZE),
-                        clear_line,
-                        &mut expansions,
-                    )
-                    .map_or(Vec3i::ZERO, |path| {
+                    path.map_or(Vec3i::ZERO, |path| {
                         pursuit_velocity(grid, monster.position, &path, speed)
                     })
                 }
@@ -2940,12 +3093,14 @@ impl ArpgGame {
             };
             velocities.push((body_id, velocity));
         }
+        cache.fields.retain(|key, _| chased_fields.contains(key));
+        self.navigation = cache;
+        self.navigation_work.add(work);
         for (body_id, velocity) in velocities {
             self.world
                 .set_velocity(body_id, velocity)
                 .map_err(physics_error)?;
         }
-        self.navigation_expansions = self.navigation_expansions.saturating_add(expansions);
         Ok(())
     }
 
@@ -3010,16 +3165,10 @@ impl ArpgGame {
         }
     }
 
-    /// Passability of `room_id` for a monster body: fixed bodies (walls, pillars, locked
-    /// doors) inflated by the body's clearance.
-    fn room_grid(&self, room_id: RoomId) -> RoomGrid {
-        let room = self
-            .rooms
-            .iter()
-            .find(|room| room.id == room_id)
-            .expect("monsters belong to generated rooms");
-        let obstacles = self
-            .world
+    /// XZ footprints of the world's fixed bodies (walls, pillars, locked doors), in body
+    /// order: the navigation topology.
+    fn fixed_footprints(&self) -> Vec<Rect> {
+        self.world
             .bodies()
             .filter(|body| body.kind() == BodyKind::Fixed)
             .map(|body| {
@@ -3027,7 +3176,17 @@ impl ArpgGame {
                 let half = body.half_extents();
                 Rect::centered(position.x, position.z, half.x, half.z)
             })
-            .collect::<Vec<_>>();
+            .collect()
+    }
+
+    /// Passability of `room_id` for a monster body: the fixed footprints inflated by the
+    /// body's clearance.
+    fn room_grid(&self, room_id: RoomId, obstacles: &[Rect]) -> RoomGrid {
+        let room = self
+            .rooms
+            .iter()
+            .find(|room| room.id == room_id)
+            .expect("monsters belong to generated rooms");
         RoomGrid::new(
             Rect {
                 min_x: room.min_x,
@@ -3035,7 +3194,7 @@ impl ArpgGame {
                 min_z: room.min_z,
                 max_z: room.max_z,
             },
-            &obstacles,
+            obstacles,
             // A body may sit anywhere in its cell; one cell of margin keeps it strictly clear
             // of obstacles, which physics treats as contact even when only touching.
             MONSTER_BODY_HALF_EXTENTS.x.max(MONSTER_BODY_HALF_EXTENTS.z) + NAV_CELL_SIZE,
@@ -7853,6 +8012,225 @@ mod tests {
 
         assert!(game.world.body(ArpgGame::monster_body_id(1)).is_none());
         assert!(game.world.body(ArpgGame::monster_body_id(2)).is_some());
+    }
+
+    /// Deterministic xorshift for randomized pursuit scenarios.
+    struct ScenarioRng(u64);
+
+    impl ScenarioRng {
+        fn between(&mut self, low: i32, high: i32) -> i32 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            low + i32::try_from((self.0 >> 33) % u64::from((high - low + 1).unsigned_abs()))
+                .unwrap()
+        }
+    }
+
+    /// A seeded chase in the strike arena: random pillars and pursuers, a target walking in
+    /// random directions, and a pillar that appears at tick 40 and vanishes at tick 80.
+    /// Returns the initial and every tick's snapshot, and the navigation work.
+    fn random_chase(seed: u64, mode: NavigationMode) -> (Vec<ArpgSnapshot>, NavigationWork) {
+        let mut rng = ScenarioRng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+        let (mut game, x, z) = strike_arena();
+        game.navigation_mode = mode;
+        let mut bodies = vec![(Vec3i::new(x, PLAYER_Y, z), Vec3i::new(80, 50, 80))];
+        let mut free_spot = |rng: &mut ScenarioRng, half: Vec3i, near: i32| loop {
+            let spot = Vec3i::new(
+                x + rng.between(-near, near),
+                PLAYER_Y,
+                z + rng.between(-near / 2, near / 2),
+            );
+            if bodies
+                .iter()
+                .all(|&(other, other_half)| !overlaps_xz(spot, half, other, other_half))
+            {
+                bodies.push((spot, half));
+                return spot;
+            }
+        };
+        for index in 0..rng.between(0, 4) {
+            let half = Vec3i::new(rng.between(10, 60), 50, rng.between(10, 60));
+            let spot = free_spot(&mut rng, half, 450);
+            place_blocker(&mut game, index as u64, spot.x, spot.z, half);
+        }
+        for id in 1..=rng.between(1, 3) {
+            let spot = free_spot(&mut rng, MONSTER_BODY_HALF_EXTENTS, 700);
+            place_monster(&mut game, id as u32, spot.x, spot.z);
+        }
+        let late_pillar = free_spot(&mut rng, Vec3i::new(40, 50, 40), 450);
+        let mut snapshots = vec![game.snapshot().unwrap()];
+        for tick in 0..120_u32 {
+            if tick % 20 == 0 {
+                let (dx, dz) = (rng.between(-1, 1), rng.between(-1, 1));
+                game.apply_command(
+                    PlayerCommand::new(
+                        1,
+                        tick + 1,
+                        ArpgCommand::SetMovement {
+                            x: dx as i8,
+                            z: dz as i8,
+                        },
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+            }
+            if tick == 40 {
+                place_blocker(
+                    &mut game,
+                    50,
+                    late_pillar.x,
+                    late_pillar.z,
+                    Vec3i::new(40, 50, 40),
+                );
+            }
+            if tick == 80 {
+                game.world.remove_body(BodyId(STATIC_BODY_BASE + 950));
+            }
+            game.advance_tick().unwrap();
+            snapshots.push(game.snapshot().unwrap());
+        }
+        (snapshots, game.navigation_work())
+    }
+
+    #[test]
+    fn retained_navigation_never_changes_the_game() {
+        let mut total = NavigationWork::default();
+        for seed in 0..16 {
+            let (retained, work) = random_chase(seed, NavigationMode::Retained);
+            let (uncached, _) = random_chase(seed, NavigationMode::RetainedWithoutCache);
+            assert_eq!(retained, uncached, "seed {seed}");
+            total.add(work);
+        }
+        // The pillar that comes and goes rebuilds grids while pursuers still need them.
+        assert!(total.grid_builds > 16, "{total:?}");
+        assert!(total.repaths() < total.pursuit_ticks, "{total:?}");
+    }
+
+    #[test]
+    fn retained_and_per_tick_pursuers_set_out_alike() {
+        // Whether a pursuer moves on its first tick depends only on reachability, which the
+        // retained planner shares with the per-tick reference.
+        let moved = |snapshots: &[ArpgSnapshot]| {
+            snapshots[0]
+                .monsters
+                .iter()
+                .zip(&snapshots[1].monsters)
+                .map(|(before, after)| before.position != after.position)
+                .collect::<Vec<_>>()
+        };
+        let mut moving = 0;
+        for seed in 100..160 {
+            let (retained, _) = random_chase(seed, NavigationMode::Retained);
+            let (reference, _) = random_chase(seed, NavigationMode::PerTickReference);
+            assert_eq!(retained[0], reference[0]);
+            assert_eq!(moved(&retained), moved(&reference), "seed {seed}");
+            moving += moved(&retained).iter().filter(|&&moved| moved).count();
+        }
+        assert!(moving > 30);
+    }
+
+    #[test]
+    fn strict_goal_cells_have_a_clear_physics_strike_line_to_their_whole_target_cell() {
+        let reach = content().monster.strike.reach;
+        for seed in 0..12 {
+            let mut rng = ScenarioRng(seed | 1);
+            let (mut game, x, z) = strike_arena();
+            for index in 0..4 {
+                let half = Vec3i::new(rng.between(10, 60), 50, rng.between(10, 60));
+                place_blocker(
+                    &mut game,
+                    index,
+                    x + rng.between(-400, 400),
+                    z + rng.between(-250, 250),
+                    half,
+                );
+            }
+            let obstacles = game.fixed_footprints();
+            let grid = game.room_grid(STRIKE_ROOM, &obstacles);
+            for _ in 0..8 {
+                let target = (x + rng.between(-450, 450), z + rng.between(-300, 300));
+                let Some(cell) = grid.target_cell(target) else {
+                    continue;
+                };
+                let field = grid.target_field(cell, reach - i64::from(NAV_CELL_SIZE), &obstacles);
+                let (goals, area) = field.strict_goal_centres(&grid);
+                let samples = [
+                    (area.min_x, area.min_z),
+                    (area.max_x, area.max_z),
+                    (area.min_x, area.max_z),
+                    (area.max_x, area.min_z),
+                    ((area.min_x + area.max_x) / 2, (area.min_z + area.max_z) / 2),
+                    (target.0, target.1),
+                ];
+                for (gx, gz) in goals {
+                    for (tx, tz) in samples {
+                        let from = Vec3i::new(gx, PLAYER_Y, gz);
+                        let to = Vec3i::new(tx, PLAYER_Y, tz);
+                        assert!(
+                            xz_distance_sq(from, to) <= (reach - i64::from(NAV_CELL_SIZE)).pow(2)
+                        );
+                        assert!(
+                            !game.strike_obstructed(from, to).unwrap(),
+                            "seed {seed}: goal ({gx}, {gz}) to ({tx}, {tz})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_chase_continues_identically_after_a_save_that_drops_the_navigation_cache() {
+        use physics_workloads::{Case, commands};
+        // The room's generated monsters, moved to its west edge: saves only accept the
+        // generated monster set in its own rooms.
+        let mut game = ArpgGame::new_with_seed(42).unwrap();
+        let room = game
+            .rooms
+            .iter()
+            .find(|room| room.id == STRIKE_ROOM)
+            .unwrap()
+            .clone();
+        let (x, z) = room.center();
+        game.player_spawns[0] = Vec3i::new(x, PLAYER_Y, z);
+        game.add_player(1).unwrap();
+        for (index, monster) in game
+            .monsters
+            .iter_mut()
+            .filter(|monster| monster.room_id == STRIKE_ROOM)
+            .enumerate()
+        {
+            monster.position = Vec3i::new(
+                room.min_x + 120,
+                PLAYER_Y,
+                z + i32::try_from(index).unwrap() * 90,
+            );
+        }
+        game.reconcile_encounters().unwrap();
+        for tick in 0..45 {
+            commands(&mut game, Case::Chase, tick);
+            game.advance_tick().unwrap();
+        }
+        assert!(
+            !game.navigation.fields.is_empty(),
+            "the uninterrupted game holds fields"
+        );
+        let mut restored = ArpgGame::from_save_state(game.save_state().unwrap()).unwrap();
+        assert!(restored.navigation.fields.is_empty());
+        for tick in 45..140 {
+            commands(&mut game, Case::Chase, tick);
+            commands(&mut restored, Case::Chase, tick);
+            game.advance_tick().unwrap();
+            restored.advance_tick().unwrap();
+            assert_eq!(
+                restored.snapshot().unwrap(),
+                game.snapshot().unwrap(),
+                "tick {tick}"
+            );
+        }
+        assert!(game.navigation_work().pursuit_ticks > 0);
     }
 
     #[test]

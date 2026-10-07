@@ -53,9 +53,10 @@ pub(super) enum Case {
     Combat,
     Crowd,
     Lifecycle,
+    Chase,
 }
 impl Case {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 10] = [
         Self::Quiet,
         Self::PartyQuiet,
         Self::Sparse,
@@ -65,6 +66,7 @@ impl Case {
         Self::Combat,
         Self::Crowd,
         Self::Lifecycle,
+        Self::Chase,
     ];
     fn name(self) -> &'static str {
         match self {
@@ -77,6 +79,7 @@ impl Case {
             Self::Combat => "combat",
             Self::Crowd => "crowd",
             Self::Lifecycle => "lifecycle",
+            Self::Chase => "chase",
         }
     }
 }
@@ -119,6 +122,22 @@ pub(super) fn fixture(case: Case, seed: u32) -> ArpgGame {
                 }
             }
         }
+        Case::Chase => {
+            // Every generated enemy chases one player across room 2 from its far edges.
+            let room = game.rooms.iter().find(|room| room.id == 2).unwrap();
+            let (x, z) = room.center();
+            let (west, east) = (room.min_x + 120, room.max_x - 120);
+            game.player_spawns[0] = Vec3i::new(x, PLAYER_Y, z);
+            for (index, monster) in game.monsters.iter_mut().enumerate() {
+                let index = i32::try_from(index).unwrap();
+                monster.room_id = 2;
+                monster.position = Vec3i::new(
+                    if index % 2 == 0 { west } else { east },
+                    PLAYER_Y,
+                    z + (index - 2) * 90,
+                );
+            }
+        }
         _ => {}
     }
     let count = if matches!(case, Case::PartyQuiet | Case::Sparse | Case::Lifecycle) {
@@ -132,7 +151,7 @@ pub(super) fn fixture(case: Case, seed: u32) -> ArpgGame {
     game.reconcile_encounters().unwrap();
     game
 }
-fn commands(game: &mut ArpgGame, case: Case, tick: u32) -> (Vec<String>, Duration) {
+pub(super) fn commands(game: &mut ArpgGame, case: Case, tick: u32) -> (Vec<String>, Duration) {
     let mut outcomes = Vec::new();
     let mut elapsed = Duration::ZERO;
     if case == Case::Lifecycle {
@@ -159,6 +178,20 @@ fn commands(game: &mut ArpgGame, case: Case, tick: u32) -> (Vec<String>, Duratio
         Case::Combat if tick < 64 && tick.is_multiple_of(16) => Some(ArpgCommand::PrimaryAttack),
         Case::Combat if tick == 64 => Some(ArpgCommand::SecondaryAttack),
         Case::Combat if tick == 96 => Some(ArpgCommand::Interact),
+        // The target walks a square with pauses, crossing navigation cells as it goes.
+        Case::Chase if tick.is_multiple_of(15) => {
+            let (x, z) = [
+                (1, 0),
+                (0, 0),
+                (0, 1),
+                (0, 0),
+                (-1, 0),
+                (0, 0),
+                (0, -1),
+                (0, 0),
+            ][(tick / 15) as usize % 8];
+            Some(ArpgCommand::SetMovement { x, z })
+        }
         Case::Crowd if tick.is_multiple_of(24) => Some(if tick < 96 {
             ArpgCommand::PrimaryAttack
         } else {
@@ -206,9 +239,16 @@ struct Measurement {
     observer_body_pointer_bytes: usize,
     stats: Vec<StepStats>,
     end: ArpgSnapshot,
+    navigation: NavigationWork,
+    /// Largest per-tick navigation work, by expansions.
+    peak_navigation_tick: NavigationWork,
 }
 fn replay(case: Case, seed: u32, ticks: u32) -> Measurement {
+    replay_navigating(case, seed, ticks, NavigationMode::Retained)
+}
+fn replay_navigating(case: Case, seed: u32, ticks: u32, mode: NavigationMode) -> Measurement {
     let mut game = fixture(case, seed);
+    game.navigation_mode = mode;
     let mut m = Measurement {
         trace: Vec::new(),
         tick: 0,
@@ -218,11 +258,18 @@ fn replay(case: Case, seed: u32, ticks: u32) -> Measurement {
         observer_body_pointer_bytes: 0,
         stats: Vec::new(),
         end: game.snapshot().unwrap(),
+        navigation: NavigationWork::default(),
+        peak_navigation_tick: NavigationWork::default(),
     };
     for tick in 0..ticks {
         let (command_outcomes, elapsed) = commands(&mut game, case, tick);
         m.command += elapsed.as_nanos();
+        let before = game.navigation_work();
         let (elapsed, physics) = timed_tick(&mut game);
+        let tick_work = game.navigation_work().since(before);
+        if tick_work.expansions > m.peak_navigation_tick.expansions {
+            m.peak_navigation_tick = tick_work;
+        }
         m.tick += elapsed.as_nanos();
         m.physics += physics.elapsed.as_nanos();
         m.stats.push(physics.stats);
@@ -234,6 +281,7 @@ fn replay(case: Case, seed: u32, ticks: u32) -> Measurement {
         m.trace.extend(frame(&game, &payload, &command_outcomes));
         m.end = snapshot;
     }
+    m.navigation = game.navigation_work();
     assert_eq!(m.end.tick, u64::from(ticks));
     match case {
         Case::Corner => {
@@ -247,6 +295,10 @@ fn replay(case: Case, seed: u32, ticks: u32) -> Measurement {
             assert_eq!(m.end.players[0].gold, 10);
         }
         Case::Lifecycle if ticks >= 120 => assert_eq!(m.end.players.len(), 4),
+        Case::Chase if ticks >= 120 => {
+            assert!(m.navigation.pursuit_ticks > u64::from(ticks));
+            assert!(m.end.monsters.iter().all(|monster| monster.health > 0));
+        }
         _ => {}
     }
     m
@@ -294,9 +346,58 @@ fn seeded_physics_workload_matrix() {
                         "trace_bytes":m.trace.len(),"observer_body_pointer_bytes":m.observer_body_pointer_bytes,
                         "final_players":m.end.players.len(),"final_monsters":m.end.monsters.len(),
                         "last_step_stats":format!("{:?}",m.stats.last().unwrap()),
+                        "navigation":format!("{:?}",m.navigation),
                     })
                 );
             }
         }
+    }
+}
+
+/// The chase workload's navigation work against the #65 per-tick planner (#110): the
+/// retained planner must give the same game with its cache dropped every tick, and needs
+/// far fewer expansions, physics queries and grid builds than the per-tick reference.
+#[test]
+fn chase_navigation_work_against_the_per_tick_reference() {
+    for seed in [42, 0xDEAD_BEEF, 0xA420_0916] {
+        let retained = replay_navigating(Case::Chase, seed, 120, NavigationMode::Retained);
+        let uncached =
+            replay_navigating(Case::Chase, seed, 120, NavigationMode::RetainedWithoutCache);
+        let reference = replay_navigating(Case::Chase, seed, 120, NavigationMode::PerTickReference);
+        assert_eq!(retained.trace, uncached.trace, "seed {seed}");
+        let (work, base) = (retained.navigation, reference.navigation);
+        println!(
+            "ARPG_NAVIGATION {}",
+            serde_json::json!({
+                "seed": seed, "ticks": 120,
+                "retained": format!("{work:?}"),
+                "retained_peak_tick": format!("{:?}", retained.peak_navigation_tick),
+                "reference": format!("{base:?}"),
+                "reference_peak_tick": format!("{:?}", reference.peak_navigation_tick),
+                "uncached_expansions": uncached.navigation.expansions,
+                // Advisory: whole ticks, in the profile the test runs in.
+                "retained_tick_ms": retained.tick as f64 / 1e6,
+                "uncached_tick_ms": uncached.tick as f64 / 1e6,
+                "reference_tick_ms": reference.tick as f64 / 1e6,
+            })
+        );
+        assert_eq!(
+            base.repaths(),
+            base.pursuit_ticks,
+            "the reference replans every tick"
+        );
+        assert!(
+            work.expansions * 2 < base.expansions,
+            "seed {seed}: {work:?} {base:?}"
+        );
+        assert!(
+            work.physics_queries * 2 < base.physics_queries,
+            "seed {seed}"
+        );
+        assert!(
+            work.repaths() * 2 < work.pursuit_ticks,
+            "seed {seed}: {work:?}"
+        );
+        assert_eq!(work.grid_builds, 1, "one room grid, never rebuilt");
     }
 }

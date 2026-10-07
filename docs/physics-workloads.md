@@ -21,8 +21,12 @@ command, encounter, action and snapshot paths. Nine workloads use seeds 42,
 - A synthetic crowded encounter, relocating the five existing generated monsters
   into one room without changing their AI, attack rules or number.
 - Moving players with removal and re-addition of player 4.
+- A chase (added with [issue 110](https://github.com/moritzbrantner/arpg/issues/110),
+  after the physics comparison below): the five generated monsters start at the far
+  edges of one room and pursue a player who walks a square with pauses. See
+  [Enemy navigation work](#enemy-navigation-work).
 
-All 81 old/new native traces match byte for byte. Each frame includes the complete
+All 81 old/new native traces of the first nine workloads match byte for byte. Each frame includes the complete
 snapshot JSON, ordered physical bodies, private player/action/movement state,
 sequence counters, monsters, loot, next loot ID, spawn positions and command
 outcomes. Each workload also has acceptance assertions; combat must award 50 XP
@@ -79,12 +83,114 @@ measurement output counts those pointers cumulatively; it excludes trace/string
 allocations and is not retained engine memory or RSS. No retained-memory improvement
 is claimed. Test instrumentation is compiled out of production Rust/WASM builds.
 
+## Enemy navigation work
+
+Pursuit (#65) rasterizes a room into 20-unit cells and plans with A* to a cell within
+strike reach of the target. Its first version rebuilt the room grid and planned anew
+for every pursuing monster on every tick. Since #110 the plans are retained:
+
+- **Room grids** are kept while the fixed bodies are unchanged. Every tick that someone
+  pursues, the fixed-body footprints are compared with the ones the grids came from. A
+  door that locks or unlocks, or a fixed body added or removed, drops all grids and
+  fields.
+- **Target fields** are kept per room and *target cell* while a pursuer still chases that
+  cell. A field holds exact distances to its *strict goals*: free cells whose centre is
+  within reach of every point of the target's cell, with a clear line to all of it. A
+  separating-axis test of the line fan against each fixed footprint, grown by one unit,
+  checks the lines.
+- **Routes** are the *canonical descent* of a field. From each cell, the route takes the
+  first move in the fixed neighbour order that is exactly one step nearer to a strict
+  goal. A search is a multi-source A* from the goals toward the body's cell. It closes
+  every cell on any shortest route, so the route from any later cell on that route is its
+  suffix, and a body walking its route never searches again.
+- **Repaths** happen only when the target enters another cell, the fixed bodies change,
+  or a body is pushed off every route its field knows. A per-tick exact plan, the #65
+  planner, is used in three cases. A body already on a strict goal finishes its approach
+  with it, which costs no expansion and one physics query. It is also used when no strict
+  goal is reachable, and when the retained route cannot be shown to cost at most
+  `ROUTE_SLACK` (two straight steps) more than the exact plan. The bound comes from
+  distances to the *loose goals*: every free cell within reach of some point of the
+  target's cell. They include every exact goal, so their distance bounds the exact plan's
+  cost from below. When the octile cost to the nearest loose goal already proves the
+  bound, nothing is searched.
+
+### Determinism
+
+A route is a pure function of the fixed bodies, the target's cell and the body's cell.
+It does not depend on what the cache holds. The cache only decides how much has to be
+searched, so it is never saved. After a load it starts empty and gives the same routes.
+The fallback decisions are pure functions of the same inputs, so the
+pursue-or-stand decision is exactly the per-tick planner's: a strict goal is an exact
+goal for every target position in its cell, and an unreachable loose goal set means the
+exact planner has no route either. A retained route reaches an exact goal for the
+current target position and costs at most `ROUTE_SLACK` more than the exact plan.
+
+The checks are:
+
+- `navigation::tests::retained_routes_match_fresh_fields_and_the_per_tick_reference`
+  covers 120 random rooms with 3 to 8 obstacles and 40 steps each. Bodies walk their
+  routes or are knocked off them, and targets walk across cells. Each retained route
+  equals the route from a freshly built field. Reachability agrees with the exact
+  planner. Every retained route ends at an exact goal and exceeds the exact cost by at
+  most 20, which is reached. Retained work there is 205,578 expansions, including exact
+  plans, against 295,502 for planning every step.
+- `retained_navigation_never_changes_the_game` covers 16 random strike-arena chases with
+  pillars, up to three pursuers, a walking target, and a pillar that appears and later
+  vanishes. Each one gives identical snapshots on every tick with the cache kept and
+  with it dropped every tick.
+- `retained_and_per_tick_pursuers_set_out_alike`: in 60 random chases, each pursuer
+  moves on its first tick exactly when the per-tick reference moves it.
+- `strict_goal_cells_have_a_clear_physics_strike_line_to_their_whole_target_cell` checks
+  the line test against the physics ray.
+- `a_chase_continues_identically_after_a_save_that_drops_the_navigation_cache` runs 95
+  ticks after a save taken mid-chase while fields are held. Every snapshot equals the
+  uninterrupted run's.
+
+### Counts
+
+`physics_workloads::chase_navigation_work_against_the_per_tick_reference` replays the
+chase workload for 120 ticks per seed, with five pursuers on every tick. The counts are
+deterministic. A repath is a field search or an exact plan.
+
+| Seed | Planner | Expansions | Peak expansions in one tick | Repaths | Physics queries | Grid builds |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 42 | per tick (#65) | 114,570 | 1,258 | 600 | 600 | 120 |
+| 42 | retained | 15,735 | 873 | 109 | 0 | 1 |
+| 3735928559 | per tick (#65) | 77,351 | 962 | 600 | 600 | 120 |
+| 3735928559 | retained | 10,656 | 663 | 110 | 0 | 1 |
+| 2753562902 | per tick (#65) | 114,756 | 1,259 | 600 | 600 | 120 |
+| 2753562902 | retained | 17,052 | 873 | 119 | 0 | 1 |
+
+The retained planner needs about a seventh of the expansions and a fifth of the repaths.
+It made no physics query in this chase, because no pursuer reached a strict goal and
+every route was within the bound. It rasterizes the room once instead of on every tick. The peak tick is not much lower. When the target enters a
+new cell, all five pursuers search on that tick, and closing every shortest route costs
+more than one A* path. The test asserts that expansions and physics queries are at most
+half of the reference's. It also asserts that repaths are fewer than half of the pursuit
+ticks, and that the retained trace equals the trace with the cache dropped every tick.
+The two planners give different traces, because their shortest routes may break ties
+differently.
+
+The same test prints advisory whole-tick timings. The table shows medians of three
+release runs on `x86_64-unknown-linux-gnu` with rustc 1.98.1, dated 2026-10-07, in
+milliseconds for 120 ticks. *Without cache* is the retained planner with its cache dropped every tick.
+
+| Seed | Per tick (#65) | Without cache | Retained |
+| --- | ---: | ---: | ---: |
+| 42 | 75.87 | 32.16 | 6.99 |
+| 3735928559 | 56.08 | 28.61 | 6.00 |
+| 2753562902 | 78.92 | 37.85 | 6.95 |
+
+Both uncached planners rasterize the room on every tick. The test does not separate
+that cost from the searches.
+
 ## Reproduce
 
 Run current-pin replay/acceptance and the opt-in measurement matrix:
 
 ```sh
 cargo test --locked -p arpg-core physics_
+cargo test --locked -p arpg-core chase_navigation -- --nocapture
 ARPG_PHYSICS_TRACE_DIR=/tmp/arpg-current-traces cargo test --release --locked \
   -p arpg-core physics_workloads::seeded_physics_workload_matrix -- --ignored --nocapture
 cd web
