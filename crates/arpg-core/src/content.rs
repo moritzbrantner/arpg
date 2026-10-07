@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{ActionKind, ComboInput};
 
-pub const CONTENT_FORMAT_VERSION: u16 = 4;
+pub const CONTENT_FORMAT_VERSION: u16 = 5;
 /// Touching monster and player bodies keep their centres up to √2 times their
 /// combined XZ half extents apart (85 units), and pursuit stops one navigation
 /// cell inside strike reach, so a monster strike must reach past both.
@@ -56,6 +56,17 @@ pub struct ContentBundle {
     pub bow: BowData,
     pub progression: ProgressionData,
     pub loot: LootData,
+    pub targeting: TargetingData,
+}
+
+/// Optional target-lock tuning. Distances are centre-to-centre world units on the plane.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TargetingData {
+    /// Furthest distance at which a lock can be acquired or cycled to.
+    pub lock_range: i64,
+    /// A held lock stays until its target is beyond this distance (stickiness).
+    pub break_range: i64,
 }
 
 /// Shield guard tuning.
@@ -255,6 +266,7 @@ pub(crate) struct Content {
     pub bow: BowData,
     pub progression: ProgressionData,
     pub loot: LootData,
+    pub targeting: TargetingData,
 }
 
 impl Content {
@@ -667,6 +679,17 @@ impl ContentBundle {
             fail("loot".into(), "gold rewards must be positive");
         }
 
+        let targeting = self.targeting;
+        if !(1..=5_000).contains(&targeting.lock_range) {
+            fail("targeting.lockRange".into(), "must be within 1..=5000");
+        }
+        if targeting.break_range < targeting.lock_range || targeting.break_range > 10_000 {
+            fail(
+                "targeting.breakRange".into(),
+                "must satisfy lockRange <= breakRange <= 10000",
+            );
+        }
+
         if errors.is_empty() {
             Ok(Content {
                 revision: self.revision(),
@@ -679,6 +702,7 @@ impl ContentBundle {
                 bow,
                 progression,
                 loot,
+                targeting,
             })
         } else {
             Err(errors)
@@ -822,12 +846,14 @@ mod tests {
             bundle.guard.raise_ticks = 0;
             bundle.progression.experience_per_level = 0;
             bundle.loot.chest_gold = 0;
+            bundle.targeting.break_range = bundle.targeting.lock_range - 1;
         });
         for path in [
             "bow.minDrawTicks",
             "bow.arrowMinDamage",
             "guard.raiseTicks",
             "progression.experiencePerLevel",
+            "targeting.breakRange",
             "loot",
         ] {
             assert!(
@@ -886,11 +912,9 @@ mod tests {
     #[test]
     fn an_older_format_bundle_reports_its_version_before_missing_fields() {
         let mut previous: serde_json::Value = serde_json::from_str(BASE_BUNDLE).unwrap();
-        previous["formatVersion"] = 3.into();
+        previous["formatVersion"] = 4.into();
         let fields = previous.as_object_mut().unwrap();
-        for added in ["roomMonsters", "guard", "bow", "progression", "loot"] {
-            fields.remove(added);
-        }
+        fields.remove("targeting");
 
         let errors = ContentBundle::from_json(&previous.to_string()).unwrap_err();
 
@@ -899,7 +923,7 @@ mod tests {
         assert!(
             errors[0]
                 .message
-                .contains("unsupported content format version 3")
+                .contains("unsupported content format version 4")
         );
     }
 }

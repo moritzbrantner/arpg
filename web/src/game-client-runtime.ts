@@ -115,7 +115,13 @@ export interface RestoredGame {
   guardHeld?: boolean;
   // Whether the saved authority is mid-draw; this client holds no draw yet.
   drawHeld?: boolean;
+  // Whether the saved authority holds aim intent; this client points nowhere yet.
+  aimHeld?: boolean;
 }
+
+// A semantic aim direction for the authority (components within ±1000), or null for the
+// default committed facing.
+export type AimDirection = [number, number] | null;
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
@@ -158,6 +164,8 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
   // Every device currently holding the bow draw. The last deliberate release shoots; an
   // interrupted hold (pointer cancel, focus loss) only cancels.
   const drawSources = new Set<GuardSource>();
+  // The aim intent last sent to the authority; repeated identical aims are not resent.
+  let aim: AimDirection = null;
 
   const update = (patch: Partial<ClientState>) => {
     let changed = false;
@@ -243,6 +251,7 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
     movement = idleMovement();
     guardSources.clear();
     drawSources.clear();
+    aim = null;
   };
 
   // Replaces the current source. The returned token identifies the new generation.
@@ -268,13 +277,14 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
     return next;
   };
 
-  const dispatch = (command: Record<string, unknown>) => {
-    if (disposed() || state.lifecycle === "idle" || state.lifecycle === "failed") return;
+  // Whether the command reached the authority (a connecting session drops it).
+  const dispatch = (command: Record<string, unknown>): boolean => {
+    if (disposed() || state.lifecycle === "idle" || state.lifecycle === "failed") return false;
     const playerId = state.playerId;
     try {
       const encoded = encodeCommand(command);
       if (state.mode === "guest") {
-        if (!peer || !playerId || !peer.hostParticipantId) return;
+        if (!peer || !playerId || !peer.hostParticipantId) return false;
         peer.sendReliable(peer.hostParticipantId, {
           kind: "command",
           sequence: ++sequence,
@@ -282,16 +292,18 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
         });
       } else if (state.mode === "dedicated") {
         const session = dedicated;
-        if (!session || !playerId) return;
+        if (!session || !playerId) return false;
         void session.sendCommand(++sequence, textEncoder.encode(encoded)).catch((error) => {
           if (dedicated === session) status(`Dedicated command failed: ${error}`);
         });
       } else {
-        if (!game || !playerId) return;
+        if (!game || !playerId) return false;
         game.applyCommand(playerId, ++sequence, encoded);
       }
+      return true;
     } catch (error) {
       status(String(error));
+      return false;
     }
   };
 
@@ -337,6 +349,7 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
       movement: [x, z],
       guardHeld = false,
       drawHeld = false,
+      aimHeld = false,
     }: RestoredGame) {
       if (disposed()) {
         next.free?.();
@@ -349,6 +362,8 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
       if (guardHeld) dispatch({ type: "setGuard", raised: false });
       // A restored draw nobody is holding is lowered, never fired.
       if (drawHeld) dispatch({ type: "cancelBow" });
+      // A restored aim nobody is pointing returns to committed facing until the next aim.
+      if (aimHeld) dispatch({ type: "setAim", direction: null });
     },
 
     async hostPeer(apiBase: string) {
@@ -548,6 +563,28 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
       dispatch({ type: interrupted ? "cancelBow" : "releaseBow" });
     },
 
+    // Sends aim intent (mouse, stick or touch) only when it changes; null clears it.
+    setAim(direction: AimDirection) {
+      if (
+        aim === direction ||
+        (aim && direction && aim[0] === direction[0] && aim[1] === direction[1])
+      )
+        return;
+      const next: AimDirection = direction ? [direction[0], direction[1]] : null;
+      // Remember the direction only once it reached the authority, so a session that was
+      // still connecting receives the same direction on the next pointer event.
+      if (dispatch({ type: "setAim", direction: next })) aim = next;
+    },
+
+    // Locks the nearest target or cycles the lock; the authority owns eligibility and order.
+    cycleTarget() {
+      dispatch({ type: "cycleTarget" });
+    },
+
+    clearTarget() {
+      dispatch({ type: "clearTarget" });
+    },
+
     // Drops every held bow draw without shooting (weapon switches, menus).
     cancelBowDraw() {
       if (drawSources.size === 0) return;
@@ -571,6 +608,11 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
       if (drawSources.size > 0) {
         drawSources.clear();
         dispatch({ type: "cancelBow" });
+      }
+      // The pointer position is unknown after focus loss: fall back to committed facing.
+      if (aim) {
+        aim = null;
+        dispatch({ type: "setAim", direction: null });
       }
     },
 

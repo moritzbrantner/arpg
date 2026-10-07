@@ -5,7 +5,7 @@ Gameplay tuning lives in one typed, versioned bundle:
 validated by [`content.rs`](../crates/arpg-core/src/content.rs). Definitions *select*
 supported behaviour; executable rules stay in Rust. Appearance and audio never live here.
 
-## What the bundle holds (format 4)
+## What the bundle holds (format 5)
 
 | Section | Contents |
 | --- | --- |
@@ -19,6 +19,7 @@ supported behaviour; executable rules stay in Rust. Appearance and audio never l
 | `bow` | Draw thresholds, arrow speed/damage range, lifetime, stagger and live-arrow cap. |
 | `progression` | Experience per level and the base/per-level health and attack damage. |
 | `loot` | Gold dropped by a defeated monster and held by a reward chest. |
+| `targeting` | Target-lock acquisition range and the larger break range that keeps a held lock (stickiness). |
 
 Ids are 1–64 ASCII characters, unique per collection and published to clients (strike
 events, `MonsterSnapshot.definition`), so presentation can key appearance and audio by them.

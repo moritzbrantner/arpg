@@ -383,4 +383,115 @@ mod tests {
             .collect::<BTreeSet<_>>();
         assert_eq!(sources.len(), 2, "player and monster strikes both resolve");
     }
+
+    #[test]
+    fn aim_and_target_lock_match_between_local_and_dedicated_execution() {
+        use arpg_core::{ArpgCommand, ArpgGame, ScenarioId, Weapon};
+        use arpg_protocol::JsonProtocol;
+        use game_server::{MatchRuntime, RECONNECT_TOKEN_BYTES, ReconnectToken};
+
+        const TICKS: u64 = 180;
+        // Player 1 locks the scenario target and shoots; player 2 aims its sword off-axis
+        // while walking another way, then clears its aim.
+        let script = |tick: u64| -> Vec<(PlayerId, ArpgCommand)> {
+            match tick {
+                1 => vec![
+                    (1, ArpgCommand::CycleTarget),
+                    (
+                        2,
+                        ArpgCommand::SetAim {
+                            direction: Some([350, -900]),
+                        },
+                    ),
+                ],
+                2 => vec![
+                    (
+                        1,
+                        ArpgCommand::EquipWeapon {
+                            weapon: Weapon::Bow,
+                        },
+                    ),
+                    (2, ArpgCommand::SetMovement { x: -1, z: 1 }),
+                ],
+                3 => vec![(1, ArpgCommand::DrawBow)],
+                30 => vec![(2, ArpgCommand::SetMovement { x: 0, z: 0 })],
+                40 => vec![
+                    (1, ArpgCommand::ReleaseBow),
+                    (2, ArpgCommand::PrimaryAttack),
+                ],
+                41 => vec![(1, ArpgCommand::ClearTarget)],
+                90 => vec![(2, ArpgCommand::SetAim { direction: None })],
+                _ => Vec::new(),
+            }
+        };
+        let protocol = JsonProtocol;
+        let seed = 0xA420_0916;
+
+        let mut local = ArpgGame::new_scenario(ScenarioId::Archery, seed).unwrap();
+        local.add_player(1).unwrap();
+        local.add_player(2).unwrap();
+        let mut sequences = [0_u32; 3];
+        let mut local_snapshots = Vec::new();
+        for tick in 0..TICKS {
+            for (player_id, command) in script(tick) {
+                let slot = usize::try_from(player_id).unwrap();
+                sequences[slot] += 1;
+                local
+                    .apply_command(PlayerCommand::new(player_id, sequences[slot], command).unwrap())
+                    .unwrap();
+            }
+            local.advance_tick().unwrap();
+            local_snapshots.push(local.snapshot().unwrap());
+        }
+
+        let adapter = GameServerAdapter::new(
+            ArpgGame::new_scenario(ScenarioId::Archery, seed).unwrap(),
+            JsonProtocol,
+        );
+        let mut runtime = MatchRuntime::new(adapter, 120);
+        let leases = [7, 8].map(|byte| {
+            runtime
+                .admit(ReconnectToken([byte; RECONNECT_TOKEN_BYTES]))
+                .unwrap()
+        });
+        let mut sequences = [0_u32; 3];
+        for (tick, local) in local_snapshots.iter().enumerate() {
+            for (player_id, command) in script(u64::try_from(tick).unwrap()) {
+                let slot = usize::try_from(player_id).unwrap();
+                sequences[slot] += 1;
+                let lease = leases[slot - 1];
+                runtime
+                    .submit_command(
+                        lease.player_id,
+                        lease.connection_epoch,
+                        sequences[slot],
+                        &protocol.encode_command(&command).unwrap(),
+                    )
+                    .unwrap();
+            }
+            runtime.advance_tick().unwrap();
+            let snapshot = runtime.snapshot().unwrap();
+            let server = protocol.decode_snapshot(&snapshot.payload).unwrap();
+            assert_eq!(&server, local, "tick {tick}");
+        }
+
+        let player = |snapshot: &arpg_core::ArpgSnapshot, id: PlayerId| {
+            snapshot
+                .players
+                .iter()
+                .find(|player| player.id == id)
+                .cloned()
+                .unwrap()
+        };
+        assert!(player(&local_snapshots[10], 1).locked_monster_id.is_some());
+        assert_eq!(player(&local_snapshots[10], 2).facing, [0, -1]);
+        assert!(
+            local_snapshots
+                .iter()
+                .any(|snapshot| !snapshot.arrows.is_empty())
+        );
+        let swing = player(&local_snapshots[40], 2).action.unwrap();
+        assert_eq!(swing.aim, Some([350, -900]));
+        assert_eq!(player(&local_snapshots[TICKS as usize - 1], 2).aim, None);
+    }
 }

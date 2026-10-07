@@ -27,8 +27,10 @@ import {
   SETUP_URL_KEY,
   DEDICATED_URL_KEY,
   GRAPHICS_KEY,
+  MOUSE_AIM_KEY,
   loadProfile,
   loadGraphics,
+  loadMouseAim,
   readStoredValue,
   persistStoredValue,
 } from "./preferences.js";
@@ -45,6 +47,7 @@ import { attachPeerGameSession } from "./peer-session.js";
 import { DedicatedGameSession } from "./dedicated-session.js";
 import { DemoLobbySession } from "./vendor/multiplayer-setup-service/demo-session.ts";
 import { sampleVirtualStick } from "./virtual-stick.js";
+import { CAMERA_FOV_DEGREES, CAMERA_OFFSET, aimFromPointer } from "./aim-input.js";
 import {
   CHARACTER_PRESETS,
   loadSelectedCharacterId,
@@ -111,6 +114,8 @@ const inputRegistry = {
     ["game.interact", "Interact / pick up", "KeyE", "never", "Interaction"],
     ["game.guard", "Raise shield (hold)", "KeyF", "never", "Combat"],
     ["game.switchWeapon", "Switch sword / bow", "KeyX", "never", "Combat"],
+    ["game.cycleTarget", "Lock / cycle target", "KeyT", "never", "Combat"],
+    ["game.clearTarget", "Clear target lock", "KeyG", "never", "Combat"],
   ]
     .map(([id, title, code, repeatPolicy, category]) => ({
       id,
@@ -209,7 +214,7 @@ function buildFrame(snapshot, focusPlayerId, width, height, focusPlayerAccent = 
   const aspect = Math.max(1, width) / Math.max(1, height);
   const near = 0.1;
   const far = 100;
-  const fovYRadians = (43 * Math.PI) / 180;
+  const fovYRadians = (CAMERA_FOV_DEGREES * Math.PI) / 180;
   const top = near * Math.tan(fovYRadians * 0.5);
   const projectionHeight = 2 * top;
   const projectionWidth = aspect * projectionHeight;
@@ -224,8 +229,8 @@ function buildFrame(snapshot, focusPlayerId, width, height, focusPlayerAccent = 
     THREE.WebGPUCoordinateSystem,
     false,
   );
-  const camera = new THREE.PerspectiveCamera(43, aspect, near, far);
-  camera.position.set(target[0] + 10, 11, target[2] + 10);
+  const camera = new THREE.PerspectiveCamera(CAMERA_FOV_DEGREES, aspect, near, far);
+  camera.position.set(target[0] + CAMERA_OFFSET[0], CAMERA_OFFSET[1], target[2] + CAMERA_OFFSET[2]);
   camera.lookAt(target[0], 0, target[2]);
   camera.updateMatrixWorld(true);
   const floor = dungeonFloor(snapshot, scale);
@@ -256,7 +261,13 @@ function buildFrame(snapshot, focusPlayerId, width, height, focusPlayerAccent = 
     }),
     ...snapshot.players.flatMap((player) => {
       const position = player.position.map((value) => value / scale);
-      const facing = player.action?.facing ?? player.facing ?? [1, 0];
+      // The exact committed or intended direction when aim or a lock owns it.
+      // A target lock takes precedence over aim, as in the core: show the authoritative facing.
+      const facing = player.action
+        ? (player.action.aim ?? player.action.facing)
+        : player.lockedMonsterId != null
+          ? (player.facing ?? [1, 0])
+          : (player.aim ?? player.facing ?? [1, 0]);
       const facingLength = Math.hypot(facing[0], facing[1]) || 1;
       const facingX = facing[0] / facingLength;
       const facingZ = facing[1] / facingLength;
@@ -275,8 +286,13 @@ function buildFrame(snapshot, focusPlayerId, width, height, focusPlayerAccent = 
           : player.reaction?.kind === "guardBroken"
             ? "#9b6bd6"
             : (actionColor ?? (player.id === focusPlayerId ? focusPlayerAccent : "#6f91b6"));
-      // The thin shield board faces along the player's facing.
-      const shieldYaw = Math.atan2(facingX, facingZ);
+      // The thin shield board faces along the authoritative 8-way facing, which the core's
+      // guard cone uses, not the exact aim shown by the weapon and marker.
+      const guardFacing = player.facing ?? [1, 0];
+      const guardLength = Math.hypot(guardFacing[0], guardFacing[1]) || 1;
+      const guardX = guardFacing[0] / guardLength;
+      const guardZ = guardFacing[1] / guardLength;
+      const shieldYaw = Math.atan2(guardX, guardZ);
       const shield = player.guard
         ? [
             {
@@ -290,9 +306,9 @@ function buildFrame(snapshot, focusPlayerId, width, height, focusPlayerAccent = 
                     : "#55687d",
               transform: {
                 translation: [
-                  position[0] + facingX * 0.42,
+                  position[0] + guardX * 0.42,
                   Math.max(position[1], 0.5),
-                  position[2] + facingZ * 0.42,
+                  position[2] + guardZ * 0.42,
                 ],
                 rotationQuaternion: [0, Math.sin(shieldYaw / 2), 0, Math.cos(shieldYaw / 2)],
               },
@@ -384,6 +400,24 @@ function buildFrame(snapshot, focusPlayerId, width, height, focusPlayerAccent = 
             transform: { translation },
           },
         ];
+        // The focused player's authoritative target lock rings its monster.
+        if (focus?.lockedMonsterId === monster.id) {
+          for (let index = 0; index < 8; index += 1) {
+            const angle = (index / 8) * Math.PI * 2;
+            nodes.push({
+              id: `monster-${monster.id}-lock-${index}`,
+              geometry: { kind: "sphere", radius: 0.06 },
+              color: "#7fd1ff",
+              transform: {
+                translation: [
+                  translation[0] + Math.cos(angle) * 0.62,
+                  0.06,
+                  translation[2] + Math.sin(angle) * 0.62,
+                ],
+              },
+            });
+          }
+        }
         // The authoritative behaviour, not motion, picks the cue above the head.
         const cue = MONSTER_BEHAVIOR_CUES[monster.behavior];
         if (cue)
@@ -502,6 +536,7 @@ function App() {
     loadProfile((profile) => validateRegistry(inputRegistry, profile).valid),
   );
   const [graphics, setGraphics] = useState(loadGraphics);
+  const [mouseAim, setMouseAim] = useState(() => loadMouseAim());
   const [setupUrl, setSetupUrl] = useState(() =>
     readStoredValue(SETUP_URL_KEY, "http://127.0.0.1:8787"),
   );
@@ -809,6 +844,12 @@ function App() {
           if (dispatch.phase === "press") switchWeapon();
           return;
         }
+        if (dispatch.action === "game.cycleTarget" || dispatch.action === "game.clearTarget") {
+          if (dispatch.phase !== "press") return;
+          if (dispatch.action === "game.cycleTarget") runtime.cycleTarget();
+          else runtime.clearTarget();
+          return;
+        }
         const combatCommand = {
           "game.primaryAttack": "primaryAttack",
           "game.secondaryAttack": "secondaryAttack",
@@ -844,6 +885,33 @@ function App() {
     if (!persistStoredValue(PROFILE_KEY, JSON.stringify(next)))
       setStatus("Controls updated for this session; browser storage is unavailable");
     setProfile(next);
+  };
+
+  const updateMouseAim = (enabled) => {
+    if (!persistStoredValue(MOUSE_AIM_KEY, enabled ? "on" : "off"))
+      setStatus("Controls updated for this session; browser storage is unavailable");
+    setMouseAim(enabled);
+  };
+
+  useEffect(() => {
+    // Turning mouse aim off returns melee and the bow to committed facing.
+    if (!mouseAim) runtime.setAim(null);
+  }, [mouseAim, runtime]);
+
+  // Mouse aim is semantic direction intent only; the authority validates and applies it.
+  // The last pointed direction holds while the pointer crosses HUD overlays; focus loss,
+  // menus and disabling mouse aim return to committed facing.
+  const aimWithPointer = (event) => {
+    if (!mouseAim || event.pointerType !== "mouse" || settingsOpen) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    const aim = aimFromPointer(
+      event.clientX - rect.left,
+      event.clientY - rect.top,
+      rect.width,
+      rect.height,
+    );
+    // `null` inside the dead zone over the player returns to committed facing.
+    runtime.setAim(aim);
   };
 
   const updateGraphics = (next) => {
@@ -897,6 +965,7 @@ function App() {
       movement: [savedPlayer.movement?.[0] ?? 0, savedPlayer.movement?.[1] ?? 0],
       guardHeld: savedPlayer.guard?.held === true,
       drawHeld: savedPlayer.drawTicks != null,
+      aimHeld: savedPlayer.aim != null,
     });
     initialRunSeedRef.current = null;
     leaveTrainingUrl();
@@ -1116,7 +1185,12 @@ function App() {
 
   return (
     <main className="game-shell">
-      <canvas ref={canvasRef} className="game-canvas" aria-label="ARPG game world" />
+      <canvas
+        ref={canvasRef}
+        className="game-canvas"
+        aria-label="ARPG game world"
+        onPointerMove={aimWithPointer}
+      />
       <header className="game-header">
         <div>
           <strong>ARPG</strong>
@@ -1395,6 +1469,14 @@ function App() {
 
           <section className="keybindings-section">
             <h2>Controls</h2>
+            <label className="checkbox-row">
+              <input
+                type="checkbox"
+                checked={mouseAim}
+                onChange={(event) => updateMouseAim(event.target.checked)}
+              />
+              Aim melee and bow with the mouse
+            </label>
             <KeybindingEditor
               registry={inputRegistry}
               profile={profile}
