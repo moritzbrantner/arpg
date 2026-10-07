@@ -262,6 +262,46 @@ impl RoomGrid {
                 .collect(),
         )
     }
+
+    /// Cell centres from `start` to the nearest free cell whose centre lies `near..=far`
+    /// from `threat` and from which `clear_line` holds (#108), through cells no nearer to
+    /// `threat` than the start cell: a retreat backs away and never passes the threat.
+    /// `None` when no such cell is reachable that way. `searched` counts A* expansions.
+    pub(crate) fn find_retreat(
+        &self,
+        start: (i32, i32),
+        threat: (i32, i32),
+        (near, far): (i64, i64),
+        mut clear_line: impl FnMut((i32, i32)) -> bool,
+        searched: &mut u64,
+    ) -> Option<Vec<(i32, i32)>> {
+        let start = self.free_cell_near(start)?;
+        let from_threat_sq = |cell: Cell| distance_sq(self.cell_center(cell), threat);
+        let floor_sq = from_threat_sq(start);
+        let band = near * near..=far * far;
+        let path = astar(
+            start,
+            |&cell| band.contains(&from_threat_sq(cell)) && clear_line(self.cell_center(cell)),
+            |&cell| {
+                *searched += 1;
+                self.moves(cell)
+                    .filter(|&(next, _)| from_threat_sq(next) >= floor_sq)
+                    .collect::<Vec<_>>()
+            },
+            // Backing off by d units takes a route of at least d units, and no step costs
+            // less than 0.49 per unit (a diagonal: 14 per 20√2).
+            |&cell| {
+                let short = near - isqrt(from_threat_sq(cell));
+                u64::try_from(short).unwrap_or(0) * 49 / 100
+            },
+        )?;
+        Some(
+            path.nodes
+                .into_iter()
+                .map(|cell| self.cell_center(cell))
+                .collect(),
+        )
+    }
 }
 
 impl RoomGrid {

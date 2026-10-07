@@ -1,5 +1,5 @@
 {
-  "formatVersion": 4,
+  "formatVersion": 5,
   "counterWindowTicks": 30,
   "strikes": [
     { "id": "sword.lightSwing", "reach": 220, "frontal": true, "maxTargets": null, "blockable": true, "guardCost": 0 },
@@ -8,7 +8,9 @@
     { "id": "sword.lightFinisher", "reach": 240, "frontal": true, "maxTargets": null, "blockable": true, "guardCost": 0 },
     { "id": "sword.heavyFinisher", "reach": 180, "frontal": true, "maxTargets": 1, "blockable": true, "guardCost": 0 },
     { "id": "monster.claw", "reach": 180, "frontal": false, "maxTargets": 1, "blockable": true, "guardCost": 30 },
-    { "id": "monster.lunge", "reach": 150, "frontal": false, "maxTargets": 1, "blockable": true, "guardCost": 15 }
+    { "id": "monster.lunge", "reach": 150, "frontal": false, "maxTargets": 1, "blockable": true, "guardCost": 15 },
+    { "id": "monster.bolt", "reach": 640, "frontal": false, "maxTargets": 1, "blockable": true, "guardCost": 10 },
+    { "id": "monster.slam", "reach": 220, "frontal": false, "maxTargets": 1, "blockable": true, "guardCost": 100 }
   ],
   "actions": [
     { "id": "sword.light", "kind": "primaryAttack", "windupTicks": 5, "activeTicks": 1, "recoveryTicks": 8, "strike": "sword.lightSwing", "damageNumerator": 1, "damageDenominator": 1, "staggerTicks": 4 },
@@ -27,10 +29,12 @@
     { "from": "sword.counter", "input": "light", "opensAt": 2, "closesAt": 10, "requiresHit": false, "to": "sword.lightFollowUp" }
   ],
   "monsters": [
-    { "id": "monster.brute", "health": 100, "strike": "monster.claw", "windupTicks": 18, "activeTicks": 1, "recoveryTicks": 30, "damage": 10, "experienceReward": 50, "pursuitSpeed": 4, "aggroRange": 1200, "leashRange": 1800, "targetSwitchMargin": 150, "reacquireTicks": 20, "separationRange": 120 },
-    { "id": "monster.skirmisher", "health": 60, "strike": "monster.lunge", "windupTicks": 10, "activeTicks": 1, "recoveryTicks": 20, "damage": 6, "experienceReward": 30, "pursuitSpeed": 6, "aggroRange": 1400, "leashRange": 2000, "targetSwitchMargin": 100, "reacquireTicks": 12, "separationRange": 140 }
+    { "id": "monster.brute", "health": 100, "strike": "monster.claw", "windupTicks": 18, "activeTicks": 1, "recoveryTicks": 30, "damage": 10, "experienceReward": 50, "pursuitSpeed": 4, "aggroRange": 1200, "leashRange": 1800, "targetSwitchMargin": 150, "reacquireTicks": 20, "separationRange": 120, "retreatRange": null, "projectile": null },
+    { "id": "monster.skirmisher", "health": 60, "strike": "monster.lunge", "windupTicks": 10, "activeTicks": 1, "recoveryTicks": 20, "damage": 6, "experienceReward": 30, "pursuitSpeed": 6, "aggroRange": 1400, "leashRange": 2000, "targetSwitchMargin": 100, "reacquireTicks": 12, "separationRange": 140, "retreatRange": null, "projectile": null },
+    { "id": "monster.archer", "health": 50, "strike": "monster.bolt", "windupTicks": 24, "activeTicks": 1, "recoveryTicks": 36, "damage": 8, "experienceReward": 40, "pursuitSpeed": 5, "aggroRange": 1200, "leashRange": 1800, "targetSwitchMargin": 150, "reacquireTicks": 20, "separationRange": 120, "retreatRange": 360, "projectile": { "speed": 20, "lifetimeTicks": 40 } },
+    { "id": "monster.bruiser", "health": 160, "strike": "monster.slam", "windupTicks": 45, "activeTicks": 1, "recoveryTicks": 40, "damage": 28, "experienceReward": 80, "pursuitSpeed": 3, "aggroRange": 1000, "leashRange": 1600, "targetSwitchMargin": 200, "reacquireTicks": 30, "separationRange": 140, "retreatRange": null, "projectile": null }
   ],
-  "roomMonsters": ["monster.brute", "monster.brute", "monster.skirmisher", "monster.brute", "monster.skirmisher"],
+  "roomMonsters": ["monster.brute", "monster.archer", "monster.skirmisher", "monster.bruiser", "monster.skirmisher"],
   "guard": { "raiseTicks": 4, "maxPoints": 100, "regenPerTick": 1, "blockReactionTicks": 8, "breakTicks": 45 },
   "bow": { "minDrawTicks": 8, "fullDrawTicks": 30, "arrowMinSpeed": 30, "arrowFullSpeed": 60, "arrowMinDamage": 15, "arrowFullDamage": 35, "arrowLifetimeTicks": 40, "arrowStaggerTicks": 4, "maxLiveArrows": 32 },
   "progression": { "experiencePerLevel": 100, "baseMaxHealth": 100, "maxHealthPerLevel": 10, "baseAttackDamage": 25, "attackDamagePerLevel": 5 },
