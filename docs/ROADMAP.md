@@ -415,6 +415,17 @@ Support authored procedural pieces:
 
 Prefer composing authored pieces to arbitrary procedural noise.
 
+### Height and traversal topology
+
+Dungeon generation may create real vertical overlap: bridges, balconies,
+stacked floors, slopes, jumps, and drops. Generated and authored layouts both
+produce stable walkable regions plus typed traversal connections alongside
+their geometry. Regions may contain continuous height variation.
+
+Gameplay treats that topology as authoritative connectivity. Ordinary combat is
+region-local; mechanics such as projectiles may explicitly opt into
+cross-region 3D checks. See [ADR 0002](adr/0002-height-traversal-topology.md).
+
 ### Encounter definitions
 
 Make encounter composition reusable:
