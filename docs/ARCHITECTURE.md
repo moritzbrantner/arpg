@@ -14,6 +14,20 @@
 
 Neither renderer nor network transport may become an alternate source of gameplay truth.
 
+## Height and traversal topology
+
+Real physical height and semantic walkable topology are separate but coordinated
+authorities. `physics-engine` owns continuous physical truth; `arpg-core`
+owns stable walkable regions, typed traversal connections, actor region/transit
+state, and ability-specific cross-region rules.
+
+Combat and interaction are region-local by default. Abilities may explicitly
+opt into cross-region 3D range/line-of-sight checks. Authored and procedurally
+generated levels must both provide topology matching their geometry; undeclared
+physical crossings are invalid level content rather than runtime exceptions.
+
+See [ADR 0002](adr/0002-height-traversal-topology.md) for the full contract.
+
 The browser's presentation snapshot boundary and React update ownership are
 documented in [ADR 0001](adr/0001-browser-snapshot-projection.md). Tick-dependent
 views and rendering consume one session-owned snapshot store; menus and shell
