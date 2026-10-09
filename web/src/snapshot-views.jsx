@@ -1,4 +1,5 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
+import { useHeldButton, usePressButton } from "./touch-buttons.js";
 
 export function useSnapshot(store) {
   return useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
@@ -107,26 +108,18 @@ export function CombatActions({
   // continues a combo, is buffered or is ignored.
   const canAttack = Boolean(playerId && player?.alive);
   const bow = player?.weapon === "bow";
+  // Each touch owns its action even when the other thumb is moving the joystick.
+  const primaryHandlers = usePressButton(() => triggerCombatAction("primaryAttack"));
+  const heavyHandlers = usePressButton(() => triggerCombatAction("secondaryAttack"));
+  const swapHandlers = usePressButton(switchWeapon);
+  const interactHandlers = usePressButton(() => triggerCombatAction("interact"));
+  const bowHandlers = useHeldButton(
+    (held, interrupted) => setTouchDraw(held, interrupted),
+    canAttack && bow,
+  );
+  const guardHandlers = useHeldButton((held) => setTouchGuard(held), canAttack && !bow);
   // With the bow, Attack is a held draw: press draws, release shoots.
-  const drawHandlers = bow
-    ? {
-        onPointerDown: (event) => {
-          event.currentTarget.setPointerCapture?.(event.pointerId);
-          setTouchDraw(true);
-        },
-        onPointerUp: () => setTouchDraw(false),
-        // Interrupted pointers cancel the draw; only a deliberate release shoots.
-        onPointerCancel: () => setTouchDraw(false, true),
-        onLostPointerCapture: () => setTouchDraw(false, true),
-        onKeyDown: (event) => {
-          if ((event.key === "Enter" || event.key === " ") && !event.repeat) setTouchDraw(true);
-        },
-        onKeyUp: (event) => {
-          if (event.key === "Enter" || event.key === " ") setTouchDraw(false);
-        },
-        onContextMenu: (event) => event.preventDefault(),
-      }
-    : { onClick: () => triggerCombatAction("primaryAttack") };
+  const drawHandlers = bow ? bowHandlers : primaryHandlers;
   return (
     <section className="combat-actions" aria-label="Combat actions">
       <button
@@ -150,7 +143,7 @@ export function CombatActions({
         data-phase={heavy ? player.action.phase : undefined}
         aria-label="Heavy attack"
         disabled={!canAttack || bow}
-        onClick={() => triggerCombatAction("secondaryAttack")}
+        {...heavyHandlers}
       >
         <strong>Heavy</strong>
         <span>Q</span>
@@ -161,21 +154,7 @@ export function CombatActions({
         data-guard={player?.guard?.phase}
         aria-label="Hold shield"
         disabled={!playerId || !player?.alive || bow}
-        onPointerDown={(event) => {
-          event.currentTarget.setPointerCapture?.(event.pointerId);
-          setTouchGuard(true);
-        }}
-        onPointerUp={() => setTouchGuard(false)}
-        onPointerCancel={() => setTouchGuard(false)}
-        onLostPointerCapture={() => setTouchGuard(false)}
-        onKeyDown={(event) => {
-          if ((event.key === "Enter" || event.key === " ") && !event.repeat) setTouchGuard(true);
-        }}
-        onKeyUp={(event) => {
-          if (event.key === "Enter" || event.key === " ") setTouchGuard(false);
-        }}
-        onBlur={() => setTouchGuard(false)}
-        onContextMenu={(event) => event.preventDefault()}
+        {...guardHandlers}
       >
         <strong>Guard</strong>
         <span>F</span>
@@ -185,7 +164,7 @@ export function CombatActions({
         className="combat-action combat-action-swap"
         aria-label={bow ? "Switch to sword and shield" : "Switch to bow"}
         disabled={!canAttack || Boolean(player?.action)}
-        onClick={switchWeapon}
+        {...swapHandlers}
       >
         <strong>{bow ? "Sword" : "Bow"}</strong>
         <span>X</span>
@@ -198,7 +177,7 @@ export function CombatActions({
         data-phase={player?.action?.kind === "interact" ? player.action.phase : undefined}
         aria-label="Interact or pick up"
         disabled={!playerId || !player?.alive || Boolean(player?.action)}
-        onClick={() => triggerCombatAction("interact")}
+        {...interactHandlers}
       >
         <strong>Interact</strong>
         <span>E</span>

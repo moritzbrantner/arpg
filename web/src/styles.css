@@ -776,7 +776,7 @@ select {
   font-weight: 700;
   letter-spacing: 0.02em;
   text-align: center;
-  touch-action: manipulation;
+  touch-action: none;
   box-shadow: 0 0.4rem 1.5rem #0008;
 }
 .combat-action strong {
