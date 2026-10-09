@@ -13,7 +13,7 @@
 // time is never fast-forwarded to wall-clock time.
 
 import { contentRevisionMismatch, decodeSnapshot, encodeCommand } from "./wire-protocol.js";
-import { trainingTicksForFrame } from "./training-arena.js";
+import { DEFAULT_SCENARIO, trainingTicksForFrame } from "./training-arena.js";
 
 export const TICK_INTERVAL_MS = 1000 / 60;
 
@@ -53,6 +53,8 @@ export interface WasmGameLike {
   advanceTick(): void;
   snapshotJson(): string;
   saveStateJson(): string;
+  // Recorded workbench session as portable `Reproduction` JSON (scenario games only).
+  reproductionJson?(): string;
   free?(): void;
 }
 
@@ -82,6 +84,7 @@ export interface SnapshotSink {
 
 export interface GameClientRuntimeOptions {
   snapshots: SnapshotSink;
+  // `scenario` is set exactly for training sessions, which record a reproduction.
   createGame(seed: number, scenario?: string): WasmGameLike;
   createPeerSession(apiBase: string): PeerSessionLike;
   attachPeerSession(options: {
@@ -333,10 +336,11 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
       scenario,
     }: { seed?: number; training?: boolean; scenario?: string } = {}) {
       if (disposed()) return;
-      const next = newAuthority(seed ?? options.freshRunSeed(), training ? scenario : undefined);
+      const named = scenario ?? DEFAULT_SCENARIO;
+      const next = newAuthority(seed ?? options.freshRunSeed(), training ? named : undefined);
       installLocalAuthority(next, {
         playerId: 1,
-        training: training ? { paused: false, speed: 1, scenario: scenario ?? "dungeon" } : null,
+        training: training ? { paused: false, speed: 1, scenario: named } : null,
       });
     },
 
@@ -629,6 +633,14 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
     stepTraining() {
       if (!state.training?.paused || !game) return;
       advance(1);
+    },
+
+    // The local training session's accepted commands and ticks as `Reproduction` JSON for
+    // the native `replay_reproduction` runner. Workbench-only: null in hosted, guest,
+    // dedicated and ordinary play, which never record.
+    exportReproduction(): string | null {
+      if (state.mode !== "local" || !state.training || !game?.reproductionJson) return null;
+      return game.reproductionJson();
     },
 
     // Captures the current local authority for saving; null outside local play.

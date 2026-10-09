@@ -500,11 +500,20 @@ pub struct Reproduction {
 /// Maximum ticks a reproduction may request (ten minutes at 60 Hz).
 pub const MAX_REPRODUCTION_TICKS: u64 = 36_000;
 
+/// Maximum commands a reproduction may carry: four per tick of the longest reproduction,
+/// enough for continuous movement and aim changes.
+pub const MAX_REPRODUCTION_COMMANDS: usize = 4 * 36_000;
+
 /// Replays `reproduction` headlessly and returns the snapshot after every tick.
 pub fn replay_reproduction(reproduction: &Reproduction) -> Result<Vec<ArpgSnapshot>, GameError> {
     if reproduction.ticks > MAX_REPRODUCTION_TICKS {
         return Err(GameError::new(
             "reproduction is longer than the supported bound",
+        ));
+    }
+    if reproduction.commands.len() > MAX_REPRODUCTION_COMMANDS {
+        return Err(GameError::new(
+            "reproduction has more commands than the supported bound",
         ));
     }
     if reproduction
@@ -539,6 +548,103 @@ pub fn replay_reproduction(reproduction: &Reproduction) -> Result<Vec<ArpgSnapsh
         ));
     }
     Ok(snapshots)
+}
+
+/// Records a local session as the portable [`Reproduction`] that [`replay_reproduction`]
+/// consumes. The caller reports each operation the authority *accepted*, in order; a
+/// rejected command never reaches the recording. Recording stops (and export fails with
+/// the reason) when the session leaves what a reproduction can express: a player joining
+/// after the start or leaving, or a session longer than the supported bounds.
+#[derive(Clone, Debug)]
+pub struct ReproductionRecorder {
+    reproduction: Reproduction,
+    stopped: Option<&'static str>,
+}
+
+impl ReproductionRecorder {
+    /// Starts recording `game`, which must be fresh: no tick advanced and no player yet.
+    pub fn start(game: &ArpgGame) -> Result<Self, GameError> {
+        if game.tick != 0 || !game.players.is_empty() {
+            return Err(GameError::new(
+                "a reproduction must be recorded from a fresh game",
+            ));
+        }
+        Ok(Self {
+            reproduction: Reproduction {
+                scenario: game.scenario,
+                seed: game.run_seed,
+                players: Vec::new(),
+                ticks: 0,
+                commands: Vec::new(),
+            },
+            stopped: None,
+        })
+    }
+
+    fn stop(&mut self, reason: &'static str) {
+        if self.stopped.is_none() {
+            self.stopped = Some(reason);
+        }
+    }
+
+    /// An accepted `add_player`.
+    pub fn record_player_added(&mut self, player_id: PlayerId) {
+        if self.reproduction.ticks > 0 {
+            self.stop("a player joined after the session started");
+        } else {
+            self.reproduction.players.push(player_id);
+        }
+    }
+
+    /// A successful `remove_player`.
+    pub fn record_player_removed(&mut self) {
+        self.stop("a player left the session");
+    }
+
+    /// An accepted command, applied before the next tick runs.
+    pub fn record_command(&mut self, command: &PlayerCommand<ArpgCommand>) {
+        if self.stopped.is_some() {
+            return;
+        }
+        if self.reproduction.commands.len() >= MAX_REPRODUCTION_COMMANDS {
+            self.stop("the session sent more commands than a reproduction can hold");
+            return;
+        }
+        self.reproduction.commands.push(ReproductionCommand {
+            tick: self.reproduction.ticks,
+            player_id: command.player_id,
+            sequence: command.sequence,
+            command: command.command,
+        });
+    }
+
+    /// A successful `advance_tick`.
+    pub fn record_tick(&mut self) {
+        if self.stopped.is_some() {
+            return;
+        }
+        if self.reproduction.ticks >= MAX_REPRODUCTION_TICKS {
+            self.stop("the session ran longer than a reproduction can hold");
+            return;
+        }
+        self.reproduction.ticks += 1;
+    }
+
+    /// The recording up to the last completed tick, or why the session can no longer be
+    /// reproduced. Commands accepted after the last completed tick (for example while the
+    /// arena is paused) have not affected any snapshot yet and are left out, so every
+    /// export replays.
+    pub fn reproduction(&self) -> Result<Reproduction, GameError> {
+        if let Some(reason) = self.stopped {
+            return Err(GameError::new(format!(
+                "this session cannot be exported as a reproduction: {reason}"
+            )));
+        }
+        let mut reproduction = self.reproduction.clone();
+        let ticks = reproduction.ticks;
+        reproduction.commands.retain(|command| command.tick < ticks);
+        Ok(reproduction)
+    }
 }
 
 const SCENARIO_ROOM: RoomId = 2;
@@ -8416,6 +8522,139 @@ mod tests {
         let mut long = reproduction;
         long.ticks = MAX_REPRODUCTION_TICKS + 1;
         assert!(replay_reproduction(&long).is_err());
+    }
+
+    #[test]
+    fn recorded_sessions_replay_to_the_same_snapshots() {
+        let mut game = ArpgGame::new_scenario(ScenarioId::Enemy, 42).unwrap();
+        let mut recorder = ReproductionRecorder::start(&game).unwrap();
+        game.add_player(1).unwrap();
+        recorder.record_player_added(1);
+        let script = [
+            (0, ArpgCommand::SetGuard { raised: true }),
+            (25, ArpgCommand::SetGuard { raised: false }),
+            (26, ArpgCommand::PrimaryAttack),
+            (26, ArpgCommand::SetMovement { x: 1, z: 0 }),
+            (40, ArpgCommand::SetMovement { x: 0, z: 0 }),
+            (41, ArpgCommand::SecondaryAttack),
+        ];
+        let mut sequence = 0;
+        let mut live = Vec::new();
+        for tick in 0..90 {
+            for &(_, command) in script.iter().filter(|(at, _)| *at == tick) {
+                sequence += 1;
+                let command = PlayerCommand::new(1, sequence, command).unwrap();
+                game.apply_command(command.clone()).unwrap();
+                recorder.record_command(&command);
+            }
+            // A command the authority rejects (stale sequence) never reaches the recording.
+            if tick == 30 {
+                let stale = PlayerCommand::new(1, 1, ArpgCommand::PrimaryAttack).unwrap();
+                if game.apply_command(stale.clone()).is_ok() {
+                    recorder.record_command(&stale);
+                }
+            }
+            game.advance_tick().unwrap();
+            recorder.record_tick();
+            live.push(game.snapshot().unwrap());
+        }
+        let exported = serde_json::to_string(&recorder.reproduction().unwrap()).unwrap();
+        let imported: Reproduction = serde_json::from_str(&exported).unwrap();
+        assert_eq!(imported.scenario, ScenarioId::Enemy);
+        assert_eq!(imported.seed, 42);
+        assert_eq!(imported.players, vec![1]);
+        assert_eq!(imported.ticks, 90);
+        assert_eq!(imported.commands.len(), script.len());
+        assert_eq!(replay_reproduction(&imported).unwrap(), live);
+    }
+
+    #[test]
+    fn commands_after_the_last_completed_tick_are_left_out_of_the_export() {
+        let mut game = ArpgGame::new_scenario(ScenarioId::Dummy, 7).unwrap();
+        let mut recorder = ReproductionRecorder::start(&game).unwrap();
+        game.add_player(1).unwrap();
+        recorder.record_player_added(1);
+        let mut live = Vec::new();
+        for sequence in 1..=2 {
+            let command = PlayerCommand::new(1, sequence, ArpgCommand::PrimaryAttack).unwrap();
+            game.apply_command(command.clone()).unwrap();
+            recorder.record_command(&command);
+            if sequence == 1 {
+                game.advance_tick().unwrap();
+                recorder.record_tick();
+                live.push(game.snapshot().unwrap());
+            }
+        }
+        // The second command was accepted while paused, after the last completed tick.
+        let reproduction = recorder.reproduction().unwrap();
+        assert_eq!(reproduction.ticks, 1);
+        assert_eq!(reproduction.commands.len(), 1);
+        assert_eq!(replay_reproduction(&reproduction).unwrap(), live);
+    }
+
+    #[test]
+    fn recordings_stop_where_a_reproduction_cannot_follow() {
+        assert!(
+            ReproductionRecorder::start(&{
+                let mut game = ArpgGame::new_scenario(ScenarioId::Dummy, 1).unwrap();
+                game.add_player(1).unwrap();
+                game
+            })
+            .is_err()
+        );
+        let game = ArpgGame::new_scenario(ScenarioId::Dummy, 1).unwrap();
+        let fresh = ReproductionRecorder::start(&game).unwrap();
+
+        let mut late_join = fresh.clone();
+        late_join.record_player_added(1);
+        late_join.record_tick();
+        late_join.record_player_added(2);
+        let error = late_join.reproduction().unwrap_err();
+        assert!(
+            error.message().contains("joined after"),
+            "{}",
+            error.message()
+        );
+
+        let mut left = fresh.clone();
+        left.record_player_added(1);
+        left.record_player_removed();
+        assert!(left.reproduction().is_err());
+
+        let mut long = fresh.clone();
+        for _ in 0..MAX_REPRODUCTION_TICKS {
+            long.record_tick();
+        }
+        assert_eq!(long.reproduction().unwrap().ticks, MAX_REPRODUCTION_TICKS);
+        long.record_tick();
+        assert!(long.reproduction().is_err());
+
+        let mut chatty = fresh;
+        let command = PlayerCommand::new(1, 1, ArpgCommand::Interact).unwrap();
+        for _ in 0..MAX_REPRODUCTION_COMMANDS {
+            chatty.record_command(&command);
+        }
+        assert!(chatty.reproduction().is_ok());
+        chatty.record_command(&command);
+        assert!(chatty.reproduction().is_err());
+
+        let mut flood = Reproduction {
+            scenario: ScenarioId::Dummy,
+            seed: 1,
+            players: vec![1],
+            ticks: 1,
+            commands: Vec::new(),
+        };
+        flood.commands = vec![
+            ReproductionCommand {
+                tick: 0,
+                player_id: 1,
+                sequence: 1,
+                command: ArpgCommand::Interact,
+            };
+            MAX_REPRODUCTION_COMMANDS + 1
+        ];
+        assert!(replay_reproduction(&flood).is_err());
     }
 
     #[test]
