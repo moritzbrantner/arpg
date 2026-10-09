@@ -43,6 +43,14 @@ test("two fingers move, attack once, and continue moving independently", async (
     const right = point(1, origin.x + stickRect.width * 0.4, origin.y);
     const forward = point(1, origin.x, origin.y - stickRect.height * 0.4);
     const strike = center(2, attackRect);
+    const targets = await page.evaluate(
+      (points) =>
+        points.map(({ x, y }) =>
+          document.elementFromPoint(x, y)?.closest("button, [aria-label='Movement joystick']")?.getAttribute("aria-label"),
+        ),
+      [origin, strike],
+    );
+    expect(targets).toEqual(["Movement joystick", "Primary attack"]);
 
     await touch(cdp, "touchStart", origin);
     await touch(cdp, "touchMove", right);
@@ -51,8 +59,7 @@ test("two fingers move, attack once, and continue moving independently", async (
     await touch(cdp, "touchMove", forward);
     await touch(cdp, "touchEnd", forward);
 
-    await page.getByRole("button", { name: "Step", exact: true }).tap();
-    await expect(attack).toHaveAttribute("data-phase", "windup");
+    await page.getByRole("button", { name: "Step", exact: true }).click();
 
     const commands = (await exportedCommands(page))
       .filter((command) => command.type === "setMovement" || command.type === "primaryAttack")
@@ -60,6 +67,7 @@ test("two fingers move, attack once, and continue moving independently", async (
         command.type === "setMovement" ? `${command.x},${command.z}` : "primaryAttack",
       );
     expect(commands).toEqual(["1,0", "primaryAttack", "0,-1", "0,0"]);
+    await expect(attack).toHaveAttribute("data-phase", "windup");
   } finally {
     await context.close();
   }
@@ -72,6 +80,7 @@ test("a single touch press does not double-dispatch its synthesized click", asyn
   const { context, page } = await phone(browser, appUrl);
   try {
     await page.getByRole("button", { name: "Primary attack", exact: true }).tap();
+    await page.getByRole("button", { name: "Step", exact: true }).click();
     const commands = await exportedCommands(page);
     expect(commands.filter((command) => command.type === "primaryAttack")).toHaveLength(1);
   } finally {
@@ -95,12 +104,14 @@ test("holding guard while moving releases only when the guard finger lifts", asy
     await touch(cdp, "touchStart", guard, origin);
     await touch(cdp, "touchMove", guard, moving);
     await touch(cdp, "touchEnd", moving);
+    await page.getByRole("button", { name: "Step", exact: true }).click();
     // The second finger's release must not lower the first finger's shield.
     const held = await exportedCommands(page);
     expect(held.filter((command) => command.type === "setGuard")).toEqual([
       { type: "setGuard", raised: true },
     ]);
     await touch(cdp, "touchEnd", guard);
+    await page.getByRole("button", { name: "Step", exact: true }).click();
 
     const commands = await exportedCommands(page);
     expect(commands.filter((command) => command.type === "setGuard")).toEqual([
