@@ -630,14 +630,20 @@ impl ReproductionRecorder {
         self.reproduction.ticks += 1;
     }
 
-    /// The recording so far, or why the session can no longer be reproduced.
-    pub fn reproduction(&self) -> Result<&Reproduction, GameError> {
-        match self.stopped {
-            Some(reason) => Err(GameError::new(format!(
+    /// The recording up to the last completed tick, or why the session can no longer be
+    /// reproduced. Commands accepted after the last completed tick (for example while the
+    /// arena is paused) have not affected any snapshot yet and are left out, so every
+    /// export replays.
+    pub fn reproduction(&self) -> Result<Reproduction, GameError> {
+        if let Some(reason) = self.stopped {
+            return Err(GameError::new(format!(
                 "this session cannot be exported as a reproduction: {reason}"
-            ))),
-            None => Ok(&self.reproduction),
+            )));
         }
+        let mut reproduction = self.reproduction.clone();
+        let ticks = reproduction.ticks;
+        reproduction.commands.retain(|command| command.tick < ticks);
+        Ok(reproduction)
     }
 }
 
@@ -8552,7 +8558,7 @@ mod tests {
             recorder.record_tick();
             live.push(game.snapshot().unwrap());
         }
-        let exported = serde_json::to_string(recorder.reproduction().unwrap()).unwrap();
+        let exported = serde_json::to_string(&recorder.reproduction().unwrap()).unwrap();
         let imported: Reproduction = serde_json::from_str(&exported).unwrap();
         assert_eq!(imported.scenario, ScenarioId::Enemy);
         assert_eq!(imported.seed, 42);
@@ -8560,6 +8566,30 @@ mod tests {
         assert_eq!(imported.ticks, 90);
         assert_eq!(imported.commands.len(), script.len());
         assert_eq!(replay_reproduction(&imported).unwrap(), live);
+    }
+
+    #[test]
+    fn commands_after_the_last_completed_tick_are_left_out_of_the_export() {
+        let mut game = ArpgGame::new_scenario(ScenarioId::Dummy, 7).unwrap();
+        let mut recorder = ReproductionRecorder::start(&game).unwrap();
+        game.add_player(1).unwrap();
+        recorder.record_player_added(1);
+        let mut live = Vec::new();
+        for sequence in 1..=2 {
+            let command = PlayerCommand::new(1, sequence, ArpgCommand::PrimaryAttack).unwrap();
+            game.apply_command(command.clone()).unwrap();
+            recorder.record_command(&command);
+            if sequence == 1 {
+                game.advance_tick().unwrap();
+                recorder.record_tick();
+                live.push(game.snapshot().unwrap());
+            }
+        }
+        // The second command was accepted while paused, after the last completed tick.
+        let reproduction = recorder.reproduction().unwrap();
+        assert_eq!(reproduction.ticks, 1);
+        assert_eq!(reproduction.commands.len(), 1);
+        assert_eq!(replay_reproduction(&reproduction).unwrap(), live);
     }
 
     #[test]

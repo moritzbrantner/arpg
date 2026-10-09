@@ -138,7 +138,7 @@ impl WasmGame {
             .as_ref()
             .ok_or("only workbench sessions record a reproduction")?;
         let reproduction = recorder.reproduction().map_err(|error| error.to_string())?;
-        serde_json::to_string(reproduction).map_err(|error| error.to_string())
+        serde_json::to_string(&reproduction).map_err(|error| error.to_string())
     }
 }
 
