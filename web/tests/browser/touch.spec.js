@@ -45,9 +45,11 @@ test("two fingers move, attack once, and continue moving independently", async (
     const strike = center(2, attackRect);
     const targets = await page.evaluate(
       (points) =>
-        points.map(({ x, y }) =>
-          document.elementFromPoint(x, y)?.closest("button, [aria-label='Movement joystick']")?.getAttribute("aria-label"),
-        ),
+        points.map(({ x, y }) => {
+          const hit = document.elementFromPoint(x, y);
+          const target = hit?.closest("button, [aria-label='Movement joystick']");
+          return target?.getAttribute("aria-label");
+        }),
       [origin, strike],
     );
     expect(targets).toEqual(["Movement joystick", "Primary attack"]);
@@ -83,6 +85,20 @@ test("a single touch press does not double-dispatch its synthesized click", asyn
     await page.getByRole("button", { name: "Step", exact: true }).click();
     const commands = await exportedCommands(page);
     expect(commands.filter((command) => command.type === "primaryAttack")).toHaveLength(1);
+  } finally {
+    await context.close();
+  }
+});
+
+test("a mouse click after a touch still triggers a separate action", async ({ browser, appUrl }) => {
+  const { context, page } = await phone(browser, appUrl);
+  try {
+    const attack = page.getByRole("button", { name: "Primary attack", exact: true });
+    await attack.tap();
+    await attack.click();
+    await page.getByRole("button", { name: "Step", exact: true }).click();
+    const commands = await exportedCommands(page);
+    expect(commands.filter((command) => command.type === "primaryAttack")).toHaveLength(2);
   } finally {
     await context.close();
   }

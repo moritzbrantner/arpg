@@ -21,7 +21,8 @@ export function usePressButton(onPress) {
       if (
         native.pointerType === "touch" ||
         native.sourceCapabilities?.firesTouchEvents ||
-        (event.detail > 0 &&
+        (!native.pointerType &&
+          event.detail > 0 &&
           event.timeStamp >= lastTouch.current &&
           event.timeStamp - lastTouch.current < 1000)
       )
