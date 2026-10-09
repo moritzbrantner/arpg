@@ -80,6 +80,9 @@ class FakeGame {
   saveStateJson() {
     return JSON.stringify({ tick: this.tick });
   }
+  reproductionJson() {
+    return JSON.stringify({ seed: this.seed, ticks: this.tick, commands: this.commands.length });
+  }
   free() {
     this.freed = true;
   }
@@ -717,9 +720,12 @@ test("training authorities are created from the named scenario", () => {
     clearInterval: () => {},
   });
   local.startLocal({ seed: 9, training: true, scenario: "archery" });
+  // Training without a named fixture uses the default scenario, so it still records.
+  local.startLocal({ seed: 9, training: true });
   local.startLocal({ seed: 9, scenario: "archery" });
   expect(scenarios).toEqual([
     [9, "archery"],
+    [9, "dungeon"],
     [9, undefined],
   ]);
   expect(local.getState().training).toBeNull();
@@ -733,4 +739,20 @@ test("accelerated training publishes every simulated tick", () => {
   snapshots.subscribe(() => published.push(snapshots.getSnapshot().tick));
   tick(2);
   expect(published).toEqual([1, 2, 3, 4]);
+});
+
+test("only local training sessions export a reproduction", () => {
+  const { runtime, tick } = harness();
+  runtime.startLocal({ seed: 1 });
+  expect(runtime.exportReproduction()).toBeNull();
+
+  runtime.startLocal({ seed: 42, training: true, scenario: "dummy" });
+  runtime.dispatch({ type: "primaryAttack" });
+  tick(3);
+  expect(JSON.parse(runtime.exportReproduction())).toEqual({ seed: 42, ticks: 3, commands: 1 });
+
+  void runtime.hostPeer("http://setup");
+  expect(runtime.exportReproduction()).toBeNull();
+  runtime.stop();
+  expect(runtime.exportReproduction()).toBeNull();
 });

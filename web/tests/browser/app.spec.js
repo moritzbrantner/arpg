@@ -1,3 +1,5 @@
+import { readFile } from "node:fs/promises";
+
 import { expect, test } from "./fixtures.js";
 
 test("combat buttons activate through the keyboard", async ({ page, appUrl }) => {
@@ -138,6 +140,31 @@ test("leaving and re-entering the world restarts one paused-aware simulation", a
   expect(await tickOf()).toBe(paused);
   await page.getByRole("button", { name: "Step", exact: true }).click();
   await expect.poll(tickOf).toBe(paused + 1);
+});
+
+test("the training arena exports its session as a replayable reproduction", async ({
+  page,
+  appUrl,
+}) => {
+  await page.goto(`${appUrl}?scenario=training&seed=42`);
+  await page.getByRole("button", { name: "Pause", exact: true }).click();
+  const step = page.getByRole("button", { name: "Step", exact: true });
+  await page.evaluate(() => document.activeElement?.blur());
+  await page.keyboard.press("Space");
+  for (let tick = 0; tick < 3; tick += 1) await step.click();
+
+  const download = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Export reproduction", exact: true }).click();
+  const file = await download;
+  expect(file.suggestedFilename()).toMatch(/^arpg-reproduction-.+-seed-42-tick-\d+\.json$/);
+  const reproduction = JSON.parse(await readFile(await file.path(), "utf8"));
+  expect(reproduction.seed).toBe(42);
+  expect(reproduction.players).toEqual([1]);
+  expect(reproduction.ticks).toBeGreaterThanOrEqual(3);
+  expect(reproduction.commands.map((entry) => entry.command)).toContainEqual(
+    expect.objectContaining({ type: "primaryAttack" }),
+  );
+  await expect(page.getByText(/^Reproduction exported · /)).toBeVisible();
 });
 
 test("holding guard raises the authoritative shield and releasing lowers it", async ({

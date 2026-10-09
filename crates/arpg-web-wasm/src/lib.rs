@@ -1,7 +1,8 @@
 #![forbid(unsafe_code)]
 
 use arpg_core::{
-    ArpgGame, ArpgSaveState, AuthoritativeGame, PlayerCommand, ScenarioId, content_revision,
+    ArpgGame, ArpgSaveState, AuthoritativeGame, PlayerCommand, ReproductionRecorder, ScenarioId,
+    content_revision,
 };
 use arpg_protocol::{JsonProtocol, WireProtocol};
 use wasm_bindgen::prelude::*;
@@ -10,6 +11,9 @@ use wasm_bindgen::prelude::*;
 pub struct WasmGame {
     game: ArpgGame,
     protocol: JsonProtocol,
+    // Workbench (scenario) sessions record their accepted inputs for reproduction export.
+    // Ordinary, hosted and restored games record nothing.
+    recorder: Option<ReproductionRecorder>,
 }
 
 #[wasm_bindgen]
@@ -19,17 +23,22 @@ impl WasmGame {
         Ok(Self {
             game: ArpgGame::new_with_seed(run_seed).map_err(js_error)?,
             protocol: JsonProtocol,
+            recorder: None,
         })
     }
 
-    /// The generated dungeon for `run_seed` arranged as the named workbench scenario.
+    /// The generated dungeon for `run_seed` arranged as the named workbench scenario. The
+    /// session records its accepted players, commands and ticks for `reproductionJson`.
     #[wasm_bindgen(js_name = newScenario)]
     pub fn new_scenario(scenario: &str, run_seed: u32) -> Result<WasmGame, JsValue> {
         let scenario = ScenarioId::parse(scenario)
             .ok_or_else(|| js_error(format!("unknown scenario {scenario:?}")))?;
+        let game = ArpgGame::new_scenario(scenario, run_seed).map_err(js_error)?;
+        let recorder = ReproductionRecorder::start(&game).map_err(js_error)?;
         Ok(Self {
-            game: ArpgGame::new_scenario(scenario, run_seed).map_err(js_error)?,
+            game,
             protocol: JsonProtocol,
+            recorder: Some(recorder),
         })
     }
 
@@ -40,12 +49,20 @@ impl WasmGame {
 
     #[wasm_bindgen(js_name = addPlayer)]
     pub fn add_player(&mut self, player_id: u32) -> Result<(), JsValue> {
-        self.game.add_player(player_id).map_err(js_error)
+        self.game.add_player(player_id).map_err(js_error)?;
+        if let Some(recorder) = &mut self.recorder {
+            recorder.record_player_added(player_id);
+        }
+        Ok(())
     }
 
     #[wasm_bindgen(js_name = removePlayer)]
     pub fn remove_player(&mut self, player_id: u32) -> bool {
-        self.game.remove_player(player_id)
+        let removed = self.game.remove_player(player_id);
+        if removed && let Some(recorder) = &mut self.recorder {
+            recorder.record_player_removed();
+        }
+        removed
     }
 
     #[wasm_bindgen(js_name = applyCommand)]
@@ -60,12 +77,27 @@ impl WasmGame {
             .decode_command(encoded_command.as_bytes())
             .map_err(js_error)?;
         let command = PlayerCommand::new(player_id, sequence, command).map_err(js_error)?;
-        self.game.apply_command(command).map_err(js_error)
+        self.game.apply_command(command.clone()).map_err(js_error)?;
+        if let Some(recorder) = &mut self.recorder {
+            recorder.record_command(&command);
+        }
+        Ok(())
     }
 
     #[wasm_bindgen(js_name = advanceTick)]
     pub fn advance_tick(&mut self) -> Result<(), JsValue> {
-        self.game.advance_tick().map_err(js_error)
+        self.game.advance_tick().map_err(js_error)?;
+        if let Some(recorder) = &mut self.recorder {
+            recorder.record_tick();
+        }
+        Ok(())
+    }
+
+    /// The recorded workbench session as portable `Reproduction` JSON, which the native
+    /// `replay_reproduction` runner replays. Fails for sessions that do not record.
+    #[wasm_bindgen(js_name = reproductionJson)]
+    pub fn reproduction_json(&self) -> Result<String, JsValue> {
+        self.export_reproduction().map_err(js_error)
     }
 
     #[wasm_bindgen(js_name = snapshotJson)]
@@ -95,9 +127,81 @@ pub fn load_game_from_save_state_json(encoded: &str) -> Result<WasmGame, JsValue
     Ok(WasmGame {
         game: ArpgGame::from_save_state(save).map_err(js_error)?,
         protocol: JsonProtocol,
+        recorder: None,
     })
+}
+
+impl WasmGame {
+    fn export_reproduction(&self) -> Result<String, String> {
+        let recorder = self
+            .recorder
+            .as_ref()
+            .ok_or("only workbench sessions record a reproduction")?;
+        let reproduction = recorder.reproduction().map_err(|error| error.to_string())?;
+        serde_json::to_string(reproduction).map_err(|error| error.to_string())
+    }
 }
 
 fn js_error(error: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arpg_core::{ArpgCommand, Reproduction, replay_reproduction};
+
+    // The browser export path: wire-encoded commands through `WasmGame`, exported JSON
+    // replayed by the native runner, every published snapshot compared.
+    #[test]
+    fn an_exported_workbench_session_replays_natively_to_the_same_snapshots() {
+        let mut game = WasmGame::new_scenario("dummy", 42).unwrap();
+        game.add_player(1).unwrap();
+        let protocol = JsonProtocol;
+        let encode = |command: ArpgCommand| {
+            String::from_utf8(protocol.encode_command(&command).unwrap()).unwrap()
+        };
+        let script = [
+            (0, ArpgCommand::SetMovement { x: 1, z: 0 }),
+            (6, ArpgCommand::SetMovement { x: 0, z: 0 }),
+            (7, ArpgCommand::PrimaryAttack),
+            (30, ArpgCommand::SecondaryAttack),
+            (31, ArpgCommand::SetGuard { raised: true }),
+            (60, ArpgCommand::SetGuard { raised: false }),
+        ];
+        let mut sequence = 0;
+        let mut live = Vec::new();
+        for tick in 0..120 {
+            for &(_, command) in script.iter().filter(|(at, _)| *at == tick) {
+                sequence += 1;
+                game.apply_command(1, sequence, &encode(command)).unwrap();
+            }
+            game.advance_tick().unwrap();
+            live.push(game.game.snapshot().unwrap());
+        }
+
+        let exported = game.export_reproduction().unwrap();
+        let reproduction: Reproduction = serde_json::from_str(&exported).unwrap();
+        assert_eq!(reproduction.players, vec![1]);
+        assert_eq!(reproduction.ticks, 120);
+        assert_eq!(reproduction.commands.len(), script.len());
+        let replayed = replay_reproduction(&reproduction).unwrap();
+        assert!(
+            replayed
+                .iter()
+                .any(|snapshot| !snapshot.strike_events.is_empty())
+        );
+        assert_eq!(replayed, live);
+    }
+
+    #[test]
+    fn only_workbench_sessions_export_reproductions() {
+        assert!(WasmGame::new(42).unwrap().export_reproduction().is_err());
+        let mut game = WasmGame::new_scenario("dungeon", 42).unwrap();
+        game.add_player(1).unwrap();
+        game.advance_tick().unwrap();
+        assert!(game.export_reproduction().is_ok());
+        assert!(game.remove_player(1));
+        assert!(game.export_reproduction().is_err());
+    }
 }

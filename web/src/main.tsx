@@ -70,7 +70,6 @@ import {
   parseRunSeed,
   readTrainingRequest,
   withTrainingRequest,
-  DEFAULT_SCENARIO,
   SCENARIOS,
 } from "./training-arena.js";
 import { createGameClientRuntime } from "./game-client-runtime.ts";
@@ -140,6 +139,18 @@ const inputRegistry = {
       },
     ]),
 };
+
+// Offers `text` as a JSON file download.
+function downloadJson(text, fileName) {
+  const blob = new Blob([text], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = globalThis.document?.createElement?.("a");
+  if (!link) throw new Error("Browser download API is unavailable");
+  link.href = url;
+  link.download = fileName;
+  link.click();
+  URL.revokeObjectURL(url);
+}
 
 function freshRunSeed() {
   const values = new Uint32Array(1);
@@ -535,10 +546,10 @@ function App() {
   const [runtime] = useState(() =>
     createGameClientRuntime({
       snapshots: snapshotStore,
+      // Training sessions (including the default dungeon scenario) are scenario games,
+      // which record their session for reproduction export; ordinary play does not.
       createGame: (seed, scenario) =>
-        scenario && scenario !== DEFAULT_SCENARIO
-          ? WasmGame.newScenario(scenario, seed)
-          : new WasmGame(seed),
+        scenario ? WasmGame.newScenario(scenario, seed) : new WasmGame(seed),
       createPeerSession: (apiBase) => new DemoLobbySession({ apiBase, topology: "host" }),
       attachPeerSession: attachPeerGameSession,
       createDedicatedSession: (endpoint) => new DedicatedGameSession({ endpoint }),
@@ -1043,17 +1054,24 @@ function App() {
   const exportSave = () => {
     try {
       const saveDocument = captureSaveDocument();
-      const blob = new Blob([serializeSaveDocument(saveDocument)], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const link = globalThis.document?.createElement?.("a");
-      if (!link) throw new Error("Browser download API is unavailable");
-      link.href = url;
-      link.download = saveFileName(saveDocument);
-      link.click();
-      URL.revokeObjectURL(url);
+      downloadJson(serializeSaveDocument(saveDocument), saveFileName(saveDocument));
       setStatus(`Save exported · tick ${saveDocument.coreState.tick}`);
     } catch (error) {
       setStatus(`Could not export save: ${error}`);
+    }
+  };
+
+  // The training session's accepted commands and ticks, replayable natively with
+  // `replay_reproduction` (#101). Local training only; the runtime returns null elsewhere.
+  const exportReproduction = () => {
+    try {
+      const json = runtime.exportReproduction();
+      if (json === null) throw new Error("only local training sessions record a reproduction");
+      const { scenario: recorded, seed, ticks } = JSON.parse(json);
+      downloadJson(json, `arpg-reproduction-${recorded}-seed-${seed}-tick-${ticks}.json`);
+      setStatus(`Reproduction exported · ${recorded} · ${ticks} ticks`);
+    } catch (error) {
+      setStatus(`Could not export reproduction: ${error}`);
     }
   };
 
@@ -1311,6 +1329,12 @@ function App() {
               }}
             >
               New seed
+            </button>
+          </div>
+
+          <div className="training-actions">
+            <button type="button" onClick={exportReproduction}>
+              Export reproduction
             </button>
           </div>
 
