@@ -90,7 +90,10 @@ test("a single touch press does not double-dispatch its synthesized click", asyn
   }
 });
 
-test("a mouse click after a touch still triggers a separate action", async ({ browser, appUrl }) => {
+test("a mouse click after a touch still triggers a separate action", async ({
+  browser,
+  appUrl,
+}) => {
   const { context, page } = await phone(browser, appUrl);
   try {
     const attack = page.getByRole("button", { name: "Primary attack", exact: true });
