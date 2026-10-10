@@ -114,6 +114,8 @@ export interface GameClientRuntimeOptions {
     localContentRevision: () => string;
     // The host runs another content bundle: the guest must stop.
     onIncompatible: (reason: string) => void;
+    // Guest: the host link recovered in place, keeping the assigned player.
+    onLinkRecovered?: () => void;
   }): () => void;
   createDedicatedSession(endpoint: string): DedicatedSessionLike;
   supportsWebTransport(): boolean;
@@ -474,6 +476,9 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
           update({ playerId, lifecycle: "running" });
           syncGuardOnAssignment();
         },
+        // The host kept this guest's player across an in-place link recovery, but any held
+        // change sent during the outage was refused; re-assert it like after a re-join.
+        onLinkRecovered: syncGuardOnAssignment,
         onSnapshot: (snapshot) => options.snapshots.publish(snapshot),
         onStatus: status,
         localContentRevision: options.localContentRevision,
