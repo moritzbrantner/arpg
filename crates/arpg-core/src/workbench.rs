@@ -551,6 +551,10 @@ impl ArpgGame {
                 && tick < counter.expires_at_tick
             {
                 counter.expires_at_tick = counter.usable_from_tick + counter_window_ticks;
+                // A window the elapsed time already exceeds ends now, as on expiry.
+                if counter.expires_at_tick <= tick {
+                    player.counter = None;
+                }
             }
             let guard = &mut player.guard;
             guard.points = guard.points.min(tuning.max_points);
@@ -901,6 +905,11 @@ mod tests {
             .unwrap();
         let clamped = game.players[&1].counter.unwrap();
         assert_eq!(clamped.expires_at_tick, counter.usable_from_tick + 5);
+        game.tick = 4;
+        game.apply_workbench(&tune(TuningParameter::CounterWindowTicks, 3))
+            .unwrap();
+        assert!(game.players[&1].counter.is_none());
+        game.tick = 0;
 
         let arrow = crate::ArrowSnapshot {
             id: 1,
