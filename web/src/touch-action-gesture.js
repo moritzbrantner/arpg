@@ -20,3 +20,17 @@ export function classifyActionButtonStroke({ startX, startY, endX, endY, maxTrav
   // Diagonals are intentionally unbound: never accidentally commit an attack.
   return null;
 }
+
+// Visit every browser sample, including coalesced samples, before evaluating
+// whether an out-and-back stroke qualifies as a tap.
+export function updateActionButtonStroke(stroke, samples) {
+  for (const sample of samples) {
+    if (!Number.isFinite(sample.clientX) || !Number.isFinite(sample.clientY)) continue;
+    stroke.endX = sample.clientX;
+    stroke.endY = sample.clientY;
+    stroke.maxTravel = Math.max(
+      stroke.maxTravel,
+      Math.hypot(sample.clientX - stroke.startX, sample.clientY - stroke.startY),
+    );
+  }
+}

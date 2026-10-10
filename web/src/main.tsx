@@ -530,6 +530,9 @@ function App() {
   const touchStickRef = useRef(null);
   const touchKnobRef = useRef(null);
   const touchPointerIdRef = useRef(null);
+  // Synchronous epoch invalidation protects gestures across a pending
+  // weapon switch/session change, even before a new game snapshot arrives.
+  const touchGestureEpochRef = useRef(0);
   const saveFileInputRef = useRef(null);
   const [initialRequest] = useState(() => {
     const training = readTrainingRequest(location.search);
@@ -598,6 +601,7 @@ function App() {
   );
 
   const resetTouchVisual = useCallback(() => {
+    touchGestureEpochRef.current += 1;
     touchPointerIdRef.current = null;
     if (touchKnobRef.current) {
       touchKnobRef.current.style.transform = "translate3d(0px, 0px, 0)";
@@ -669,6 +673,8 @@ function App() {
   const switchWeapon = useCallback(() => {
     const player = focusedPlayer();
     if (!player?.alive) return;
+    // A touch already in progress belongs to the previous weapon.
+    touchGestureEpochRef.current += 1;
     // Switching never fires: any held draw is cancelled first.
     runtime.cancelBowDraw();
     runtime.dispatch({
@@ -1393,6 +1399,7 @@ function App() {
           store={snapshotStore}
           playerId={playerId}
           triggerCombatAction={triggerCombatAction}
+          gestureEpochRef={touchGestureEpochRef}
           setTouchGuard={(held) => runtime.setGuard("touch", held)}
           setTouchDraw={(held, interrupted = false) =>
             runtime.setBowDraw("touch", held, { interrupted })

@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { classifyActionButtonStroke } from "./touch-action-gesture.js";
+import { classifyActionButtonStroke, updateActionButtonStroke } from "./touch-action-gesture.js";
 
 function isTouchClick(event, lastTouchTime) {
   const native = event.nativeEvent;
@@ -90,7 +90,7 @@ export function useHeldButton(onHeldChange, enabled) {
 
 // One pointer owns a sword attack gesture. Nothing is dispatched until release,
 // so an upward swipe cannot also trigger the primary attack on pointerdown.
-export function useGestureButton(onGesture, enabled) {
+export function useGestureButton(onGesture, enabled, gestureEpochRef) {
   const active = useRef(null);
   const lastTouch = useRef(-Infinity);
 
@@ -117,12 +117,12 @@ export function useGestureButton(onGesture, enabled) {
   const update = (event) => {
     const stroke = active.current;
     if (!stroke || stroke.pointerId !== event.pointerId) return;
-    stroke.endX = event.clientX;
-    stroke.endY = event.clientY;
-    stroke.maxTravel = Math.max(
-      stroke.maxTravel,
-      Math.hypot(event.clientX - stroke.startX, event.clientY - stroke.startY),
-    );
+    // Some mobile browsers coalesce an entire out-and-back movement into one
+    // delivered pointermove. Preserve its furthest excursion.
+    updateActionButtonStroke(stroke, [
+      ...(event.nativeEvent?.getCoalescedEvents?.() ?? []),
+      event,
+    ]);
   };
 
   const cancel = (event) => {
@@ -143,6 +143,7 @@ export function useGestureButton(onGesture, enabled) {
         endX: event.clientX,
         endY: event.clientY,
         maxTravel: 0,
+        gestureEpoch: gestureEpochRef.current,
       };
       event.currentTarget.setPointerCapture?.(event.pointerId);
     },
@@ -153,6 +154,9 @@ export function useGestureButton(onGesture, enabled) {
       const stroke = active.current;
       active.current = null;
       lastTouch.current = event.timeStamp;
+      // A switch/session transition invalidates the stroke before snapshots
+      // arrive, including when training is paused or networked.
+      if (stroke.gestureEpoch !== gestureEpochRef.current) return;
       const gesture = classifyActionButtonStroke(stroke);
       if (gesture) onGesture(gesture);
     },

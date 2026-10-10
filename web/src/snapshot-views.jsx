@@ -108,6 +108,7 @@ export function CombatActions({
   store,
   playerId,
   triggerCombatAction,
+  gestureEpochRef,
   setTouchGuard,
   setTouchDraw,
   switchWeapon,
@@ -123,7 +124,7 @@ export function CombatActions({
   const primaryHandlers = useGestureButton((gesture) => {
     const action = SWORD_GESTURE_ACTIONS[gesture];
     if (action) triggerCombatAction(action);
-  }, canAttack && !bow);
+  }, canAttack && !bow, gestureEpochRef);
   const heavyHandlers = usePressButton(() => triggerCombatAction("game.secondaryAttack"));
   const swapHandlers = usePressButton(switchWeapon);
   const interactHandlers = usePressButton(() => triggerCombatAction("game.interact"));

@@ -296,3 +296,38 @@ test("guard hold survives another finger's targeting swipe and releases in order
     await context.close();
   }
 });
+
+test("weapon switch invalidates a held sword swipe before the next snapshot", async ({
+  browser,
+  appUrl,
+}) => {
+  const { context, page, cdp } = await phone(browser, appUrl);
+  try {
+    const attack = center(
+      1,
+      await page.getByRole("button", { name: "Primary attack" }).boundingBox(),
+    );
+    const swap = center(
+      2,
+      await page.getByRole("button", { name: "Switch to bow" }).boundingBox(),
+    );
+    const target = point(1, attack.x + 45, attack.y);
+    await touch(cdp, "touchStart", attack);
+    await touch(cdp, "touchStart", attack, swap);
+    // Swapping is a press action; the training authority remains paused.
+    await touch(cdp, "touchEnd", swap);
+    await touch(cdp, "touchMove", target);
+    await touch(cdp, "touchEnd", target);
+    await page.getByRole("button", { name: "Step", exact: true }).click();
+
+    const commands = await exportedCommands(page);
+    expect(commands.filter((command) => command.type === "equipWeapon")).toHaveLength(1);
+    expect(
+      commands.filter((command) =>
+        ["primaryAttack", "secondaryAttack", "cycleTarget", "clearTarget"].includes(command.type),
+      ),
+    ).toEqual([]);
+  } finally {
+    await context.close();
+  }
+});

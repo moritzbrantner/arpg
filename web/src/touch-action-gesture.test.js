@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { classifyActionButtonStroke } from "./touch-action-gesture.js";
+import { classifyActionButtonStroke, updateActionButtonStroke } from "./touch-action-gesture.js";
 
 const stroke = (x, y, maxTravel = Math.hypot(x, y)) => ({
   startX: 50,
@@ -30,4 +30,15 @@ describe("action-button touch gesture", () => {
     expect(classifyActionButtonStroke(stroke(0, 0, 55))).toBeNull();
     expect(classifyActionButtonStroke(stroke(10, 10, 40))).toBeNull();
   });
+});
+
+test("coalesced out-and-back samples cannot become a tap", () => {
+  const pending = stroke(0, 0);
+  updateActionButtonStroke(pending, [
+    { clientX: 50, clientY: 2 },
+    { clientX: 50, clientY: -12 },
+    { clientX: 50, clientY: 50 },
+  ]);
+  expect(pending.maxTravel).toBe(62);
+  expect(classifyActionButtonStroke(pending)).toBeNull();
 });
