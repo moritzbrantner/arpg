@@ -612,6 +612,13 @@ impl ArpgGame {
             if let Some(drawn) = player.draw_ticks.as_mut() {
                 *drawn = (*drawn).min(bow.full_draw_ticks);
             }
+            // A shot committed under a lower minimum no longer qualifies: like a release
+            // below the threshold it does not shoot.
+            if player.action.is_some_and(|action| {
+                action.kind == crate::ActionKind::Shoot && action.charge < bow.min_draw_ticks
+            }) {
+                player.action = None;
+            }
         }
     }
 }
@@ -1115,6 +1122,37 @@ mod tests {
             .map(|loot| loot.id)
             .collect::<Vec<_>>();
         assert_eq!(ids, (908..920).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn raising_the_minimum_draw_cancels_a_committed_short_shot() {
+        let mut game = dummy();
+        let mut sequence = 0;
+        let mut send = |game: &mut ArpgGame, command| {
+            sequence += 1;
+            game.apply_command(PlayerCommand::new(1, sequence, command).unwrap())
+                .unwrap();
+        };
+        send(
+            &mut game,
+            ArpgCommand::EquipWeapon {
+                weapon: crate::Weapon::Bow,
+            },
+        );
+        send(&mut game, ArpgCommand::DrawBow);
+        for _ in 0..10 {
+            game.advance_tick().unwrap();
+        }
+        send(&mut game, ArpgCommand::ReleaseBow);
+        assert_eq!(
+            game.players[&1].action.map(|action| action.kind),
+            Some(crate::ActionKind::Shoot)
+        );
+        game.apply_workbench(&tune(TuningParameter::BowMinDrawTicks, 20))
+            .unwrap();
+        assert!(game.players[&1].action.is_none());
+        game.advance_tick().unwrap();
+        assert!(game.arrows.is_empty());
     }
 
     #[test]
