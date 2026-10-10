@@ -464,6 +464,12 @@ impl ArpgGame {
             .collect::<Vec<_>>();
         self.retire_projectiles_of(&removed);
         self.monsters.retain(|monster| monster.room_id != room_id);
+        // Defeated monsters' drops go with them, so defeat/reset cycles stay bounded.
+        if let Some(room) = self.rooms.iter().find(|room| room.id == room_id) {
+            let room = room.clone();
+            self.ground_loot
+                .retain(|loot| !room.contains_xz_with_margin(loot.position, 0));
+        }
         let arrangement = &self
             .workbench
             .as_ref()
@@ -503,10 +509,11 @@ impl ArpgGame {
     }
 
     /// Live state never exceeds the bounds of the current tuning.
-    /// Shortened durations count the time already elapsed under `previous`; lengthened
-    /// ones apply from the next start. A monster's stagger has no record of whether an
-    /// arrow or a melee strike applied it, so like dealt damage it keeps its duration and
-    /// `bow.arrowStaggerTicks` applies to later hits.
+    /// A running timer continues as if it had started under the current value: the time
+    /// already elapsed counts, in both directions, and one that has ended stays ended.
+    /// A monster's stagger has no record of whether an arrow or a melee strike applied
+    /// it, so like dealt damage it keeps its duration and `bow.arrowStaggerTicks`
+    /// applies to later hits.
     fn clamp_to_tuning(&mut self, previous: Tuning) {
         let Tuning {
             counter_window_ticks,
@@ -514,10 +521,12 @@ impl ArpgGame {
             bow,
         } = self.tuning;
         let old = previous.guard;
-        // What is left of a timer of `old_total` with `remaining` ticks under `new_total`.
-        let shortened = |remaining: u8, old_total: u8, new_total: u8| {
-            let elapsed = old_total.saturating_sub(remaining);
-            remaining.min(new_total.saturating_sub(elapsed))
+        // What is left of a running timer of `old_total` under `new_total`.
+        let follow = |remaining: u8, old_total: u8, new_total: u8| {
+            if remaining == 0 {
+                return 0;
+            }
+            new_total.saturating_sub(old_total.saturating_sub(remaining))
         };
         let excess = self
             .arrows
@@ -525,8 +534,8 @@ impl ArpgGame {
             .saturating_sub(usize::from(bow.max_live_arrows));
         // Like launching beyond the cap, lowering it retires the oldest projectiles.
         self.arrows.drain(..excess);
-        // A player's arrow has flown `tick - launched_at_tick` of its lifetime; under a
-        // shorter lifetime it keeps only what is left, and one already past it retires.
+        // A player's arrow has flown `tick - launched_at_tick` of its lifetime and keeps
+        // what is left of the current one; one already past it retires.
         let tick = self.tick;
         self.arrows.retain_mut(|arrow| {
             if !matches!(arrow.source, crate::StrikeSource::Player(_)) {
@@ -534,25 +543,23 @@ impl ArpgGame {
             }
             let flown = tick.saturating_sub(arrow.launched_at_tick);
             let left = u64::from(bow.arrow_lifetime_ticks).saturating_sub(flown);
-            arrow.ticks_remaining = arrow
-                .ticks_remaining
-                .min(u8::try_from(left).unwrap_or(u8::MAX));
+            arrow.ticks_remaining = u8::try_from(left).unwrap_or(u8::MAX);
             arrow.ticks_remaining > 0
         });
         for player in self.players.values_mut() {
-            if let Some(counter) = player.counter.as_mut() {
-                counter.expires_at_tick = counter
-                    .expires_at_tick
-                    .min(counter.usable_from_tick + counter_window_ticks);
+            if let Some(counter) = player.counter.as_mut()
+                && tick < counter.expires_at_tick
+            {
+                counter.expires_at_tick = counter.usable_from_tick + counter_window_ticks;
             }
             let guard = &mut player.guard;
             guard.points = guard.points.min(tuning.max_points);
-            guard.broken_ticks_remaining = shortened(
+            guard.broken_ticks_remaining = follow(
                 guard.broken_ticks_remaining,
                 old.break_ticks,
                 tuning.break_ticks,
             );
-            guard.block_reaction_ticks_remaining = shortened(
+            guard.block_reaction_ticks_remaining = follow(
                 guard.block_reaction_ticks_remaining,
                 old.block_reaction_ticks,
                 tuning.block_reaction_ticks,
@@ -560,8 +567,9 @@ impl ArpgGame {
             if let Some(stance) = guard.stance.as_mut()
                 && stance.phase == crate::GuardPhase::Raising
             {
-                let left = shortened(stance.ticks_remaining, old.raise_ticks, tuning.raise_ticks);
-                // A raise that already took the new duration completes now.
+                let left = follow(stance.ticks_remaining, old.raise_ticks, tuning.raise_ticks);
+                // A raise that already took the new duration completes now; a completed
+                // raise stays raised.
                 *stance = if left == 0 {
                     crate::GuardStance {
                         phase: crate::GuardPhase::Raised,
@@ -952,6 +960,10 @@ mod tests {
                 "bow.minDrawTicks: must be positive and below fullDrawTicks",
             ),
             (
+                tune(TuningParameter::BowArrowMinSpeed, 1),
+                "bow.arrowMinSpeed: speeds must satisfy 16 <= arrowMinSpeed",
+            ),
+            (
                 tune(TuningParameter::BowArrowMinDamage, 36),
                 "bow.arrowMinDamage: must not exceed arrowFullDamage",
             ),
@@ -1033,7 +1045,7 @@ mod tests {
         game.apply_workbench(&tune(TuningParameter::GuardBreakTicks, 10))
             .unwrap();
         assert_eq!(game.players[&1].guard.broken_ticks_remaining, 0);
-        // Lengthening applies from the next break; the running one keeps its end.
+        // A running break follows the current value both ways, so round trips return.
         game.players
             .get_mut(&1)
             .unwrap()
@@ -1041,7 +1053,28 @@ mod tests {
             .broken_ticks_remaining = 4;
         game.apply_workbench(&tune(TuningParameter::GuardBreakTicks, 60))
             .unwrap();
+        assert_eq!(game.players[&1].guard.broken_ticks_remaining, 54);
+        game.apply_workbench(&tune(TuningParameter::GuardBreakTicks, 50))
+            .unwrap();
+        assert_eq!(game.players[&1].guard.broken_ticks_remaining, 44);
+        game.apply_workbench(&tune(TuningParameter::GuardBreakTicks, 10))
+            .unwrap();
         assert_eq!(game.players[&1].guard.broken_ticks_remaining, 4);
+    }
+
+    #[test]
+    fn a_reset_clears_the_room_loot_of_defeated_monsters() {
+        let mut game = dummy();
+        let (x, z) = room_center(&game);
+        game.ground_loot.push(crate::GroundLootState {
+            id: 900,
+            position: Vec3i::new(x + 200, PLAYER_Y, z),
+            kind: crate::LootKind::Gold,
+            amount: 1,
+        });
+        game.apply_workbench(&WorkbenchOperation::ResetArrangement)
+            .unwrap();
+        assert!(game.ground_loot.is_empty());
     }
 
     #[test]

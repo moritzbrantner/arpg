@@ -769,13 +769,15 @@ pub(crate) fn validate_tuning(
     if bow.full_draw_ticks > 120 {
         fail("bow.fullDrawTicks".into(), "must be at most 120");
     }
-    if bow.arrow_min_speed == 0
+    // Like monster projectiles, an arrow is fast enough that no aimed or diagonal
+    // direction rounds its velocity to zero.
+    if bow.arrow_min_speed < MIN_PROJECTILE_SPEED
         || bow.arrow_min_speed > bow.arrow_full_speed
         || bow.arrow_full_speed > 200
     {
         fail(
             "bow.arrowMinSpeed".into(),
-            "speeds must satisfy 1 <= arrowMinSpeed <= arrowFullSpeed <= 200",
+            "speeds must satisfy 16 <= arrowMinSpeed <= arrowFullSpeed <= 200",
         );
     }
     if bow.arrow_min_damage > bow.arrow_full_damage {
