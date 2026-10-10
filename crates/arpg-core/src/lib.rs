@@ -2283,16 +2283,16 @@ impl ArpgGame {
             let guard_valid = match monster.guard {
                 None => !definition.shield,
                 Some(guard) => {
+                    let can_guard = monster.health > 0
+                        && monster.action.is_none()
+                        && monster.stagger_ticks_remaining == 0;
                     definition.shield
-                        && guard.save_valid(
-                            &content().guard,
-                            monster.health > 0
-                                && monster.action.is_none()
-                                && monster.stagger_ticks_remaining == 0,
-                        )
-                        // Only the engagement policy holds a monster's guard.
+                        && guard.save_valid(&content().guard, can_guard)
+                        // Only the engagement policy holds a monster's guard, and it lets go
+                        // on committing to an attack, a stagger or death.
                         && (!guard.held
-                            || matches!(monster.engagement, Engagement::Engaged { .. }))
+                            || (can_guard
+                                && matches!(monster.engagement, Engagement::Engaged { .. })))
                 }
             };
             if !guard_valid {
@@ -11202,6 +11202,18 @@ mod tests {
                 monster.guard = Some(GuardState {
                     held: true,
                     stance: raised,
+                    ..ready
+                });
+            })
+            .is_err()
+        );
+        // Not even held without a stance: a stagger, attack or death lets go of the guard.
+        assert!(
+            tamper(defender, &|monster| {
+                monster.engagement = engaged;
+                monster.stagger_ticks_remaining = 1;
+                monster.guard = Some(GuardState {
+                    held: true,
                     ..ready
                 });
             })
