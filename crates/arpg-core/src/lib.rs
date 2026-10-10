@@ -2289,9 +2289,11 @@ impl ArpgGame {
                     definition.shield
                         && guard.save_valid(&content().guard, can_guard)
                         // Only the engagement policy holds a monster's guard, and it lets go
-                        // on committing to an attack, a stagger or death.
+                        // on committing to an attack or on death. A stagger keeps it held
+                        // (without a stance) so the guard rises again once free.
                         && (!guard.held
-                            || (can_guard
+                            || (monster.health > 0
+                                && monster.action.is_none()
                                 && matches!(monster.engagement, Engagement::Engaged { .. })))
                 }
             };
@@ -11207,7 +11209,7 @@ mod tests {
             })
             .is_err()
         );
-        // Not even held without a stance: a stagger, attack or death lets go of the guard.
+        // A stagger keeps the guard held without a stance, as the runtime saves it.
         assert!(
             tamper(defender, &|monster| {
                 monster.engagement = engaged;
@@ -11217,8 +11219,22 @@ mod tests {
                     ..ready
                 });
             })
-            .is_err()
+            .is_ok()
         );
+        // Committing to an attack lets go of the guard: never held while acting.
+        let acting = |held: bool| {
+            tamper(defender, &|monster| {
+                monster.engagement = engaged;
+                monster.action = Some(MonsterActionSaveState {
+                    phase: ActionPhase::Windup,
+                    ticks_remaining: 1,
+                    target_player_id: 1,
+                });
+                monster.guard = Some(GuardState { held, ..ready });
+            })
+        };
+        assert!(acting(false).is_ok());
+        assert!(acting(true).is_err());
     }
 
     /// Deterministic xorshift for randomized pursuit scenarios.
