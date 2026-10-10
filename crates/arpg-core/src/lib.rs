@@ -39,7 +39,7 @@ pub const WORLD_UNITS_PER_METER: i32 = 100;
 /// Largest magnitude of either component of an aim direction. Aim is a direction only: its
 /// length carries no meaning, so `[1, 0]` and `[1000, 0]` aim the same way.
 pub const AIM_COMPONENT_LIMIT: i16 = 1_000;
-pub const SAVE_STATE_SCHEMA_VERSION: u16 = 11;
+pub const SAVE_STATE_SCHEMA_VERSION: u16 = 12;
 // 2: directional multi-target strike volumes and obstruction by fixed geometry.
 // 3: directional shield guard, block and guard break.
 // 4: post-block counterattack opportunity.
@@ -49,7 +49,8 @@ pub const SAVE_STATE_SCHEMA_VERSION: u16 = 11;
 // 8: enemy engagement: aggro, leash and return, target hysteresis, separation (#109).
 // 9: aim intent separate from movement and optional target lock (#103).
 // 10: ranged spacing and monster projectiles on the shared arrow path (#108).
-pub const SAVE_STATE_RULES_VERSION: u16 = 10;
+// 11: shield monsters guard on the shared guard path (#92).
+pub const SAVE_STATE_RULES_VERSION: u16 = 11;
 // physics-engine::World::step(1) integrates velocity as world units per simulation tick.
 // At 60 Hz and 100 world units per meter, 7 units/tick is 4.2 m/s rather than
 // the previous 260 units/tick (156 m/s).
@@ -861,7 +862,11 @@ pub struct GuardStance {
     pub ticks_remaining: u8,
 }
 
-/// Authoritative shield guard state of one player.
+/// Authoritative shield guard state of one player or shield monster.
+///
+/// Players and shield monsters (#92) share these rules; only who holds the guard differs:
+/// a player's guard input, or a monster's engagement policy. For a monster, "hurt" is its
+/// stagger.
 ///
 /// Rules: guard rises while the guard input is held and the player is alive, not acting,
 /// not hurt and not guard-broken. Starting an action, a hurt reaction or death lowers it;
@@ -931,6 +936,111 @@ impl GuardState {
                 ..
             })
         )
+    }
+
+    /// One tick of the shared guard timeline. `free` means neither acting nor hurt (or
+    /// staggered), with a shield in hand.
+    fn advance(&mut self, tuning: &GuardData, alive: bool, free: bool) {
+        self.block_reaction_ticks_remaining = self.block_reaction_ticks_remaining.saturating_sub(1);
+        if !alive {
+            self.held = false;
+            self.stance = None;
+            self.block_reaction_ticks_remaining = 0;
+            return;
+        }
+        if self.broken_ticks_remaining > 0 {
+            self.broken_ticks_remaining -= 1;
+            self.stance = None;
+            return;
+        }
+        self.stance = if self.held && free {
+            Some(match self.stance {
+                None => GuardStance {
+                    phase: GuardPhase::Raising,
+                    ticks_remaining: tuning.raise_ticks,
+                },
+                Some(GuardStance {
+                    phase: GuardPhase::Raising,
+                    ticks_remaining,
+                }) if ticks_remaining > 1 => GuardStance {
+                    phase: GuardPhase::Raising,
+                    ticks_remaining: ticks_remaining - 1,
+                },
+                Some(_) => GuardStance {
+                    phase: GuardPhase::Raised,
+                    ticks_remaining: 0,
+                },
+            })
+        } else {
+            None
+        };
+        if self.stance.is_none() {
+            self.points = self
+                .points
+                .saturating_add(tuning.regen_per_tick)
+                .min(tuning.max_points);
+        }
+    }
+
+    /// Whether a saved guard is reachable under `tuning`; `can_guard` means alive, not
+    /// acting and not hurt (or staggered).
+    fn save_valid(self, tuning: &GuardData, can_guard: bool) -> bool {
+        let stance_valid = match self.stance {
+            None => true,
+            Some(stance) => {
+                let timing = match stance.phase {
+                    GuardPhase::Raising => {
+                        (1..=tuning.raise_ticks).contains(&stance.ticks_remaining)
+                    }
+                    GuardPhase::Raised => stance.ticks_remaining == 0,
+                };
+                timing && self.held && can_guard && self.broken_ticks_remaining == 0
+            }
+        };
+        stance_valid
+            && self.points <= tuning.max_points
+            && self.broken_ticks_remaining <= tuning.break_ticks
+            && self.block_reaction_ticks_remaining <= tuning.block_reaction_ticks
+    }
+
+    /// Keeps live guard state within new tuning: a running timer continues as if it had
+    /// started under the new value (the elapsed time counts) and one that ended stays ended.
+    pub(crate) fn follow_tuning(&mut self, old: &GuardData, tuning: &GuardData) {
+        let follow = |remaining: u8, old_total: u8, new_total: u8| {
+            if remaining == 0 {
+                return 0;
+            }
+            new_total.saturating_sub(old_total.saturating_sub(remaining))
+        };
+        self.points = self.points.min(tuning.max_points);
+        self.broken_ticks_remaining = follow(
+            self.broken_ticks_remaining,
+            old.break_ticks,
+            tuning.break_ticks,
+        );
+        self.block_reaction_ticks_remaining = follow(
+            self.block_reaction_ticks_remaining,
+            old.block_reaction_ticks,
+            tuning.block_reaction_ticks,
+        );
+        if let Some(stance) = self.stance.as_mut()
+            && stance.phase == GuardPhase::Raising
+        {
+            let left = follow(stance.ticks_remaining, old.raise_ticks, tuning.raise_ticks);
+            // A raise that already took the new duration completes now; a completed raise
+            // stays raised.
+            *stance = if left == 0 {
+                GuardStance {
+                    phase: GuardPhase::Raised,
+                    ticks_remaining: 0,
+                }
+            } else {
+                GuardStance {
+                    phase: GuardPhase::Raising,
+                    ticks_remaining: left,
+                }
+            };
+        }
     }
 }
 
@@ -1090,6 +1200,11 @@ pub struct MonsterSnapshot {
     pub behavior: MonsterBehavior,
     /// The player it is engaged with, while alive, engaged and in a running encounter.
     pub target_player_id: Option<PlayerId>,
+    /// Shield guard of a shield monster (#92), as on `PlayerSnapshot`; a raised guard
+    /// faces `target_player_id`. Monsters without a shield publish `None` and zero points.
+    pub guard: Option<GuardStance>,
+    pub guard_points: u16,
+    pub max_guard_points: u16,
 }
 
 /// A monster's engagement with the players of its room (#109). Authoritative and saved;
@@ -1306,6 +1421,8 @@ pub struct MonsterSaveState {
     pub steered: bool,
     /// Whether that movement backed away from the target to keep spacing (#108).
     pub retreating: bool,
+    /// Shield guard (#92): present exactly for a shield monster.
+    pub guard: Option<GuardState>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -1472,10 +1589,18 @@ struct MonsterState {
     /// Transient within a tick, never saved: steering wanted to back away this tick and
     /// found no way to, so the attack may start from inside the retreat range.
     cornered: bool,
+    /// Shield guard of a shield monster (#92); `held` is its engagement policy's choice.
+    guard: Option<GuardState>,
 }
 
 impl MonsterState {
-    fn new(id: u32, definition: usize, room_id: RoomId, position: Vec3i) -> Self {
+    fn new(
+        id: u32,
+        definition: usize,
+        room_id: RoomId,
+        position: Vec3i,
+        guard_max_points: u16,
+    ) -> Self {
         Self {
             id,
             definition,
@@ -1489,6 +1614,10 @@ impl MonsterState {
             steered: false,
             retreating: false,
             cornered: false,
+            guard: content()
+                .monster(definition)
+                .shield
+                .then(|| GuardState::ready(guard_max_points)),
         }
     }
 
@@ -1976,6 +2105,7 @@ impl ArpgGame {
                     engagement: monster.engagement,
                     steered: monster.steered,
                     retreating: monster.retreating,
+                    guard: monster.guard,
                 })
                 .collect(),
             ground_loot: self
@@ -2150,6 +2280,31 @@ impl ArpgGame {
             {
                 return Err(GameError::new("saved monster retreat is invalid"));
             }
+            let guard_valid = match monster.guard {
+                None => !definition.shield,
+                Some(guard) => {
+                    let can_guard = monster.health > 0
+                        && monster.action.is_none()
+                        && monster.stagger_ticks_remaining == 0;
+                    definition.shield
+                        && guard.save_valid(&content().guard, can_guard)
+                        // Only the engagement policy holds a monster's guard, and it lets go
+                        // on committing to an attack or on death. A stagger keeps it held
+                        // (without a stance) so the guard rises again once free.
+                        // An encounter that is not active releases it as well.
+                        && (!guard.held
+                            || (monster.health > 0
+                                && monster.action.is_none()
+                                && matches!(monster.engagement, Engagement::Engaged { .. })
+                                && game.rooms.iter().any(|room| {
+                                    room.id == monster.room_id
+                                        && room.encounter_state == RoomEncounterState::Active
+                                })))
+                }
+            };
+            if !guard_valid {
+                return Err(GameError::new("saved monster guard is invalid"));
+            }
             if let Some(action) = monster.action {
                 let maximum_ticks = match action.phase {
                     ActionPhase::Windup => definition.windup_ticks,
@@ -2203,6 +2358,7 @@ impl ArpgGame {
             monster.engagement = saved.engagement;
             monster.steered = saved.steered;
             monster.retreating = saved.retreating;
+            monster.guard = saved.guard;
         }
         if !monster_states.is_empty() {
             return Err(GameError::new("save contains unknown monster ids"));
@@ -2598,29 +2754,9 @@ impl ArpgGame {
     }
 
     fn validate_guard(player: &PlayerSaveState) -> Result<(), GameError> {
-        let guard = player.guard;
-        let stance_valid = match guard.stance {
-            None => true,
-            Some(stance) => {
-                let timing = match stance.phase {
-                    GuardPhase::Raising => {
-                        (1..=content().guard.raise_ticks).contains(&stance.ticks_remaining)
-                    }
-                    GuardPhase::Raised => stance.ticks_remaining == 0,
-                };
-                timing
-                    && guard.held
-                    && player.health > 0
-                    && player.action.is_none()
-                    && player.hurt_ticks_remaining == 0
-                    && guard.broken_ticks_remaining == 0
-            }
-        };
-        if !stance_valid
-            || guard.points > content().guard.max_points
-            || guard.broken_ticks_remaining > content().guard.break_ticks
-            || guard.block_reaction_ticks_remaining > content().guard.block_reaction_ticks
-        {
+        let can_guard =
+            player.health > 0 && player.action.is_none() && player.hurt_ticks_remaining == 0;
+        if !player.guard.save_valid(&content().guard, can_guard) {
             return Err(GameError::new("saved player guard is invalid"));
         }
         Ok(())
@@ -2756,53 +2892,34 @@ impl ArpgGame {
     }
 
     fn advance_guard(tuning: &GuardData, state: &mut PlayerState) {
-        state.guard.block_reaction_ticks_remaining =
-            state.guard.block_reaction_ticks_remaining.saturating_sub(1);
         if state.health == 0 {
             state.counter = None;
-        }
-        let guard = &mut state.guard;
-        if state.health == 0 {
-            guard.held = false;
-            guard.stance = None;
-            guard.block_reaction_ticks_remaining = 0;
-            return;
-        }
-        if guard.broken_ticks_remaining > 0 {
-            guard.broken_ticks_remaining -= 1;
-            guard.stance = None;
-            return;
         }
         let free = state.action.is_none()
             && state.hurt_ticks_remaining == 0
             && state.weapon == Weapon::SwordAndShield;
-        guard.stance = if guard.held && free {
-            Some(match guard.stance {
-                None => GuardStance {
-                    phase: GuardPhase::Raising,
-                    ticks_remaining: tuning.raise_ticks,
-                },
-                Some(GuardStance {
-                    phase: GuardPhase::Raising,
-                    ticks_remaining,
-                }) if ticks_remaining > 1 => GuardStance {
-                    phase: GuardPhase::Raising,
-                    ticks_remaining: ticks_remaining - 1,
-                },
-                Some(_) => GuardStance {
-                    phase: GuardPhase::Raised,
-                    ticks_remaining: 0,
-                },
-            })
-        } else {
-            None
-        };
-        if guard.stance.is_none() {
-            guard.points = guard
-                .points
-                .saturating_add(tuning.regen_per_tick)
-                .min(tuning.max_points);
+        state.guard.advance(tuning, state.health > 0, free);
+    }
+
+    /// A shield monster's guard tick (#92): the shared timeline, where a monster is free
+    /// when its encounter runs and it is neither staggered nor attacking.
+    fn advance_monster_guard(tuning: &GuardData, monster: &mut MonsterState, active: bool) {
+        let free = active && monster.stagger_ticks_remaining == 0 && monster.action.is_none();
+        let alive = monster.health > 0;
+        if let Some(guard) = monster.guard.as_mut() {
+            guard.advance(tuning, alive, free);
         }
+    }
+
+    /// Where a shield monster's guard faces: toward its engaged target (#92). `None` when
+    /// it is engaged with nobody it can face, so no strike meets its shield.
+    fn monster_guard_facing(&self, monster: &MonsterState) -> Option<(i64, i64)> {
+        let target = monster.engaged_target()?;
+        let position = self.world.body(Self::player_body_id(target))?.position();
+        Some((
+            i64::from(position.x - monster.position.x),
+            i64::from(position.z - monster.position.z),
+        ))
     }
 
     fn controlled_movement_velocity(current: Vec3i, state: PlayerState) -> Vec3i {
@@ -3403,13 +3520,46 @@ impl ArpgGame {
             let result = if obstructed {
                 StrikeResult::Obstructed
             } else {
+                let guard_facing = self
+                    .monsters
+                    .iter()
+                    .find(|monster| monster.id == monster_id)
+                    .and_then(|monster| self.monster_guard_facing(monster));
+                let guard_tuning = self.tuning.guard;
                 let monster = self
                     .monsters
                     .iter_mut()
                     .find(|monster| monster.id == monster_id)
                     .ok_or_else(|| GameError::new("strike references an unknown monster"))?;
+                // A shield monster's raised guard resolves first, exactly as a player's.
+                let guarded = match (monster.guard.as_mut(), guard_facing) {
+                    (Some(guard), Some(facing)) => Self::guard_outcome(
+                        &guard_tuning,
+                        guard,
+                        facing,
+                        definition,
+                        monster.position,
+                        player_position,
+                    ),
+                    _ => None,
+                };
+                if let Some(result) = guarded {
+                    monster.provoke(player_id);
+                    self.push_strike_outcome(StrikeOutcome {
+                        order: 0,
+                        strike,
+                        definition: definition.id,
+                        target,
+                        result,
+                    });
+                    continue;
+                }
                 let previous_health = monster.health;
                 monster.health = monster.health.saturating_sub(attack_damage);
+                // A hit lowers a shield, as a hurt reaction does a player's.
+                if let Some(guard) = monster.guard.as_mut() {
+                    guard.stance = None;
+                }
                 if monster.health > 0 {
                     monster.stagger_ticks_remaining = stagger_ticks;
                     monster.action = None;
@@ -3662,6 +3812,9 @@ impl ArpgGame {
             .ok_or_else(|| GameError::new("arrow hit an unknown monster"))?;
         let previous_health = monster.health;
         monster.health = monster.health.saturating_sub(arrow.damage);
+        if let Some(guard) = monster.guard.as_mut() {
+            guard.stance = None;
+        }
         if monster.health > 0 {
             monster.stagger_ticks_remaining = self.tuning.bow.arrow_stagger_ticks;
             monster.action = None;
@@ -3798,9 +3951,11 @@ impl ArpgGame {
     }
 
     /// Resolves the shield before damage: a valid block or guard break never touches health.
+    /// Players and shield monsters share it; `facing` is the guard's front direction.
     fn guard_outcome(
         tuning: &GuardData,
-        state: &mut PlayerState,
+        guard: &mut GuardState,
+        facing: (i64, i64),
         definition: StrikeDefinition,
         defender: Vec3i,
         attacker: Vec3i,
@@ -3809,18 +3964,12 @@ impl ArpgGame {
         let dz = i64::from(attacker.z - defender.z);
         // A zero-direction (overlapping) contact has no incoming side to block.
         if !definition.blockable
-            || !state.guard.is_raised()
+            || !guard.is_raised()
             || (dx == 0 && dz == 0)
-            || !Self::target_is_in_front(
-                i64::from(state.facing_x),
-                i64::from(state.facing_z),
-                dx,
-                dz,
-            )
+            || !Self::target_is_in_front(facing.0, facing.1, dx, dz)
         {
             return None;
         }
-        let guard = &mut state.guard;
         if definition.guard_cost >= guard.points {
             guard.points = 0;
             guard.stance = None;
@@ -3918,9 +4067,15 @@ impl ArpgGame {
             .players
             .get_mut(&player_id)
             .ok_or_else(|| GameError::new("monster attack references an unknown player"))?;
-        let result = if let Some(result) =
-            Self::guard_outcome(&tuning.guard, player, definition, defender, attacker)
-        {
+        let facing = (i64::from(player.facing_x), i64::from(player.facing_z));
+        let result = if let Some(result) = Self::guard_outcome(
+            &tuning.guard,
+            &mut player.guard,
+            facing,
+            definition,
+            defender,
+            attacker,
+        ) {
             result
         } else {
             let previous_health = player.health;
@@ -4394,6 +4549,14 @@ impl ArpgGame {
                 if monster.stagger_ticks_remaining > 0 || monster.health == 0 {
                     monster.action = None;
                 }
+                // Stagger lowers the guard; a staggered shield monster raises it again from
+                // the start once free. Death and a stopped encounter release it.
+                if let Some(guard) = monster.guard.as_mut() {
+                    guard.stance = None;
+                    if monster.health == 0 || !active {
+                        guard.held = false;
+                    }
+                }
             } else if let Some(mut action) = monster.action {
                 if action.ticks_remaining > 1 {
                     action.ticks_remaining -= 1;
@@ -4437,6 +4600,16 @@ impl ArpgGame {
                         ticks_remaining: definition.windup_ticks,
                         target_player_id,
                     });
+                }
+                // A shield monster holds its guard whenever it is engaged and free, so it
+                // closes on its target under a raised shield; committing to an attack (or
+                // losing its target) lowers it at once, as releasing guard does a player's.
+                let hold = monster.action.is_none() && monster.engaged_target().is_some();
+                if let Some(guard) = monster.guard.as_mut() {
+                    guard.held = hold;
+                    if !hold {
+                        guard.stance = None;
+                    }
                 }
             }
             self.monsters[index] = monster;
@@ -4756,8 +4929,16 @@ impl AuthoritativeGame for ArpgGame {
             Self::advance_guard(&tuning.guard, player);
             Self::advance_draw(&tuning.bow, player);
         }
+        let active_rooms = self
+            .rooms
+            .iter()
+            .filter(|room| room.encounter_state == RoomEncounterState::Active)
+            .map(|room| room.id)
+            .collect::<BTreeSet<_>>();
         for monster in &mut self.monsters {
             monster.stagger_ticks_remaining = monster.stagger_ticks_remaining.saturating_sub(1);
+            let active = active_rooms.contains(&monster.room_id);
+            Self::advance_monster_guard(&tuning.guard, monster, active);
         }
         for (&player_id, &state) in &self.players {
             let body_id = Self::player_body_id(player_id);
@@ -4882,7 +5063,7 @@ impl AuthoritativeGame for ArpgGame {
         }));
 
         Ok(ArpgSnapshot {
-            schema_version: 19,
+            schema_version: 20,
             run_seed: self.run_seed,
             tick: self.tick,
             world_units_per_meter: WORLD_UNITS_PER_METER,
@@ -4914,6 +5095,13 @@ impl AuthoritativeGame for ArpgGame {
                     target_player_id: monster
                         .engaged_target()
                         .filter(|_| monster.health > 0 && active_rooms.contains(&monster.room_id)),
+                    guard: monster.guard.and_then(|guard| guard.stance),
+                    guard_points: monster.guard.map_or(0, |guard| guard.points),
+                    max_guard_points: if monster.guard.is_some() {
+                        self.tuning.guard.max_points
+                    } else {
+                        0
+                    },
                 })
                 .collect(),
             ground_loot: self
@@ -5165,6 +5353,7 @@ fn generated_monsters(rooms: &[RoomSnapshot], rng: &mut DungeonRng) -> Vec<Monst
                 content().room_monster(index),
                 room.id,
                 Vec3i::new(x, PLAYER_Y, z),
+                content().guard.max_points,
             )
         })
         .collect()
@@ -5478,6 +5667,7 @@ mod tests {
     const SKIRMISHER: &str = "monster.skirmisher";
     const ARCHER: &str = "monster.archer";
     const BRUISER: &str = "monster.bruiser";
+    const DEFENDER: &str = "monster.defender";
 
     /// Canonical index of a monster definition in the built-in content.
     fn definition_index(id: &str) -> usize {
@@ -6244,6 +6434,7 @@ mod tests {
             definition_index(definition),
             STRIKE_ROOM,
             Vec3i::new(x, PLAYER_Y, z),
+            content().guard.max_points,
         ));
     }
 
@@ -9506,7 +9697,7 @@ mod tests {
                     (3, ARCHER),
                     (4, SKIRMISHER),
                     (5, BRUISER),
-                    (6, SKIRMISHER)
+                    (6, DEFENDER)
                 ],
                 "seed {seed}"
             );
@@ -9835,7 +10026,7 @@ mod tests {
         game.add_player(1).unwrap();
         let snapshot = game.snapshot().unwrap();
         let generated = generate_dungeon(snapshot.run_seed);
-        assert_eq!(snapshot.schema_version, 19);
+        assert_eq!(snapshot.schema_version, 20);
         assert_eq!(snapshot.run_seed, 0xDEAD_BEEF);
         assert_eq!(game.run_seed(), snapshot.run_seed);
         assert_eq!(snapshot.rooms, generated.rooms);
@@ -10949,6 +11140,130 @@ mod tests {
             .is_err()
         );
         assert!(tamper(&|monster| monster.post = Some([0, PLAYER_Y, 99_999])).is_err());
+    }
+
+    #[test]
+    fn saves_reject_a_guard_the_monster_cannot_hold() {
+        let mut game = ArpgGame::new_with_seed(42).unwrap();
+        game.add_player(1).unwrap();
+        let save = game.save_state().unwrap();
+        let defender = save
+            .monsters
+            .iter()
+            .position(|monster| monster.room_id == 6)
+            .unwrap();
+        assert_eq!(game.monsters[defender].definition().id, DEFENDER);
+        let ready = save.monsters[defender]
+            .guard
+            .expect("a shield monster saves its guard");
+        assert_eq!(ready, GuardState::ready(MAX_GUARD_POINTS));
+        let tamper = |index: usize, change: &dyn Fn(&mut MonsterSaveState)| {
+            let mut tampered = save.clone();
+            change(&mut tampered.monsters[index]);
+            ArpgGame::from_save_state(tampered)
+        };
+        // The defender's encounter running, as when the runtime holds its guard.
+        let mut active_save = save.clone();
+        for room in &mut active_save.rooms {
+            if room.id == 6 {
+                room.encounter_state = RoomEncounterState::Active;
+            }
+        }
+        let tamper_active = |change: &dyn Fn(&mut MonsterSaveState)| {
+            let mut tampered = active_save.clone();
+            change(&mut tampered.monsters[defender]);
+            ArpgGame::from_save_state(tampered)
+        };
+        let raised = Some(GuardStance {
+            phase: GuardPhase::Raised,
+            ticks_remaining: 0,
+        });
+        let engaged = Engagement::Engaged {
+            target_player_id: 1,
+        };
+        assert!(
+            tamper_active(&|monster| {
+                monster.engagement = engaged;
+                monster.guard = Some(GuardState {
+                    held: true,
+                    stance: raised,
+                    ..ready
+                });
+            })
+            .is_ok()
+        );
+        // Held in a dormant encounter, which the runtime never produces.
+        assert!(
+            tamper(defender, &|monster| {
+                monster.engagement = engaged;
+                monster.guard = Some(GuardState {
+                    held: true,
+                    stance: raised,
+                    ..ready
+                });
+            })
+            .is_err()
+        );
+        // Without a shield, or a shield monster without its guard.
+        assert!(tamper(0, &|monster| monster.guard = Some(ready)).is_err());
+        assert!(tamper(defender, &|monster| monster.guard = None).is_err());
+        for invalid in [
+            // Held only by an engaged monster.
+            GuardState {
+                held: true,
+                ..ready
+            },
+            // A stance only while held.
+            GuardState {
+                stance: raised,
+                ..ready
+            },
+            GuardState {
+                points: MAX_GUARD_POINTS + 1,
+                ..ready
+            },
+        ] {
+            assert!(tamper(defender, &|monster| monster.guard = Some(invalid)).is_err());
+        }
+        // No stance while staggered.
+        assert!(
+            tamper_active(&|monster| {
+                monster.engagement = engaged;
+                monster.stagger_ticks_remaining = 1;
+                monster.guard = Some(GuardState {
+                    held: true,
+                    stance: raised,
+                    ..ready
+                });
+            })
+            .is_err()
+        );
+        // A stagger keeps the guard held without a stance, as the runtime saves it.
+        assert!(
+            tamper_active(&|monster| {
+                monster.engagement = engaged;
+                monster.stagger_ticks_remaining = 1;
+                monster.guard = Some(GuardState {
+                    held: true,
+                    ..ready
+                });
+            })
+            .is_ok()
+        );
+        // Committing to an attack lets go of the guard: never held while acting.
+        let acting = |held: bool| {
+            tamper_active(&|monster| {
+                monster.engagement = engaged;
+                monster.action = Some(MonsterActionSaveState {
+                    phase: ActionPhase::Windup,
+                    ticks_remaining: 1,
+                    target_player_id: 1,
+                });
+                monster.guard = Some(GuardState { held, ..ready });
+            })
+        };
+        assert!(acting(false).is_ok());
+        assert!(acting(true).is_err());
     }
 
     /// Deterministic xorshift for randomized pursuit scenarios.

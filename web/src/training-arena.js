@@ -66,6 +66,7 @@ export const WORKBENCH_MONSTERS = Object.freeze([
   { id: "monster.skirmisher", label: "Skirmisher" },
   { id: "monster.archer", label: "Archer" },
   { id: "monster.bruiser", label: "Bruiser" },
+  { id: "monster.defender", label: "Defender" },
 ]);
 
 // An exact workbench input: a whole number written in plain decimal, or null. Bounds are

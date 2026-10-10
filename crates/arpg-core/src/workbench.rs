@@ -401,8 +401,13 @@ impl ArpgGame {
             .ok_or_else(|| GameError::new("monster id overflow"))?;
         workbench.spawned += 1;
         // Ids only grow, so pushing keeps the monster list in id order.
-        self.monsters
-            .push(MonsterState::new(id, definition_index, room_id, position));
+        self.monsters.push(MonsterState::new(
+            id,
+            definition_index,
+            room_id,
+            position,
+            self.tuning.guard.max_points,
+        ));
         self.arrangement_changed(room_id)
     }
 
@@ -544,13 +549,14 @@ impl ArpgGame {
             bow,
         } = self.tuning;
         let old = previous.guard;
-        // What is left of a running timer of `old_total` under `new_total`.
-        let follow = |remaining: u8, old_total: u8, new_total: u8| {
-            if remaining == 0 {
-                return 0;
-            }
-            new_total.saturating_sub(old_total.saturating_sub(remaining))
-        };
+        // Shield monsters' guards follow the same guard tuning as players' (#92).
+        for guard in self
+            .monsters
+            .iter_mut()
+            .filter_map(|monster| monster.guard.as_mut())
+        {
+            guard.follow_tuning(&old, &tuning);
+        }
         let excess = self
             .arrows
             .len()
@@ -579,36 +585,7 @@ impl ArpgGame {
                     player.counter = None;
                 }
             }
-            let guard = &mut player.guard;
-            guard.points = guard.points.min(tuning.max_points);
-            guard.broken_ticks_remaining = follow(
-                guard.broken_ticks_remaining,
-                old.break_ticks,
-                tuning.break_ticks,
-            );
-            guard.block_reaction_ticks_remaining = follow(
-                guard.block_reaction_ticks_remaining,
-                old.block_reaction_ticks,
-                tuning.block_reaction_ticks,
-            );
-            if let Some(stance) = guard.stance.as_mut()
-                && stance.phase == crate::GuardPhase::Raising
-            {
-                let left = follow(stance.ticks_remaining, old.raise_ticks, tuning.raise_ticks);
-                // A raise that already took the new duration completes now; a completed
-                // raise stays raised.
-                *stance = if left == 0 {
-                    crate::GuardStance {
-                        phase: crate::GuardPhase::Raised,
-                        ticks_remaining: 0,
-                    }
-                } else {
-                    crate::GuardStance {
-                        phase: crate::GuardPhase::Raising,
-                        ticks_remaining: left,
-                    }
-                };
-            }
+            player.guard.follow_tuning(&old, &tuning);
             if let Some(drawn) = player.draw_ticks.as_mut() {
                 *drawn = (*drawn).min(bow.full_draw_ticks);
             }

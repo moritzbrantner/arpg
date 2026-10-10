@@ -5,7 +5,7 @@ Gameplay tuning lives in one typed, versioned bundle:
 validated by [`content.rs`](../crates/arpg-core/src/content.rs). Definitions *select*
 supported behaviour; executable rules stay in Rust. Appearance and audio never live here.
 
-## What the bundle holds (format 6)
+## What the bundle holds (format 7)
 
 | Section | Contents |
 | --- | --- |
@@ -13,7 +13,7 @@ supported behaviour; executable rules stay in Rust. Appearance and audio never l
 | `actions` | One definition per supported `ActionKind`: phase ticks, strike, damage ratio, stagger. |
 | `combos` | Light/heavy transitions between striking actions and their input windows. |
 | `counterWindowTicks` | How long a successful block keeps the counter open. |
-| `monsters` | Enemy definitions: health, strike, phase ticks, damage, experience, pursuit speed, aggro/leash/switch/reacquire/separation, and the role parameters `retreatRange` and `projectile` (see below). |
+| `monsters` | Enemy definitions: health, strike, phase ticks, damage, experience, pursuit speed, aggro/leash/switch/reacquire/separation, and the role parameters `retreatRange`, `projectile` and `shield` (see below). |
 | `roomMonsters` | The monster definition of each combat room, in generation order (repeats when rooms outnumber entries). |
 | `guard` | Raise ticks, guard points and regeneration, block reaction, guard-break ticks. |
 | `bow` | Draw thresholds, arrow speed/damage range, lifetime, stagger and live-arrow cap. |
@@ -34,6 +34,7 @@ is no per-role AI.
 | --- | --- | --- |
 | Melee pressure | `monster.brute`, `monster.skirmisher` | `retreatRange: null`, `projectile: null`: closes to strike reach and strikes around itself. |
 | Ranged | `monster.archer` | `retreatRange` keeps it in a band from that distance out to strike reach: a player who comes nearer makes it back off through its room grid, never nearer to the player and never into fixed bodies, before it shoots again. With nowhere to go it shoots from where it stands. `projectile` (`speed`, `lifetimeTicks`) makes the attack launch a shot along the arrow path at the target's position as the active phase opens; the monster's strike still decides reach, line of sight, block and guard cost, and `damage` the hurt. |
+| Shielded defender | `monster.defender` | `shield: true`: it carries the player's shield guard, with the shared `guard` tuning (raise ticks, points, regeneration, block reaction, break ticks) and the same block rules (`guard_outcome`: the raised guard protects 60 degrees either side of where it faces against blockable strikes, each block spends the strike's `guardCost`, and a cost that reaches the remaining points breaks it). Engaged and free, it holds the guard, so it closes on its target with the shield up and faces that target; committing to its attack, a stagger or a guard break lowers it, and it rises again from the start once the monster is free. A short strike reach and slow pursuit leave a sword swing time to meet the shield while it closes; strike from behind or beside, or break the guard, to land damage. Player arrows are not blocked by it yet (#77). |
 | Heavy | `monster.bruiser` | Long `windupTicks`, slow `pursuitSpeed`, high `damage` and a `guardCost` that breaks a full guard. The wind-up holds still and lands at the strike's reach around it, so the answer is to step out of it or interrupt it: any player hit staggers the monster and cancels the wind-up. |
 
 Validation: `retreatRange` is at least the minimum monster reach and stays three navigation
