@@ -640,7 +640,9 @@ impl ReproductionRecorder {
 
     /// An accepted `add_player`.
     pub fn record_player_added(&mut self, player_id: PlayerId) {
-        if self.reproduction.ticks > 0 {
+        // Replay adds every player before anything else, so a join after a workbench
+        // operation (even within tick 0) would replay in another order.
+        if self.reproduction.ticks > 0 || !self.reproduction.operations.is_empty() {
             self.stop("a player joined after the session started");
         } else {
             self.reproduction.players.push(player_id);

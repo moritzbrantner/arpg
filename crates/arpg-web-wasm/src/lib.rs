@@ -102,6 +102,12 @@ impl WasmGame {
             .map_err(js_error)
     }
 
+    /// The room workbench operations arrange; `undefined` outside workbench sessions.
+    #[wasm_bindgen(js_name = workbenchRoomId)]
+    pub fn workbench_room_id(&self) -> Option<u32> {
+        self.recorder.as_ref().and(self.game.workbench_room())
+    }
+
     /// The tuning values the session runs, as `[{ parameter, value }]` JSON.
     #[wasm_bindgen(js_name = tuningJson)]
     pub fn tuning_json(&self) -> Result<String, JsValue> {
@@ -280,6 +286,13 @@ mod tests {
             .workbench_operation(r#"{"type":"resetArrangement"}"#)
             .unwrap_err();
         assert!(error.contains("only workbench sessions"), "{error}");
+        assert_eq!(game.workbench_room_id(), None);
+        assert!(
+            WasmGame::new_scenario("ranged", 42)
+                .unwrap()
+                .workbench_room_id()
+                .is_some()
+        );
     }
 
     #[test]

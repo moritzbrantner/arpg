@@ -99,6 +99,9 @@ class FakeGame {
     }
     this.operations.push(operation);
   }
+  workbenchRoomId() {
+    return 2;
+  }
   tuningJson() {
     return JSON.stringify([{ parameter: "guard.maxPoints", value: 100 }]);
   }
@@ -862,8 +865,10 @@ test("workbench operations reach only the local training authority", () => {
   ).toThrow("guard.maxPoints: must be positive");
   expect(games.at(-1).operations).toEqual([spawn]);
   expect(runtime.trainingTuning()).toEqual([{ parameter: "guard.maxPoints", value: 100 }]);
+  expect(runtime.trainingWorkbenchRoom()).toBe(2);
 
   void runtime.hostPeer("http://setup");
   expect(() => runtime.applyWorkbench({ type: "resetArrangement" })).toThrow();
   expect(runtime.trainingTuning()).toBeNull();
+  expect(runtime.trainingWorkbenchRoom()).toBeNull();
 });

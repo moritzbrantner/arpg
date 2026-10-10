@@ -165,7 +165,8 @@ test("a defeated dummy drops gold that the authority prompts for and pays once",
 });
 
 test("workbench spawn, tuning and reset reach the reproduction", async ({ page, appUrl }) => {
-  await page.goto(`${appUrl}?scenario=training&seed=42&fixture=dummy`);
+  // The ranged scenario's room is not the first room, so outsiders must not be offered.
+  await page.goto(`${appUrl}?scenario=training&seed=42&fixture=ranged`);
   await page.getByRole("button", { name: "Pause", exact: true }).click();
   await page.getByText("Arrangement and tuning", { exact: true }).click();
   const workbench = page.getByRole("region", { name: "Workbench arrangement and tuning" });
@@ -201,6 +202,12 @@ test("workbench spawn, tuning and reset reach the reproduction", async ({ page, 
   await workbench.getByRole("button", { name: "Reset arrangement", exact: true }).click();
   await expect(living.locator("option")).toHaveCount(before);
   await step.click();
+  // The selector offers only the workbench room's monsters, so its default removes.
+  await workbench.getByRole("button", { name: "Remove", exact: true }).click();
+  await expect(workbench.getByRole("alert")).toHaveCount(0);
+  await expect(living.locator("option")).toHaveCount(before - 1);
+  await workbench.getByRole("button", { name: "Reset arrangement", exact: true }).click();
+  await step.click();
 
   const download = page.waitForEvent("download");
   await page.getByRole("button", { name: "Export reproduction", exact: true }).click();
@@ -208,6 +215,8 @@ test("workbench spawn, tuning and reset reach the reproduction", async ({ page, 
   expect(reproduction.operations.map((entry) => entry.operation)).toEqual([
     { type: "spawnMonster", definition: "monster.skirmisher", offset: [-250, 180] },
     { type: "setTuning", parameter: "guard.maxPoints", value: 40 },
+    { type: "resetArrangement" },
+    { type: "removeMonster", monsterId: expect.any(Number) },
     { type: "resetArrangement" },
   ]);
 });

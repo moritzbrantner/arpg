@@ -70,6 +70,7 @@ export interface WasmGameLike {
   // Workbench-only authority operations and current tuning (scenario games only).
   applyWorkbench?(encodedOperation: string): void;
   tuningJson?(): string;
+  workbenchRoomId?(): number | undefined;
   free?(): void;
 }
 
@@ -691,6 +692,12 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
     trainingTuning(): TuningValue[] | null {
       if (state.mode !== "local" || !state.training || !game?.tuningJson) return null;
       return JSON.parse(game.tuningJson()) as TuningValue[];
+    },
+
+    // The room the local training authority's workbench arranges; null elsewhere.
+    trainingWorkbenchRoom(): number | null {
+      if (state.mode !== "local" || !state.training || !game?.workbenchRoomId) return null;
+      return game.workbenchRoomId() ?? null;
     },
 
     // Captures the current local authority for saving; null outside local play.

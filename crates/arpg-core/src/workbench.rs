@@ -299,6 +299,11 @@ impl ArpgGame {
         Ok(())
     }
 
+    /// The room workbench operations arrange, for workbench sessions.
+    pub fn workbench_room(&self) -> Option<RoomId> {
+        self.workbench.as_ref().map(|workbench| workbench.room_id)
+    }
+
     /// The tuning values this game runs, for workbench inputs.
     pub fn tuning_values(&self) -> Vec<TuningValue> {
         TuningParameter::ALL
@@ -322,7 +327,8 @@ impl ArpgGame {
             .iter()
             .position(|candidate| candidate.id == definition)
             .ok_or_else(|| GameError::new(format!("unknown monster definition {definition:?}")))?;
-        if offset_x.abs() > MAX_SPAWN_OFFSET || offset_z.abs() > MAX_SPAWN_OFFSET {
+        let bounds = -MAX_SPAWN_OFFSET..=MAX_SPAWN_OFFSET;
+        if !bounds.contains(&offset_x) || !bounds.contains(&offset_z) {
             return Err(GameError::new(
                 "spawn offset lies outside the workbench room",
             ));
@@ -568,6 +574,10 @@ mod tests {
             ),
             (
                 spawn("monster.brute", i32::MAX, 0),
+                "outside the workbench room",
+            ),
+            (
+                spawn("monster.brute", 0, i32::MIN),
                 "outside the workbench room",
             ),
             (spawn("monster.brute", 10, 0), "overlaps another body"),
@@ -820,6 +830,25 @@ mod tests {
         let mut late = decoded;
         late.operations[3].tick = 95;
         assert!(replay_reproduction(&late).is_err());
+    }
+
+    #[test]
+    fn a_player_joining_after_an_operation_stops_the_recording() {
+        let mut game = ArpgGame::new_scenario(ScenarioId::Dummy, 42).unwrap();
+        let mut recorder = ReproductionRecorder::start(&game).unwrap();
+        let operation = tune(TuningParameter::GuardMaxPoints, 200);
+        game.apply_workbench(&operation).unwrap();
+        recorder.record_workbench(&operation);
+        game.add_player(1).unwrap();
+        recorder.record_player_added(1);
+        let error = recorder.reproduction().unwrap_err();
+        assert!(error.to_string().contains("joined"), "{error}");
+    }
+
+    #[test]
+    fn only_workbench_games_name_a_workbench_room() {
+        assert_eq!(dummy().workbench_room(), Some(crate::SCENARIO_ROOM));
+        assert_eq!(ArpgGame::new_with_seed(42).unwrap().workbench_room(), None);
     }
 
     #[test]

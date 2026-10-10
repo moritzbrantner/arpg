@@ -16,8 +16,12 @@ export function WorkbenchControls({ runtime, store, setStatus }) {
   const [parameter, setParameter] = useState(tuning[0]?.parameter ?? "");
   const [valueDraft, setValueDraft] = useState(String(tuning[0]?.value ?? ""));
   const [error, setError] = useState(null);
+  const [roomId] = useState(() => runtime.trainingWorkbenchRoom());
 
-  const living = (snapshot?.monsters ?? []).filter((monster) => monster.alive);
+  // Only the workbench room's monsters can be removed; others stay out of the selector.
+  const living = (snapshot?.monsters ?? []).filter(
+    (monster) => monster.alive && monster.roomId === roomId,
+  );
   const selectedRemoveId =
     living.find((monster) => String(monster.id) === removeId)?.id ?? living[0]?.id ?? null;
 
