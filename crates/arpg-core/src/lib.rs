@@ -8607,6 +8607,7 @@ mod tests {
                     sequence: 1,
                     command: ArpgCommand::PrimaryAttack,
                 }],
+                operations: Vec::new(),
             };
             let snapshots = replay_reproduction(&reproduction).unwrap();
             let distance = |snapshot: &ArpgSnapshot| {

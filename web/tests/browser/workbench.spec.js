@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { expect, test } from "./fixtures.js";
 
 // Workbench scenarios run the real WASM authority; these specs drive them through the
@@ -161,4 +162,52 @@ test("a defeated dummy drops gold that the authority prompts for and pays once",
   await arena.stepUntil(arena.diagnostics, "Player actionidle");
   await arena.press("e");
   await arena.stepUntil(arena.timeline, "interact refused · nothingInRange");
+});
+
+test("workbench spawn, tuning and reset reach the reproduction", async ({ page, appUrl }) => {
+  await page.goto(`${appUrl}?scenario=training&seed=42&fixture=dummy`);
+  await page.getByRole("button", { name: "Pause", exact: true }).click();
+  await page.getByText("Arrangement and tuning", { exact: true }).click();
+  const workbench = page.getByRole("region", { name: "Workbench arrangement and tuning" });
+  const step = page.getByRole("button", { name: "Step", exact: true });
+  await step.click();
+
+  const living = workbench.getByLabel("Living monster");
+  const before = await living.locator("option").count();
+  await workbench.getByLabel("Monster", { exact: true }).selectOption("monster.skirmisher");
+  await workbench.getByLabel("Offset x").fill("-250");
+  await workbench.getByLabel("Offset z").fill("180");
+  await workbench.getByRole("button", { name: "Spawn", exact: true }).click();
+  await expect(living.locator("option")).toHaveCount(before + 1);
+  await expect(page.getByText("Workbench · spawned monster.skirmisher at -250, 180")).toBeVisible();
+
+  await workbench.getByLabel("Offset x").fill("9000");
+  await workbench.getByRole("button", { name: "Spawn", exact: true }).click();
+  await expect(workbench.getByRole("alert")).toHaveText(
+    "spawn offset lies outside the workbench room",
+  );
+
+  await workbench.getByLabel("Tuning").selectOption("guard.maxPoints");
+  await workbench.getByLabel("Value").fill("0");
+  await workbench.getByRole("button", { name: "Set", exact: true }).click();
+  await expect(workbench.getByRole("alert")).toContainText(
+    "guard.maxPoints: must be within 1..=1000",
+  );
+  await workbench.getByLabel("Value").fill("40");
+  await workbench.getByRole("button", { name: "Set", exact: true }).click();
+  await expect(workbench.getByRole("alert")).toHaveCount(0);
+  await expect(page.getByText("Guard 40/40")).toBeVisible();
+
+  await workbench.getByRole("button", { name: "Reset arrangement", exact: true }).click();
+  await expect(living.locator("option")).toHaveCount(before);
+  await step.click();
+
+  const download = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Export reproduction", exact: true }).click();
+  const reproduction = JSON.parse(await readFile(await (await download).path(), "utf8"));
+  expect(reproduction.operations.map((entry) => entry.operation)).toEqual([
+    { type: "spawnMonster", definition: "monster.skirmisher", offset: [-250, 180] },
+    { type: "setTuning", parameter: "guard.maxPoints", value: 40 },
+    { type: "resetArrangement" },
+  ]);
 });

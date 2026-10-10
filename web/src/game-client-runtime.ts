@@ -43,6 +43,18 @@ export interface ClientState {
   training: TrainingState | null;
 }
 
+// arpg-core `WorkbenchOperation`: applied by the local training authority only (#126).
+export type WorkbenchOperation =
+  | { type: "spawnMonster"; definition: string; offset: [number, number] }
+  | { type: "removeMonster"; monsterId: number }
+  | { type: "resetArrangement" }
+  | { type: "setTuning"; parameter: string; value: number };
+
+export interface TuningValue {
+  parameter: string;
+  value: number;
+}
+
 export type MovementKey = "forward" | "backward" | "left" | "right";
 export type GuardSource = "keyboard" | "touch";
 
@@ -55,6 +67,9 @@ export interface WasmGameLike {
   saveStateJson(): string;
   // Recorded workbench session as portable `Reproduction` JSON (scenario games only).
   reproductionJson?(): string;
+  // Workbench-only authority operations and current tuning (scenario games only).
+  applyWorkbench?(encodedOperation: string): void;
+  tuningJson?(): string;
   free?(): void;
 }
 
@@ -261,13 +276,22 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
   const replaceSource = (patch: Partial<ClientState>) => {
     teardown();
     const generation = state.sourceGeneration + 1;
-    update({ lobbyCode: "", training: null, ...patch, sourceGeneration: generation });
+    update({
+      lobbyCode: "",
+      training: null,
+      ...patch,
+      sourceGeneration: generation,
+    });
     return generation;
   };
   const isCurrent = (generation: number) => !disposed() && state.sourceGeneration === generation;
 
   const installLocalAuthority = (next: WasmGameLike, patch: Partial<ClientState>) => {
-    const generation = replaceSource({ mode: "local", lifecycle: "running", ...patch });
+    const generation = replaceSource({
+      mode: "local",
+      lifecycle: "running",
+      ...patch,
+    });
     game = next;
     publishFromGame();
     startLoop();
@@ -393,7 +417,11 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
       try {
         const lobby = await session.host(4);
         if (!isCurrent(generation) || peer !== session) return;
-        update({ mode: "host", lifecycle: "running", lobbyCode: lobby.displayCode });
+        update({
+          mode: "host",
+          lifecycle: "running",
+          lobbyCode: lobby.displayCode,
+        });
         status(`Hosting lobby ${lobby.displayCode}`);
       } catch (error) {
         if (!isCurrent(generation) || peer !== session) return;
@@ -409,7 +437,11 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
 
     async joinPeer(apiBase: string, code: string) {
       if (disposed()) return;
-      const generation = replaceSource({ mode: "guest", lifecycle: "starting", playerId: null });
+      const generation = replaceSource({
+        mode: "guest",
+        lifecycle: "starting",
+        playerId: null,
+      });
       options.snapshots.publish(null);
       const session = options.createPeerSession(apiBase);
       peer = session;
@@ -641,6 +673,24 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
     exportReproduction(): string | null {
       if (state.mode !== "local" || !state.training || !game?.reproductionJson) return null;
       return game.reproductionJson();
+    },
+
+    // Applies a workbench operation to the local training authority, which validates and
+    // records it for the reproduction. Throws the authority's validation message; never
+    // reaches hosted, guest, dedicated or ordinary play.
+    applyWorkbench(operation: WorkbenchOperation) {
+      if (state.mode !== "local" || !state.training || !game?.applyWorkbench) {
+        throw new Error("workbench operations are available in local training only");
+      }
+      game.applyWorkbench(JSON.stringify(operation));
+      // Paused sessions show the new arrangement without waiting for a tick.
+      publishFromGame();
+    },
+
+    // The tuning values the local training authority runs; null elsewhere.
+    trainingTuning(): TuningValue[] | null {
+      if (state.mode !== "local" || !state.training || !game?.tuningJson) return null;
+      return JSON.parse(game.tuningJson()) as TuningValue[];
     },
 
     // Captures the current local authority for saving; null outside local play.
