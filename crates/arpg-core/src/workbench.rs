@@ -503,6 +503,29 @@ impl ArpgGame {
             room.encounter_state = RoomEncounterState::Dormant;
         }
         self.navigation = Default::default();
+        // Drops are not attributable to a monster, so the room keeps only its newest
+        // MAX_WORKBENCH_MONSTERS uncollected drops: with at most that many monsters, at
+        // most as many again can fall before the next change, whatever the spawn history.
+        if let Some(room) = self.rooms.iter().find(|room| room.id == room_id).cloned() {
+            let in_room =
+                |loot: &crate::GroundLootState| room.contains_xz_with_margin(loot.position, 0);
+            let excess = self
+                .ground_loot
+                .iter()
+                .filter(|loot| in_room(loot))
+                .count()
+                .saturating_sub(MAX_WORKBENCH_MONSTERS);
+            let mut dropped = 0;
+            // Loot ids only grow, so the oldest come first.
+            self.ground_loot.retain(|loot| {
+                if dropped < excess && in_room(loot) {
+                    dropped += 1;
+                    false
+                } else {
+                    true
+                }
+            });
+        }
         self.reconcile_encounters()?;
         // A lock on a removed monster drops now, not after the next tick.
         self.revalidate_target_locks()
@@ -1069,6 +1092,29 @@ mod tests {
         game.apply_workbench(&tune(TuningParameter::GuardBreakTicks, 10))
             .unwrap();
         assert_eq!(game.players[&1].guard.broken_ticks_remaining, 4);
+    }
+
+    #[test]
+    fn removals_keep_only_the_newest_room_drops() {
+        let mut game = dummy();
+        let (x, z) = room_center(&game);
+        for id in 0..20 {
+            game.ground_loot.push(crate::GroundLootState {
+                id: 900 + id,
+                position: Vec3i::new(x - 300, PLAYER_Y, z),
+                kind: crate::LootKind::Gold,
+                amount: 1,
+            });
+        }
+        let target = room_monsters(&game)[0].0;
+        game.apply_workbench(&WorkbenchOperation::RemoveMonster { monster_id: target })
+            .unwrap();
+        let ids = game
+            .ground_loot
+            .iter()
+            .map(|loot| loot.id)
+            .collect::<Vec<_>>();
+        assert_eq!(ids, (908..920).collect::<Vec<_>>());
     }
 
     #[test]
