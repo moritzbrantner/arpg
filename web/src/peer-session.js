@@ -12,8 +12,14 @@ export function attachPeerGameSession({
   onStatus,
   localContentRevision,
   onIncompatible,
+  onLinkRecovered = () => true,
 }) {
   const players = new Map();
+  // Guest only: whether the host assigned this guest a player, and whether the host link has
+  // left `connected` since. A link the foundation recovers in place (ICE restart) keeps the
+  // same player and sends no new `peer-ready`, so the guest learns of it from the state.
+  let guestAssigned = false;
+  let hostLinkInterrupted = false;
   // Guests refuse a host whose content bundle differs from their own build.
   const incompatible = (snapshot) => {
     const reason = contentRevisionMismatch(localContentRevision(), snapshot, "host");
@@ -85,6 +91,8 @@ export function attachPeerGameSession({
         !snapshot.players.some((player) => player.id === data.playerId)
       )
         throw new Error("Invalid host player assignment");
+      guestAssigned = true;
+      hostLinkInterrupted = false;
       onPlayer(data.playerId);
       onSnapshot(snapshot);
       onStatus(`Connected as player ${data.playerId}`);
@@ -106,6 +114,27 @@ export function attachPeerGameSession({
     players.delete(participantId);
     getGame()?.removePlayer(assigned);
     onStatus(`Player ${assigned} disconnected`);
+  });
+
+  listen("peer-statechange", ({ peerId, state }) => {
+    if (role !== "guest" || !guestAssigned || peerId !== session.hostParticipantId) return;
+    if (state !== "connected") {
+      hostLinkInterrupted = true;
+      return;
+    }
+    retryLinkRecovery();
+  });
+
+  // The recovery stays pending until the re-assertion actually reaches the host link, so a
+  // `connected` that precedes a sendable reliable channel retries once the channel opens.
+  const retryLinkRecovery = () => {
+    if (!hostLinkInterrupted) return;
+    if (onLinkRecovered() !== false) hostLinkInterrupted = false;
+  };
+
+  listen("channel-open", ({ peerId, kind }) => {
+    if (role !== "guest" || !guestAssigned || peerId !== session.hostParticipantId) return;
+    if (kind === "reliable") retryLinkRecovery();
   });
 
   listen("statechange", (detail) => {
