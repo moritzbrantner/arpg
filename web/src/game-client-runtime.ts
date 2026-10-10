@@ -165,6 +165,16 @@ const HELD_INPUTS: readonly HeldInput[] = ["guard", "movement", "aim", "bow"];
 // reordered newer datagram can discard an older one; only a refresh that never stops
 // guarantees that each input's current value eventually lands as the newest command.
 const HELD_REFRESH_INTERVAL_MS = 200;
+// Commands the refresh re-sends; every other command is a one-shot the refresh must not
+// overtake.
+const HELD_COMMAND_TYPES = new Set([
+  "setGuard",
+  "setMovement",
+  "setAim",
+  "drawBow",
+  "releaseBow",
+  "cancelBow",
+]);
 
 export function createGameClientRuntime(options: GameClientRuntimeOptions) {
   const schedule = options.setInterval ?? ((callback, ms) => globalThis.setInterval(callback, ms));
@@ -202,6 +212,9 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
   let heldRefreshTimer: unknown = null;
   let bowTerminal: "releaseBow" | "cancelBow" | null = null;
   let heldRefreshRotation = 0;
+  // Whether a one-shot command (attack, interact, weapon or target change) went out during
+  // the current refresh period.
+  let oneShotSinceRefresh = false;
 
   const update = (patch: Partial<ClientState>) => {
     let changed = false;
@@ -298,6 +311,7 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
     guardRaiseSent = false;
     bowTerminal = null;
     heldRefreshRotation = 0;
+    oneShotSinceRefresh = false;
   };
 
   // Replaces the current source. The returned token identifies the new generation.
@@ -352,7 +366,7 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
           // A refresh only repeats held state, so its failure is not news to the player.
           if (dedicated === session && !quiet) status(`Dedicated command failed: ${error}`);
         });
-        noteHeldSent(command.type);
+        noteDedicatedSent(command.type);
       } else {
         if (!game || !playerId) return false;
         game.applyCommand(playerId, ++sequence, encoded);
@@ -364,9 +378,11 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
     }
   };
 
-  // Remembers the last bow release or cancel, which the refresh repeats once nothing is drawn.
-  function noteHeldSent(type: unknown) {
+  // Remembers the last bow release or cancel, which the refresh repeats once nothing is drawn,
+  // and whether a one-shot command went out this period.
+  function noteDedicatedSent(type: unknown) {
     if (type === "releaseBow" || type === "cancelBow") bowTerminal = type;
+    if (!HELD_COMMAND_TYPES.has(type as string)) oneShotSinceRefresh = true;
   }
 
   // Re-sends the whole current held set with fresh sequences on every period, rotating the
@@ -381,6 +397,13 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
       return;
     }
     if (state.lifecycle !== "running" || !state.playerId) return;
+    // A one-shot is never re-sent, so a higher-sequence refresh that overtook it would make
+    // the authority drop it below the watermark. Skipping the period after one keeps every
+    // refresh at least a full period behind any one-shot.
+    if (oneShotSinceRefresh) {
+      oneShotSinceRefresh = false;
+      return;
+    }
     const send = (command: Record<string, unknown>) => dispatch(command, { quiet: true });
     const refreshers: Record<HeldInput, () => void> = {
       guard: () => {
