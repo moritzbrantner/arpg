@@ -114,8 +114,9 @@ export interface GameClientRuntimeOptions {
     localContentRevision: () => string;
     // The host runs another content bundle: the guest must stop.
     onIncompatible: (reason: string) => void;
-    // Guest: the host link recovered in place, keeping the assigned player.
-    onLinkRecovered?: () => void;
+    // Guest: the host link recovered in place, keeping the assigned player. Returns false
+    // when the re-assertion could not be sent yet, so the adapter retries it.
+    onLinkRecovered?: () => boolean;
   }): () => void;
   createDedicatedSession(endpoint: string): DedicatedSessionLike;
   supportsWebTransport(): boolean;
@@ -341,8 +342,10 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
     }
   };
 
-  const sendGuard = (raised: boolean) => {
-    if (dispatch({ type: "setGuard", raised }) && raised) guardRaiseSent = true;
+  const sendGuard = (raised: boolean): boolean => {
+    const sent = dispatch({ type: "setGuard", raised });
+    if (sent && raised) guardRaiseSent = true;
+    return sent;
   };
 
   // Re-asserts the guard this client actually holds once a remote authority (re-)assigns
@@ -351,9 +354,10 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
   // a re-joined peer player starts with its guard down. A held guard is always re-asserted
   // (the authority treats a repeated raise as a continued hold); a released one only when
   // the authority may still hold an earlier raise.
-  const syncGuardOnAssignment = () => {
+  // Returns whether the authority is now in sync (nothing to re-assert, or the send went out).
+  const syncGuardOnAssignment = (): boolean => {
     const held = guardSources.size > 0;
-    if (held || guardRaiseSent) sendGuard(held);
+    return held || guardRaiseSent ? sendGuard(held) : true;
   };
 
   const flushMovement = () => {

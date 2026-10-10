@@ -12,7 +12,7 @@ export function attachPeerGameSession({
   onStatus,
   localContentRevision,
   onIncompatible,
-  onLinkRecovered = () => {},
+  onLinkRecovered = () => true,
 }) {
   const players = new Map();
   // Guest only: whether the host assigned this guest a player, and whether the host link has
@@ -122,9 +122,19 @@ export function attachPeerGameSession({
       hostLinkInterrupted = true;
       return;
     }
+    retryLinkRecovery();
+  });
+
+  // The recovery stays pending until the re-assertion actually reaches the host link, so a
+  // `connected` that precedes a sendable reliable channel retries once the channel opens.
+  const retryLinkRecovery = () => {
     if (!hostLinkInterrupted) return;
-    hostLinkInterrupted = false;
-    onLinkRecovered();
+    if (onLinkRecovered() !== false) hostLinkInterrupted = false;
+  };
+
+  listen("channel-open", ({ peerId, kind }) => {
+    if (role !== "guest" || !guestAssigned || peerId !== session.hostParticipantId) return;
+    if (kind === "reliable") retryLinkRecovery();
   });
 
   listen("statechange", (detail) => {
