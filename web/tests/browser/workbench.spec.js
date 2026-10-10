@@ -63,7 +63,10 @@ test("melee scenarios show a forward hit, an aimed-away whiff, a blocked strike 
   await expect(retreat.timeline).toContainText("No events yet");
 });
 
-test("a block opens a counter window that expires", async ({ page, appUrl }) => {
+test("a block opens a counter window that expires and a counter honours reach", async ({
+  page,
+  appUrl,
+}) => {
   const arena = await openScenario(page, appUrl, "enemy");
   await page.keyboard.down("f");
   await arena.stepUntil(arena.timeline, "monster.claw · monster 1 → player 1 · blocked");
@@ -85,6 +88,19 @@ test("a block opens a counter window that expires", async ({ page, appUrl }) => 
   await late.press("Space");
   await late.steps(1);
   await expect(late.diagnostics).toContainText("primaryAttack · windup");
+
+  // The archer backs off before it shoots: a counter after blocking its bolt starts, but
+  // honours reach and whiffs instead of homing in on the retreated attacker.
+  const retreated = await openScenario(page, appUrl, "retreating");
+  await page.keyboard.down("f");
+  await retreated.stepUntil(retreated.timeline, "→ player 1 · blocked", 150);
+  await expect(retreated.timeline).toContainText("monster.bolt");
+  await page.keyboard.up("f");
+  await retreated.press("Space");
+  await retreated.steps(1);
+  await expect(retreated.diagnostics).toContainText("counter · windup");
+  await retreated.stepUntil(retreated.diagnostics, "counter · recovery");
+  await expect(retreated.timeline).not.toContainText("sword.counterSlash");
 });
 
 test("archery scenarios show an arrow hit and an arrow stopped by a pillar", async ({
