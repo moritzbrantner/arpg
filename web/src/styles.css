@@ -1043,7 +1043,10 @@ select {
   .hud p {
     font-size: 0.78rem;
   }
-  /* Five controls wrap into rows beside the movement stick instead of overflowing. */
+  /* An upward Attack swipe replaces the separate Heavy button on touch layouts. */
+  .combat-action-secondary {
+    display: none;
+  }
   .combat-actions {
     flex-wrap: wrap-reverse;
     justify-content: flex-end;

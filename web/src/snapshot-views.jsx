@@ -1,5 +1,5 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
-import { useHeldButton, usePressButton } from "./touch-buttons.js";
+import { useGestureButton, useHeldButton, usePressButton } from "./touch-buttons.js";
 
 export function useSnapshot(store) {
   return useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
@@ -84,7 +84,9 @@ export function PlayerHud({ store, playerId, status, interactKey = "E" }) {
         interact · Esc settings
       </p>
       <p className="mobile-controls-hint">
-        Left stick to move · Attack / Heavy / Guard / Interact on the right
+        {player?.weapon === "bow"
+          ? "Left stick · Hold Draw, release to shoot · Guard and Heavy unavailable with bow"
+          : "Left stick · Tap Attack for light, swipe ↑ Heavy, → target, ← unlock · Hold Guard · Tap Interact"}
       </p>
     </section>
   );
@@ -92,6 +94,15 @@ export function PlayerHud({ store, playerId, status, interactKey = "E" }) {
 
 const LIGHT_KINDS = new Set(["primaryAttack", "counter", "lightFollowUp", "lightFinisher"]);
 const HEAVY_KINDS = new Set(["secondaryAttack", "heavyFinisher"]);
+
+// Input-bindings owns these semantic action IDs; this button maps only local
+// gestures to them. Nothing here decides combat, targeting or interaction outcomes.
+const SWORD_GESTURE_ACTIONS = {
+  tap: "game.primaryAttack",
+  up: "game.secondaryAttack",
+  right: "game.cycleTarget",
+  left: "game.clearTarget",
+};
 
 export function CombatActions({
   store,
@@ -109,10 +120,13 @@ export function CombatActions({
   const canAttack = Boolean(playerId && player?.alive);
   const bow = player?.weapon === "bow";
   // Each touch owns its action even when the other thumb is moving the joystick.
-  const primaryHandlers = usePressButton(() => triggerCombatAction("primaryAttack"));
-  const heavyHandlers = usePressButton(() => triggerCombatAction("secondaryAttack"));
+  const primaryHandlers = useGestureButton((gesture) => {
+    const action = SWORD_GESTURE_ACTIONS[gesture];
+    if (action) triggerCombatAction(action);
+  }, canAttack && !bow);
+  const heavyHandlers = usePressButton(() => triggerCombatAction("game.secondaryAttack"));
   const swapHandlers = usePressButton(switchWeapon);
-  const interactHandlers = usePressButton(() => triggerCombatAction("interact"));
+  const interactHandlers = usePressButton(() => triggerCombatAction("game.interact"));
   const bowHandlers = useHeldButton(
     (held, interrupted) => setTouchDraw(held, interrupted),
     canAttack && bow,

@@ -642,17 +642,29 @@ function App() {
     resetTouchStick();
   };
 
-  const triggerCombatAction = (type) => {
-    if (!playerId || !currentPlayer()?.alive) return;
-    runtime.dispatch({ type });
-  };
-
   // Reads the focused player from the runtime, so long-lived input handlers never hold a
   // stale player id.
   const focusedPlayer = useCallback(() => {
     const id = runtime.getState().playerId;
     return snapshotStore.getSnapshot()?.players.find((player) => player.id === id) ?? null;
   }, [runtime, snapshotStore]);
+
+  // Keyboard and touch gestures submit the same input-bindings action vocabulary.
+  // Only arpg-core adjudicates whether a submitted command is possible or succeeds.
+  const triggerCombatAction = useCallback(
+    (action) => {
+      if (!focusedPlayer()?.alive) return;
+      if (action === "game.cycleTarget") return runtime.cycleTarget();
+      if (action === "game.clearTarget") return runtime.clearTarget();
+      const type = {
+        "game.primaryAttack": "primaryAttack",
+        "game.secondaryAttack": "secondaryAttack",
+        "game.interact": "interact",
+      }[action];
+      if (type) runtime.dispatch({ type });
+    },
+    [focusedPlayer, runtime],
+  );
 
   const switchWeapon = useCallback(() => {
     const player = focusedPlayer();
@@ -884,19 +896,16 @@ function App() {
           if (dispatch.phase === "press") switchWeapon();
           return;
         }
-        if (dispatch.action === "game.cycleTarget" || dispatch.action === "game.clearTarget") {
-          if (dispatch.phase !== "press") return;
-          if (dispatch.action === "game.cycleTarget") runtime.cycleTarget();
-          else runtime.clearTarget();
-          return;
-        }
-        const combatCommand = {
-          "game.primaryAttack": "primaryAttack",
-          "game.secondaryAttack": "secondaryAttack",
-          "game.interact": "interact",
-        }[dispatch.action];
-        if (combatCommand && dispatch.phase === "press") {
-          runtime.dispatch({ type: combatCommand });
+        if (
+          [
+            "game.primaryAttack",
+            "game.secondaryAttack",
+            "game.interact",
+            "game.cycleTarget",
+            "game.clearTarget",
+          ].includes(dispatch.action)
+        ) {
+          if (dispatch.phase === "press") triggerCombatAction(dispatch.action);
           return;
         }
         if (dispatch.action === "game.guard") {
@@ -919,7 +928,16 @@ function App() {
       stopPropagation: true,
     });
     return detach;
-  }, [ready, inWorld, profile, settingsOpen, runtime, focusedPlayer, switchWeapon]);
+  }, [
+    ready,
+    inWorld,
+    profile,
+    settingsOpen,
+    runtime,
+    focusedPlayer,
+    switchWeapon,
+    triggerCombatAction,
+  ]);
 
   const updateProfile = (next) => {
     if (!persistStoredValue(PROFILE_KEY, JSON.stringify(next)))
