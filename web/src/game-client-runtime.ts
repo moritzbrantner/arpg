@@ -160,20 +160,11 @@ function idleMovement() {
 
 type HeldInput = "guard" | "movement" | "aim" | "bow";
 const HELD_INPUTS: readonly HeldInput[] = ["guard", "movement", "aim", "bow"];
-const HELD_COMMAND_TYPES = new Set([
-  "setGuard",
-  "setMovement",
-  "setAim",
-  "drawBow",
-  "releaseBow",
-  "cancelBow",
-]);
-// Dedicated held-input re-assertion cadence (5 per second per input) and how many periods
-// after the last held change, resume or assignment the whole held set keeps being re-sent.
-// The window spans one rotation of the send order, so every input is the newest datagram
-// of some period and cannot be overtaken by a refresh of another input.
+// Dedicated held-input re-assertion cadence: 5 per second per input, for as long as the
+// session runs. Every datagram carries one input under a global sequence watermark, so a
+// reordered newer datagram can discard an older one; only a refresh that never stops
+// guarantees that each input's current value eventually lands as the newest command.
 const HELD_REFRESH_INTERVAL_MS = 200;
-const HELD_REFRESH_AFTER_CHANGE = HELD_INPUTS.length;
 
 export function createGameClientRuntime(options: GameClientRuntimeOptions) {
   const schedule = options.setInterval ?? ((callback, ms) => globalThis.setInterval(callback, ms));
@@ -209,9 +200,7 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
   // bounded cadence: indefinitely while it differs from rest, and for a few periods after
   // it returns to rest so a lost release still converges (#139).
   let heldRefreshTimer: unknown = null;
-  let refreshing = false;
   let bowTerminal: "releaseBow" | "cancelBow" | null = null;
-  let heldRefreshRemaining = 0;
   let heldRefreshRotation = 0;
 
   const update = (patch: Partial<ClientState>) => {
@@ -308,7 +297,6 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
     aim = null;
     guardRaiseSent = false;
     bowTerminal = null;
-    heldRefreshRemaining = 0;
     heldRefreshRotation = 0;
   };
 
@@ -376,35 +364,23 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
     }
   };
 
-  // Records that a held-input command went out as a datagram; a change restarts the
-  // bounded refresh window.
+  // Remembers the last bow release or cancel, which the refresh repeats once nothing is drawn.
   function noteHeldSent(type: unknown) {
-    if (!HELD_COMMAND_TYPES.has(type as string)) return;
     if (type === "releaseBow" || type === "cancelBow") bowTerminal = type;
-    if (!refreshing) heldRefreshRemaining = HELD_REFRESH_AFTER_CHANGE;
   }
 
-  const heldActive = () =>
-    guardSources.size > 0 ||
-    movement.lastX !== 0 ||
-    movement.lastZ !== 0 ||
-    aim !== null ||
-    drawSources.size > 0;
-
-  // Re-sends the whole current held set with fresh sequences while any input is away from
-  // rest and for a bounded window after the last change, so neither a single lost datagram
-  // nor reordering against another input's refresh (the authority drops sequences below
-  // its watermark) can leave the dedicated authority holding a stale value.
+  // Re-sends the whole current held set with fresh sequences on every period, rotating the
+  // order so each input is regularly the newest datagram, so neither a lost datagram nor
+  // reordering against another input (the authority drops sequences below its watermark)
+  // can leave the dedicated authority holding a stale value for longer than a few periods.
+  // Every repeated value is idempotent at the authority: a repeated raise or draw is a
+  // continued hold, a repeated lower, release or cancel without a draw does nothing.
   const refreshHeldInput = () => {
     if (state.mode !== "dedicated" || !dedicated) {
       stopHeldRefresh();
       return;
     }
     if (state.lifecycle !== "running" || !state.playerId) return;
-    if (!heldActive()) {
-      if (heldRefreshRemaining <= 0) return;
-      heldRefreshRemaining -= 1;
-    }
     const send = (command: Record<string, unknown>) => dispatch(command, { quiet: true });
     const refreshers: Record<HeldInput, () => void> = {
       guard: () => {
@@ -413,20 +389,13 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
       },
       movement: () => send({ type: "setMovement", x: movement.lastX, z: movement.lastZ }),
       aim: () => send({ type: "setAim", direction: aim }),
-      // A repeated draw is a continued hold; a repeated release or cancel without a draw
-      // in progress does nothing, so neither can fire a second shot.
       bow: () => {
         if (drawSources.size > 0) send({ type: "drawBow" });
         else if (bowTerminal) send({ type: bowTerminal });
       },
     };
-    refreshing = true;
-    try {
-      for (let index = 0; index < HELD_INPUTS.length; index += 1) {
-        refreshers[HELD_INPUTS[(heldRefreshRotation + index) % HELD_INPUTS.length]]();
-      }
-    } finally {
-      refreshing = false;
+    for (let index = 0; index < HELD_INPUTS.length; index += 1) {
+      refreshers[HELD_INPUTS[(heldRefreshRotation + index) % HELD_INPUTS.length]]();
     }
     heldRefreshRotation = (heldRefreshRotation + 1) % HELD_INPUTS.length;
   };
@@ -616,9 +585,6 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
             update({ playerId: welcome.playerId, lifecycle: "running" });
             status(`Dedicated authority · player ${welcome.playerId} · ${welcome.tickHz} Hz`);
             syncGuardOnAssignment();
-            // Commands flushed across a resume may interleave with fresh ones: re-assert the
-            // whole held set for a full window.
-            heldRefreshRemaining = HELD_REFRESH_AFTER_CHANGE;
             startHeldRefresh();
           },
           onSnapshot: (frame) => {
