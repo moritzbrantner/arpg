@@ -194,3 +194,64 @@ test("browser WebTransport resumes the dedicated authority after an outage", asy
     rmSync(certificate.directory, { recursive: true, force: true });
   }
 });
+
+// Reconnect mid-guard (#92): the resumed authority's guard follows the key the player
+// actually holds. A key held through the outage keeps the shield raised (no phantom drop);
+// a key released during the outage leaves it lowered after the resume (never stuck raised).
+test("a dedicated resume keeps a held guard and lowers one released during the outage", async ({
+  page,
+  appUrl,
+}) => {
+  expect(
+    existsSync(serverBinary),
+    `build the dedicated server first: cargo build --locked -p arpg-game-server --bin server (looked for ${serverBinary})`,
+  ).toBe(true);
+  const certificate = createCertificate();
+  const port = await freeUdpPort();
+  await installCertificatePin(page, certificate.hashBytes);
+  const server = await startDedicatedServer(certificate, port);
+  try {
+    await page.goto(appUrl);
+    await page.getByRole("button", { name: "Enter World", exact: true }).click();
+    const status = page.getByRole("region", { name: "Player status" }).locator("p").first();
+    const guard = page.getByRole("button", { name: "Hold shield", exact: true });
+
+    await page.getByRole("button", { name: "Settings", exact: true }).click();
+    const settings = page.getByRole("dialog", { name: "Settings", exact: true });
+    await settings.getByLabel("WebTransport endpoint").fill(`https://localhost:${port}/arpg`);
+    await settings.getByRole("button", { name: "Connect dedicated server", exact: true }).click();
+    await expect(status).toContainText("Dedicated authority · player 1 · 60 Hz", {
+      timeout: 30_000,
+    });
+    await settings.getByRole("button", { name: "Close", exact: true }).click();
+    await expect(settings).not.toBeVisible();
+    await page.evaluate(() => document.activeElement?.blur());
+
+    // Held through the outage: the resumed authority still guards.
+    await page.keyboard.down("f");
+    await expect(guard).toHaveAttribute("data-guard", "raised");
+    await page.evaluate(() => globalThis.__arpgOutage.begin());
+    await expect(status).toHaveText("Connecting to dedicated authority…", { timeout: 15_000 });
+    await page.evaluate(() => globalThis.__arpgOutage.end());
+    await expect(status).toContainText("Dedicated authority · player 1 · 60 Hz", {
+      timeout: 30_000,
+    });
+    // Snapshots from before the outage also read "raised": give the resumed authority
+    // time to publish fresh ones, then require the guard to still be up.
+    await page.waitForTimeout(500);
+    await expect(guard).toHaveAttribute("data-guard", "raised");
+
+    // Released during the outage: the resumed authority lowers the guard.
+    await page.evaluate(() => globalThis.__arpgOutage.begin());
+    await expect(status).toHaveText("Connecting to dedicated authority…", { timeout: 15_000 });
+    await page.keyboard.up("f");
+    await page.evaluate(() => globalThis.__arpgOutage.end());
+    await expect(status).toContainText("Dedicated authority · player 1 · 60 Hz", {
+      timeout: 30_000,
+    });
+    await expect(guard).not.toHaveAttribute("data-guard", /.+/);
+  } finally {
+    await stopDedicatedServer(server);
+    rmSync(certificate.directory, { recursive: true, force: true });
+  }
+});
