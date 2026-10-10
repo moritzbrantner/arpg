@@ -121,10 +121,14 @@ export function CombatActions({
   const canAttack = Boolean(playerId && player?.alive);
   const bow = player?.weapon === "bow";
   // Each touch owns its action even when the other thumb is moving the joystick.
-  const primaryHandlers = useGestureButton((gesture) => {
-    const action = SWORD_GESTURE_ACTIONS[gesture];
-    if (action) triggerCombatAction(action);
-  }, canAttack && !bow, gestureEpochRef);
+  const primaryHandlers = useGestureButton(
+    (gesture) => {
+      const action = SWORD_GESTURE_ACTIONS[gesture];
+      if (action) triggerCombatAction(action);
+    },
+    canAttack && !bow,
+    gestureEpochRef,
+  );
   const heavyHandlers = usePressButton(() => triggerCombatAction("game.secondaryAttack"));
   const swapHandlers = usePressButton(switchWeapon);
   const interactHandlers = usePressButton(() => triggerCombatAction("game.interact"));

@@ -119,10 +119,7 @@ export function useGestureButton(onGesture, enabled, gestureEpochRef) {
     if (!stroke || stroke.pointerId !== event.pointerId) return;
     // Some mobile browsers coalesce an entire out-and-back movement into one
     // delivered pointermove. Preserve its furthest excursion.
-    updateActionButtonStroke(stroke, [
-      ...(event.nativeEvent?.getCoalescedEvents?.() ?? []),
-      event,
-    ]);
+    updateActionButtonStroke(stroke, [...(event.nativeEvent?.getCoalescedEvents?.() ?? []), event]);
   };
 
   const cancel = (event) => {

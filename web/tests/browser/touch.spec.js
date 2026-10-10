@@ -307,10 +307,7 @@ test("weapon switch invalidates a held sword swipe before the next snapshot", as
       1,
       await page.getByRole("button", { name: "Primary attack" }).boundingBox(),
     );
-    const swap = center(
-      2,
-      await page.getByRole("button", { name: "Switch to bow" }).boundingBox(),
-    );
+    const swap = center(2, await page.getByRole("button", { name: "Switch to bow" }).boundingBox());
     const target = point(1, attack.x + 45, attack.y);
     await touch(cdp, "touchStart", attack);
     await touch(cdp, "touchStart", attack, swap);
