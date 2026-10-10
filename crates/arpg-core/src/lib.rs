@@ -2291,10 +2291,15 @@ impl ArpgGame {
                         // Only the engagement policy holds a monster's guard, and it lets go
                         // on committing to an attack or on death. A stagger keeps it held
                         // (without a stance) so the guard rises again once free.
+                        // An encounter that is not active releases it as well.
                         && (!guard.held
                             || (monster.health > 0
                                 && monster.action.is_none()
-                                && matches!(monster.engagement, Engagement::Engaged { .. })))
+                                && matches!(monster.engagement, Engagement::Engaged { .. })
+                                && game.rooms.iter().any(|room| {
+                                    room.id == monster.room_id
+                                        && room.encounter_state == RoomEncounterState::Active
+                                })))
                 }
             };
             if !guard_valid {
@@ -11157,6 +11162,18 @@ mod tests {
             change(&mut tampered.monsters[index]);
             ArpgGame::from_save_state(tampered)
         };
+        // The defender's encounter running, as when the runtime holds its guard.
+        let mut active_save = save.clone();
+        for room in &mut active_save.rooms {
+            if room.id == 6 {
+                room.encounter_state = RoomEncounterState::Active;
+            }
+        }
+        let tamper_active = |change: &dyn Fn(&mut MonsterSaveState)| {
+            let mut tampered = active_save.clone();
+            change(&mut tampered.monsters[defender]);
+            ArpgGame::from_save_state(tampered)
+        };
         let raised = Some(GuardStance {
             phase: GuardPhase::Raised,
             ticks_remaining: 0,
@@ -11164,6 +11181,18 @@ mod tests {
         let engaged = Engagement::Engaged {
             target_player_id: 1,
         };
+        assert!(
+            tamper_active(&|monster| {
+                monster.engagement = engaged;
+                monster.guard = Some(GuardState {
+                    held: true,
+                    stance: raised,
+                    ..ready
+                });
+            })
+            .is_ok()
+        );
+        // Held in a dormant encounter, which the runtime never produces.
         assert!(
             tamper(defender, &|monster| {
                 monster.engagement = engaged;
@@ -11173,7 +11202,7 @@ mod tests {
                     ..ready
                 });
             })
-            .is_ok()
+            .is_err()
         );
         // Without a shield, or a shield monster without its guard.
         assert!(tamper(0, &|monster| monster.guard = Some(ready)).is_err());
@@ -11198,7 +11227,7 @@ mod tests {
         }
         // No stance while staggered.
         assert!(
-            tamper(defender, &|monster| {
+            tamper_active(&|monster| {
                 monster.engagement = engaged;
                 monster.stagger_ticks_remaining = 1;
                 monster.guard = Some(GuardState {
@@ -11211,7 +11240,7 @@ mod tests {
         );
         // A stagger keeps the guard held without a stance, as the runtime saves it.
         assert!(
-            tamper(defender, &|monster| {
+            tamper_active(&|monster| {
                 monster.engagement = engaged;
                 monster.stagger_ticks_remaining = 1;
                 monster.guard = Some(GuardState {
@@ -11223,7 +11252,7 @@ mod tests {
         );
         // Committing to an attack lets go of the guard: never held while acting.
         let acting = |held: bool| {
-            tamper(defender, &|monster| {
+            tamper_active(&|monster| {
                 monster.engagement = engaged;
                 monster.action = Some(MonsterActionSaveState {
                     phase: ActionPhase::Windup,
