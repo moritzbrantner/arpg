@@ -275,7 +275,10 @@ test("guard hold survives another finger's targeting swipe and releases in order
   const { context, page, cdp } = await phone(browser, appUrl);
   try {
     const guard = center(1, await page.getByRole("button", { name: "Hold shield" }).boundingBox());
-    const attack = center(2, await page.getByRole("button", { name: "Primary attack" }).boundingBox());
+    const attack = center(
+      2,
+      await page.getByRole("button", { name: "Primary attack" }).boundingBox(),
+    );
     const target = point(2, attack.x + 48, attack.y);
     await touch(cdp, "touchStart", guard);
     await touch(cdp, "touchStart", guard, attack);
