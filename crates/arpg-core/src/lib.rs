@@ -9,11 +9,15 @@ use physics_engine::{
 };
 use serde::{Deserialize, Serialize};
 
+use content::{BowData, ComboTransition, GuardData, MonsterDefinition, StrikeDefinition, content};
 pub use content::{
     CONTENT_FORMAT_VERSION, ContentBundle, ContentError, base_bundle, content_revision,
 };
-use content::{ComboTransition, MonsterDefinition, StrikeDefinition, content};
 use navigation::{Cell, FieldRoute, FieldWork, NAV_CELL_SIZE, Rect, RoomGrid, TargetField, isqrt};
+pub use workbench::{
+    MAX_WORKBENCH_MONSTERS, MAX_WORKBENCH_SPAWNS, TuningParameter, TuningValue, WorkbenchOperation,
+};
+use workbench::{Tuning, Workbench};
 
 mod content;
 mod navigation;
@@ -21,6 +25,7 @@ mod navigation;
 mod physics_work;
 #[cfg(test)]
 mod physics_workloads;
+mod workbench;
 
 pub type DoorId = u64;
 pub type GroundLootId = u64;
@@ -491,8 +496,20 @@ pub struct ReproductionCommand {
     pub command: ArpgCommand,
 }
 
-/// Portable reproduction input: scenario, seed, players and the exact accepted command
-/// sequence. `replay_reproduction` runs it headlessly on the normal runtime.
+/// One recorded workbench operation of a reproduction (#126): applied before the tick
+/// numbered `tick` runs, after the first `command_index` recorded commands and before the
+/// next one.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReproductionOperation {
+    pub tick: u64,
+    pub command_index: usize,
+    pub operation: WorkbenchOperation,
+}
+
+/// Portable reproduction input: scenario, seed, players, the exact accepted command
+/// sequence and the workbench operations interleaved with it. `replay_reproduction` runs
+/// it headlessly on the normal runtime.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Reproduction {
@@ -501,6 +518,9 @@ pub struct Reproduction {
     pub players: Vec<PlayerId>,
     pub ticks: u64,
     pub commands: Vec<ReproductionCommand>,
+    /// Omitted when empty, so reproductions without workbench operations keep their form.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub operations: Vec<ReproductionOperation>,
 }
 
 /// Maximum ticks a reproduction may request (ten minutes at 60 Hz).
@@ -509,6 +529,9 @@ pub const MAX_REPRODUCTION_TICKS: u64 = 36_000;
 /// Maximum commands a reproduction may carry: four per tick of the longest reproduction,
 /// enough for continuous movement and aim changes.
 pub const MAX_REPRODUCTION_COMMANDS: usize = 4 * 36_000;
+
+/// Maximum workbench operations a reproduction may carry.
+pub const MAX_REPRODUCTION_OPERATIONS: usize = 10_000;
 
 /// Replays `reproduction` headlessly and returns the snapshot after every tick.
 pub fn replay_reproduction(reproduction: &Reproduction) -> Result<Vec<ArpgSnapshot>, GameError> {
@@ -520,6 +543,11 @@ pub fn replay_reproduction(reproduction: &Reproduction) -> Result<Vec<ArpgSnapsh
     if reproduction.commands.len() > MAX_REPRODUCTION_COMMANDS {
         return Err(GameError::new(
             "reproduction has more commands than the supported bound",
+        ));
+    }
+    if reproduction.operations.len() > MAX_REPRODUCTION_OPERATIONS {
+        return Err(GameError::new(
+            "reproduction has more workbench operations than the supported bound",
         ));
     }
     if reproduction
@@ -536,14 +564,25 @@ pub fn replay_reproduction(reproduction: &Reproduction) -> Result<Vec<ArpgSnapsh
         game.add_player(player)?;
     }
     let mut commands = reproduction.commands.iter().peekable();
+    let mut operations = reproduction.operations.iter().peekable();
+    let mut applied_commands = 0;
     let mut snapshots = Vec::with_capacity(usize::try_from(reproduction.ticks).unwrap_or(0));
     for tick in 0..reproduction.ticks {
-        while let Some(recorded) = commands.next_if(|recorded| recorded.tick == tick) {
-            game.apply_command(PlayerCommand::new(
-                recorded.player_id,
-                recorded.sequence,
-                recorded.command,
-            )?)?;
+        loop {
+            if let Some(recorded) = operations.next_if(|recorded| {
+                recorded.tick == tick && recorded.command_index == applied_commands
+            }) {
+                game.apply_workbench(&recorded.operation)?;
+            } else if let Some(recorded) = commands.next_if(|recorded| recorded.tick == tick) {
+                game.apply_command(PlayerCommand::new(
+                    recorded.player_id,
+                    recorded.sequence,
+                    recorded.command,
+                )?)?;
+                applied_commands += 1;
+            } else {
+                break;
+            }
         }
         game.advance_tick()?;
         snapshots.push(game.snapshot()?);
@@ -551,6 +590,11 @@ pub fn replay_reproduction(reproduction: &Reproduction) -> Result<Vec<ArpgSnapsh
     if commands.next().is_some() {
         return Err(GameError::new(
             "reproduction has commands after its last tick",
+        ));
+    }
+    if operations.next().is_some() {
+        return Err(GameError::new(
+            "reproduction has workbench operations out of order or after its last tick",
         ));
     }
     Ok(snapshots)
@@ -582,6 +626,7 @@ impl ReproductionRecorder {
                 players: Vec::new(),
                 ticks: 0,
                 commands: Vec::new(),
+                operations: Vec::new(),
             },
             stopped: None,
         })
@@ -624,6 +669,22 @@ impl ReproductionRecorder {
         });
     }
 
+    /// An accepted workbench operation, applied before the next tick runs.
+    pub fn record_workbench(&mut self, operation: &WorkbenchOperation) {
+        if self.stopped.is_some() {
+            return;
+        }
+        if self.reproduction.operations.len() >= MAX_REPRODUCTION_OPERATIONS {
+            self.stop("the session applied more workbench operations than a reproduction can hold");
+            return;
+        }
+        self.reproduction.operations.push(ReproductionOperation {
+            tick: self.reproduction.ticks,
+            command_index: self.reproduction.commands.len(),
+            operation: operation.clone(),
+        });
+    }
+
     /// A successful `advance_tick`.
     pub fn record_tick(&mut self) {
         if self.stopped.is_some() {
@@ -649,6 +710,9 @@ impl ReproductionRecorder {
         let mut reproduction = self.reproduction.clone();
         let ticks = reproduction.ticks;
         reproduction.commands.retain(|command| command.tick < ticks);
+        reproduction
+            .operations
+            .retain(|operation| operation.tick < ticks);
         Ok(reproduction)
     }
 }
@@ -827,13 +891,13 @@ pub struct CounterOpportunity {
 }
 
 impl CounterOpportunity {
-    fn grant(blocked_monster_id: u32, blocked_at_tick: u64) -> Self {
+    fn grant(window_ticks: u64, blocked_monster_id: u32, blocked_at_tick: u64) -> Self {
         let usable_from_tick = blocked_at_tick + 1;
         Self {
             blocked_monster_id,
             blocked_at_tick,
             usable_from_tick,
-            expires_at_tick: usable_from_tick + content().counter_window_ticks,
+            expires_at_tick: usable_from_tick + window_ticks,
         }
     }
 
@@ -843,11 +907,11 @@ impl CounterOpportunity {
 }
 
 impl GuardState {
-    fn ready() -> Self {
+    fn ready(max_points: u16) -> Self {
         Self {
             held: false,
             stance: None,
-            points: content().guard.max_points,
+            points: max_points,
             broken_ticks_remaining: 0,
             block_reaction_ticks_remaining: 0,
         }
@@ -1663,6 +1727,11 @@ pub struct ArpgGame {
     scenario: ScenarioId,
     chests: Vec<ChestSnapshot>,
     interaction_events: Vec<InteractionEventSnapshot>,
+    /// Counter, guard and bow values this game runs: the content's, unless a workbench
+    /// session tuned them.
+    tuning: Tuning,
+    /// Present only in games created as workbench scenarios.
+    workbench: Option<Workbench>,
 }
 
 impl Default for ArpgGame {
@@ -1739,11 +1808,21 @@ impl ArpgGame {
             scenario: ScenarioId::Dungeon,
             chests,
             interaction_events: Vec::new(),
+            tuning: Tuning::from_content(),
+            workbench: None,
         })
     }
 
     /// The generated dungeon for `run_seed` arranged as `scenario`.
+    /// Only games created here accept workbench operations
+    /// ([`ArpgGame::apply_workbench`]).
     pub fn new_scenario(scenario: ScenarioId, run_seed: RunSeed) -> Result<Self, GameError> {
+        let mut game = Self::arranged_scenario(scenario, run_seed)?;
+        game.workbench = Some(Workbench::new(&game)?);
+        Ok(game)
+    }
+
+    fn arranged_scenario(scenario: ScenarioId, run_seed: RunSeed) -> Result<Self, GameError> {
         let mut game = Self::with_scenario_layout(scenario, run_seed)?;
         let Some(target_offset) = scenario.target_offset() else {
             return Ok(game);
@@ -1824,6 +1903,11 @@ impl ArpgGame {
     }
 
     pub fn save_state(&self) -> Result<ArpgSaveState, GameError> {
+        if self.workbench.as_ref().is_some_and(Workbench::edited) {
+            return Err(GameError::new(
+                "a session changed by workbench operations cannot be saved; export a reproduction instead",
+            ));
+        }
         let players = self
             .players
             .iter()
@@ -1999,6 +2083,7 @@ impl ArpgGame {
             if let Some(counter) = player.counter
                 && (counter
                     != CounterOpportunity::grant(
+                        content().counter_window_ticks,
                         counter.blocked_monster_id,
                         counter.blocked_at_tick,
                     )
@@ -2161,7 +2246,7 @@ impl ArpgGame {
                 StrikeSource::Player(owner_id) => Some((
                     content().bow.arrow_lifetime_ticks,
                     0,
-                    owner_id != 0 && Self::arrow_launch_is_possible(arrow),
+                    owner_id != 0 && Self::arrow_launch_is_possible(&content().bow, arrow),
                 )),
                 StrikeSource::Monster(monster_id) => game
                     .monsters
@@ -2447,9 +2532,9 @@ impl ArpgGame {
     /// Whether some accepted draw and direction produce this arrow's velocity and damage.
     /// Facing and aimed launches round each component toward zero, so a launched arrow's
     /// planar speed lies within two units below its draw speed and never above it.
-    fn arrow_launch_is_possible(arrow: &ArrowSnapshot) -> bool {
-        (content().bow.min_draw_ticks..=content().bow.full_draw_ticks).any(|charge| {
-            let (speed, damage) = Self::arrow_launch(charge);
+    fn arrow_launch_is_possible(bow: &BowData, arrow: &ArrowSnapshot) -> bool {
+        (bow.min_draw_ticks..=bow.full_draw_ticks).any(|charge| {
+            let (speed, damage) = Self::arrow_launch(bow, charge);
             let [vx, vy, vz] = arrow.velocity.map(i64::from);
             let speed = i64::from(speed);
             let length_sq = vx * vx + vz * vz;
@@ -2462,8 +2547,7 @@ impl ArpgGame {
 
     /// Speed and damage of an arrow launched with `charge` draw ticks: the minimum accepted
     /// draw gives the minimum arrow and a full draw the full arrow, linearly in between.
-    fn arrow_launch(charge: u8) -> (i32, u16) {
-        let bow = content().bow;
+    fn arrow_launch(bow: &BowData, charge: u8) -> (i32, u16) {
         let charge = charge.clamp(bow.min_draw_ticks, bow.full_draw_ticks);
         let progress = i32::from(charge - bow.min_draw_ticks);
         let span = i32::from(bow.full_draw_ticks - bow.min_draw_ticks);
@@ -2657,15 +2741,15 @@ impl ArpgGame {
         })
     }
 
-    fn advance_draw(state: &mut PlayerState) {
+    fn advance_draw(bow: &BowData, state: &mut PlayerState) {
         if state.health == 0 || state.hurt_ticks_remaining > 0 || state.action.is_some() {
             state.draw_ticks = None;
         } else if let Some(drawn) = state.draw_ticks.as_mut() {
-            *drawn = (*drawn + 1).min(content().bow.full_draw_ticks);
+            *drawn = (*drawn + 1).min(bow.full_draw_ticks);
         }
     }
 
-    fn advance_guard(state: &mut PlayerState) {
+    fn advance_guard(tuning: &GuardData, state: &mut PlayerState) {
         state.guard.block_reaction_ticks_remaining =
             state.guard.block_reaction_ticks_remaining.saturating_sub(1);
         if state.health == 0 {
@@ -2690,7 +2774,7 @@ impl ArpgGame {
             Some(match guard.stance {
                 None => GuardStance {
                     phase: GuardPhase::Raising,
-                    ticks_remaining: content().guard.raise_ticks,
+                    ticks_remaining: tuning.raise_ticks,
                 },
                 Some(GuardStance {
                     phase: GuardPhase::Raising,
@@ -2710,8 +2794,8 @@ impl ArpgGame {
         if guard.stance.is_none() {
             guard.points = guard
                 .points
-                .saturating_add(content().guard.regen_per_tick)
-                .min(content().guard.max_points);
+                .saturating_add(tuning.regen_per_tick)
+                .min(tuning.max_points);
         }
     }
 
@@ -3439,7 +3523,7 @@ impl ArpgGame {
             .and_then(|state| state.action)
             .map(|action| action.charge)
             .ok_or_else(|| GameError::new("shot has no committed action"))?;
-        let (speed, damage) = Self::arrow_launch(charge);
+        let (speed, damage) = Self::arrow_launch(&self.tuning.bow, charge);
         let (velocity_x, velocity_z) = match aim {
             Some(aim) => Self::aimed_velocity(aim, speed),
             None => {
@@ -3452,7 +3536,7 @@ impl ArpgGame {
                 (fx * axis_speed, fz * axis_speed)
             }
         };
-        if self.arrows.len() >= usize::from(content().bow.max_live_arrows) {
+        if self.arrows.len() >= usize::from(self.tuning.bow.max_live_arrows) {
             self.arrows.remove(0);
         }
         let id = self.next_arrow_id;
@@ -3466,7 +3550,7 @@ impl ArpgGame {
             position: vec_to_array(position),
             velocity: [velocity_x, 0, velocity_z],
             damage,
-            ticks_remaining: content().bow.arrow_lifetime_ticks,
+            ticks_remaining: self.tuning.bow.arrow_lifetime_ticks,
         });
         Ok(())
     }
@@ -3573,7 +3657,7 @@ impl ArpgGame {
         let previous_health = monster.health;
         monster.health = monster.health.saturating_sub(arrow.damage);
         if monster.health > 0 {
-            monster.stagger_ticks_remaining = content().bow.arrow_stagger_ticks;
+            monster.stagger_ticks_remaining = self.tuning.bow.arrow_stagger_ticks;
             monster.action = None;
             if shooter_present {
                 monster.provoke(owner_id);
@@ -3638,7 +3722,7 @@ impl ArpgGame {
         ) else {
             return Ok(());
         };
-        if self.arrows.len() >= usize::from(content().bow.max_live_arrows) {
+        if self.arrows.len() >= usize::from(self.tuning.bow.max_live_arrows) {
             self.arrows.remove(0);
         }
         let id = self.next_arrow_id;
@@ -3709,6 +3793,7 @@ impl ArpgGame {
 
     /// Resolves the shield before damage: a valid block or guard break never touches health.
     fn guard_outcome(
+        tuning: &GuardData,
         state: &mut PlayerState,
         definition: StrikeDefinition,
         defender: Vec3i,
@@ -3734,11 +3819,11 @@ impl ArpgGame {
             guard.points = 0;
             guard.stance = None;
             guard.block_reaction_ticks_remaining = 0;
-            guard.broken_ticks_remaining = content().guard.break_ticks;
+            guard.broken_ticks_remaining = tuning.break_ticks;
             return Some(StrikeResult::GuardBroken);
         }
         guard.points -= definition.guard_cost;
-        guard.block_reaction_ticks_remaining = content().guard.block_reaction_ticks;
+        guard.block_reaction_ticks_remaining = tuning.block_reaction_ticks;
         Some(StrikeResult::Blocked {
             guard_damage: definition.guard_cost,
         })
@@ -3822,29 +3907,35 @@ impl ArpgGame {
             return Err(GameError::new("monster hit from a player source"));
         };
         let tick = self.tick;
+        let tuning = self.tuning;
         let player = self
             .players
             .get_mut(&player_id)
             .ok_or_else(|| GameError::new("monster attack references an unknown player"))?;
-        let result =
-            if let Some(result) = Self::guard_outcome(player, definition, defender, attacker) {
-                result
-            } else {
-                let previous_health = player.health;
-                player.health = player.health.saturating_sub(damage);
-                player.hurt_ticks_remaining = PLAYER_HURT_TICKS;
-                player.action = None;
-                player.guard.stance = None;
-                // A hit lowers a drawn bow immediately, before any release can arrive.
-                player.draw_ticks = None;
-                StrikeResult::Hit {
-                    damage: previous_health - player.health,
-                    defeated: player.health == 0,
-                }
-            };
+        let result = if let Some(result) =
+            Self::guard_outcome(&tuning.guard, player, definition, defender, attacker)
+        {
+            result
+        } else {
+            let previous_health = player.health;
+            player.health = player.health.saturating_sub(damage);
+            player.hurt_ticks_remaining = PLAYER_HURT_TICKS;
+            player.action = None;
+            player.guard.stance = None;
+            // A hit lowers a drawn bow immediately, before any release can arrive.
+            player.draw_ticks = None;
+            StrikeResult::Hit {
+                damage: previous_health - player.health,
+                defeated: player.health == 0,
+            }
+        };
         match result {
             StrikeResult::Blocked { .. } => {
-                player.counter = Some(CounterOpportunity::grant(monster_id, tick));
+                player.counter = Some(CounterOpportunity::grant(
+                    tuning.counter_window_ticks,
+                    monster_id,
+                    tick,
+                ));
             }
             StrikeResult::Hit { .. } | StrikeResult::GuardBroken => player.counter = None,
             StrikeResult::Obstructed => {}
@@ -4476,7 +4567,7 @@ impl AuthoritativeGame for ArpgGame {
                 facing_z: 0,
                 action: None,
                 hurt_ticks_remaining: 0,
-                guard: GuardState::ready(),
+                guard: GuardState::ready(self.tuning.guard.max_points),
                 counter: None,
                 weapon: Weapon::SwordAndShield,
                 draw_ticks: None,
@@ -4628,7 +4719,7 @@ impl AuthoritativeGame for ArpgGame {
                 // Re-check life and freedom: damage this tick may have landed after the draw
                 // advanced.
                 if let Some(drawn) = state.draw_ticks.take()
-                    && drawn >= content().bow.min_draw_ticks
+                    && drawn >= self.tuning.bow.min_draw_ticks
                     && state.health > 0
                     && state.hurt_ticks_remaining == 0
                     && state.action.is_none()
@@ -4653,10 +4744,11 @@ impl AuthoritativeGame for ArpgGame {
     fn advance_tick(&mut self) -> Result<(), GameError> {
         self.strike_outcomes.clear();
         self.interaction_events.clear();
+        let tuning = self.tuning;
         for player in self.players.values_mut() {
             player.hurt_ticks_remaining = player.hurt_ticks_remaining.saturating_sub(1);
-            Self::advance_guard(player);
-            Self::advance_draw(player);
+            Self::advance_guard(&tuning.guard, player);
+            Self::advance_draw(&tuning.bow, player);
         }
         for monster in &mut self.monsters {
             monster.stagger_ticks_remaining = monster.stagger_ticks_remaining.saturating_sub(1);
@@ -4748,7 +4840,7 @@ impl AuthoritativeGame for ArpgGame {
                     reaction: Self::player_reaction(state),
                     guard: state.guard.stance,
                     guard_points: state.guard.points,
-                    max_guard_points: content().guard.max_points,
+                    max_guard_points: self.tuning.guard.max_points,
                     counter: state.counter,
                     weapon: state.weapon,
                     draw_ticks: state.draw_ticks,
@@ -5414,7 +5506,7 @@ mod tests {
             facing_z: z,
             action: None,
             hurt_ticks_remaining: 0,
-            guard: GuardState::ready(),
+            guard: GuardState::ready(content().guard.max_points),
             counter: None,
             weapon: Weapon::SwordAndShield,
             draw_ticks: None,
@@ -7056,7 +7148,8 @@ mod tests {
     fn a_pending_counter_survives_save_and_restore_without_extra_time() {
         let mut game = ArpgGame::new_with_seed(42).unwrap();
         game.add_player(1).unwrap();
-        game.players.get_mut(&1).unwrap().counter = Some(CounterOpportunity::grant(1, 0));
+        game.players.get_mut(&1).unwrap().counter =
+            Some(CounterOpportunity::grant(COUNTER_WINDOW_TICKS, 1, 0));
         game.tick = 5;
         let save = game.save_state().unwrap();
         let mut restored = ArpgGame::from_save_state(save.clone()).unwrap();
@@ -7071,13 +7164,13 @@ mod tests {
         for corrupt in [
             CounterOpportunity {
                 expires_at_tick: 100,
-                ..CounterOpportunity::grant(1, 0)
+                ..CounterOpportunity::grant(COUNTER_WINDOW_TICKS, 1, 0)
             },
-            CounterOpportunity::grant(1, 5),
+            CounterOpportunity::grant(COUNTER_WINDOW_TICKS, 1, 5),
             CounterOpportunity {
                 usable_from_tick: 0,
                 expires_at_tick: 5,
-                ..CounterOpportunity::grant(1, 0)
+                ..CounterOpportunity::grant(COUNTER_WINDOW_TICKS, 1, 0)
             },
         ] {
             let mut tampered = save.clone();
@@ -7676,15 +7769,15 @@ mod tests {
     #[test]
     fn the_minimum_and_full_draws_span_the_declared_arrow_range() {
         assert_eq!(
-            ArpgGame::arrow_launch(BOW_MIN_DRAW_TICKS),
+            ArpgGame::arrow_launch(&content().bow, BOW_MIN_DRAW_TICKS),
             (ARROW_MIN_SPEED, ARROW_MIN_DAMAGE)
         );
         assert_eq!(
-            ArpgGame::arrow_launch(BOW_FULL_DRAW_TICKS),
+            ArpgGame::arrow_launch(&content().bow, BOW_FULL_DRAW_TICKS),
             (ARROW_FULL_SPEED, ARROW_FULL_DAMAGE)
         );
         // Halfway through the accepted draw (8 + 11 = 19 of 30 ticks).
-        assert_eq!(ArpgGame::arrow_launch(19), (45, 25));
+        assert_eq!(ArpgGame::arrow_launch(&content().bow, 19), (45, 25));
     }
 
     #[test]
@@ -8021,11 +8114,14 @@ mod tests {
         game.advance_tick().unwrap();
         assert_eq!(game.arrows[0].velocity, launched.velocity);
         assert_eq!(game.arrows[0].position[0], launched.position[0] + 53);
-        assert!(ArpgGame::arrow_launch_is_possible(&game.arrows[0]));
+        assert!(ArpgGame::arrow_launch_is_possible(
+            &content().bow,
+            &game.arrows[0]
+        ));
         // No aim or facing launches faster than the draw speed.
         let mut fast = game.arrows[0];
         fast.velocity = [ARROW_FULL_SPEED + 1, 0, 0];
-        assert!(!ArpgGame::arrow_launch_is_possible(&fast));
+        assert!(!ArpgGame::arrow_launch_is_possible(&content().bow, &fast));
         // Every exact aim stays within the draw speed after rounding.
         for x in (-1_000..=1_000).step_by(37) {
             for z in (-1_000..=1_000).step_by(41) {
@@ -8327,6 +8423,7 @@ mod tests {
                 ),
                 at(43, 7, ArpgCommand::SetMovement { x: -1, z: 0 }),
             ],
+            operations: Vec::new(),
         };
         let decoded: Reproduction =
             serde_json::from_str(&serde_json::to_string(&reproduction).unwrap()).unwrap();
@@ -8366,6 +8463,7 @@ mod tests {
                     command,
                 })
                 .collect(),
+            operations: Vec::new(),
         };
         replay_reproduction(&reproduction)
             .unwrap()
@@ -8636,6 +8734,7 @@ mod tests {
                     command: ArpgCommand::PrimaryAttack,
                 },
             ],
+            operations: Vec::new(),
         };
         let encoded = serde_json::to_string(&reproduction).unwrap();
         let decoded: Reproduction = serde_json::from_str(&encoded).unwrap();
@@ -8775,6 +8874,7 @@ mod tests {
             players: vec![1],
             ticks: 1,
             commands: Vec::new(),
+            operations: Vec::new(),
         };
         flood.commands = vec![
             ReproductionCommand {
@@ -11577,6 +11677,7 @@ mod tests {
                     command,
                 })
                 .collect(),
+            operations: Vec::new(),
         };
         let ranged = reproduction(
             ScenarioId::Ranged,

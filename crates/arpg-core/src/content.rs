@@ -404,9 +404,6 @@ impl ContentBundle {
         if self.format_version != CONTENT_FORMAT_VERSION {
             fail("formatVersion".into(), "unsupported content format version");
         }
-        if self.counter_window_ticks == 0 || self.counter_window_ticks > 600 {
-            fail("counterWindowTicks".into(), "must be within 1..=600");
-        }
 
         // Definition ids are published to clients (for example as strike event definitions),
         // so they must stay within what the browser projection admits.
@@ -689,53 +686,8 @@ impl ContentBundle {
         }
 
         let guard = self.guard;
-        if !(1..=60).contains(&guard.raise_ticks) {
-            fail("guard.raiseTicks".into(), "must be within 1..=60");
-        }
-        if !(1..=1_000).contains(&guard.max_points) {
-            fail("guard.maxPoints".into(), "must be within 1..=1000");
-        }
-        if guard.regen_per_tick > guard.max_points {
-            fail("guard.regenPerTick".into(), "must not exceed maxPoints");
-        }
-        if guard.block_reaction_ticks == 0 || guard.break_ticks == 0 {
-            fail(
-                "guard".into(),
-                "blockReactionTicks and breakTicks must be positive",
-            );
-        }
-
         let bow = self.bow;
-        if bow.min_draw_ticks == 0 || bow.min_draw_ticks >= bow.full_draw_ticks {
-            fail(
-                "bow.minDrawTicks".into(),
-                "must be positive and below fullDrawTicks",
-            );
-        }
-        if bow.full_draw_ticks > 120 {
-            fail("bow.fullDrawTicks".into(), "must be at most 120");
-        }
-        if bow.arrow_min_speed == 0
-            || bow.arrow_min_speed > bow.arrow_full_speed
-            || bow.arrow_full_speed > 200
-        {
-            fail(
-                "bow.arrowMinSpeed".into(),
-                "speeds must satisfy 1 <= arrowMinSpeed <= arrowFullSpeed <= 200",
-            );
-        }
-        if bow.arrow_min_damage > bow.arrow_full_damage {
-            fail(
-                "bow.arrowMinDamage".into(),
-                "must not exceed arrowFullDamage",
-            );
-        }
-        if bow.arrow_lifetime_ticks == 0 {
-            fail("bow.arrowLifetimeTicks".into(), "must be positive");
-        }
-        if !(1..=64).contains(&bow.max_live_arrows) {
-            fail("bow.maxLiveArrows".into(), "must be within 1..=64");
-        }
+        validate_tuning(self.counter_window_ticks, guard, bow, &mut fail);
 
         let progression = self.progression;
         if progression.experience_per_level == 0 {
@@ -778,6 +730,65 @@ impl ContentBundle {
         } else {
             Err(errors)
         }
+    }
+}
+
+/// Bounds of the tunable counter, guard and bow values: shared by bundle validation and
+/// the workbench's exact tuning inputs, so a tuned session never leaves what content allows.
+pub(crate) fn validate_tuning(
+    counter_window_ticks: u64,
+    guard: GuardData,
+    bow: BowData,
+    fail: &mut impl FnMut(String, &str),
+) {
+    if counter_window_ticks == 0 || counter_window_ticks > 600 {
+        fail("counterWindowTicks".into(), "must be within 1..=600");
+    }
+    if !(1..=60).contains(&guard.raise_ticks) {
+        fail("guard.raiseTicks".into(), "must be within 1..=60");
+    }
+    if !(1..=1_000).contains(&guard.max_points) {
+        fail("guard.maxPoints".into(), "must be within 1..=1000");
+    }
+    if guard.regen_per_tick > guard.max_points {
+        fail("guard.regenPerTick".into(), "must not exceed maxPoints");
+    }
+    if guard.block_reaction_ticks == 0 || guard.break_ticks == 0 {
+        fail(
+            "guard".into(),
+            "blockReactionTicks and breakTicks must be positive",
+        );
+    }
+
+    if bow.min_draw_ticks == 0 || bow.min_draw_ticks >= bow.full_draw_ticks {
+        fail(
+            "bow.minDrawTicks".into(),
+            "must be positive and below fullDrawTicks",
+        );
+    }
+    if bow.full_draw_ticks > 120 {
+        fail("bow.fullDrawTicks".into(), "must be at most 120");
+    }
+    if bow.arrow_min_speed == 0
+        || bow.arrow_min_speed > bow.arrow_full_speed
+        || bow.arrow_full_speed > 200
+    {
+        fail(
+            "bow.arrowMinSpeed".into(),
+            "speeds must satisfy 1 <= arrowMinSpeed <= arrowFullSpeed <= 200",
+        );
+    }
+    if bow.arrow_min_damage > bow.arrow_full_damage {
+        fail(
+            "bow.arrowMinDamage".into(),
+            "must not exceed arrowFullDamage",
+        );
+    }
+    if bow.arrow_lifetime_ticks == 0 {
+        fail("bow.arrowLifetimeTicks".into(), "must be positive");
+    }
+    if !(1..=64).contains(&bow.max_live_arrows) {
+        fail("bow.maxLiveArrows".into(), "must be within 1..=64");
     }
 }
 
