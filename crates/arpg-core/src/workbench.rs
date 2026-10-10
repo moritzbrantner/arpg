@@ -514,6 +514,20 @@ impl ArpgGame {
             .saturating_sub(usize::from(bow.max_live_arrows));
         // Like launching beyond the cap, lowering it retires the oldest projectiles.
         self.arrows.drain(..excess);
+        // A player's arrow has flown `tick - launched_at_tick` of its lifetime; under a
+        // shorter lifetime it keeps only what is left, and one already past it retires.
+        let tick = self.tick;
+        self.arrows.retain_mut(|arrow| {
+            if !matches!(arrow.source, crate::StrikeSource::Player(_)) {
+                return true;
+            }
+            let flown = tick.saturating_sub(arrow.launched_at_tick);
+            let left = u64::from(bow.arrow_lifetime_ticks).saturating_sub(flown);
+            arrow.ticks_remaining = arrow
+                .ticks_remaining
+                .min(u8::try_from(left).unwrap_or(u8::MAX));
+            arrow.ticks_remaining > 0
+        });
         for player in self.players.values_mut() {
             if let Some(counter) = player.counter.as_mut() {
                 counter.expires_at_tick = counter
@@ -858,6 +872,18 @@ mod tests {
             damage: 1,
             ticks_remaining: 10,
         };
+        game.arrows = (1..=3)
+            .map(|id| crate::ArrowSnapshot { id, ..arrow })
+            .collect();
+        // Shortening the lifetime keeps only what is left of each arrow's flight.
+        game.tick = 4;
+        game.apply_workbench(&tune(TuningParameter::BowArrowLifetimeTicks, 6))
+            .unwrap();
+        assert!(game.arrows.iter().all(|arrow| arrow.ticks_remaining == 2));
+        game.apply_workbench(&tune(TuningParameter::BowArrowLifetimeTicks, 4))
+            .unwrap();
+        assert!(game.arrows.is_empty());
+        game.tick = 0;
         game.arrows = (1..=3)
             .map(|id| crate::ArrowSnapshot { id, ..arrow })
             .collect();
