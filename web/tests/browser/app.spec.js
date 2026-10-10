@@ -269,7 +269,9 @@ test("all combat controls stay reachable on the narrowest phones", async ({ brow
     try {
       await page.goto(`${appUrl}?scenario=training&seed=42`);
       const controls = page.getByRole("region", { name: "Combat actions" }).getByRole("button");
-      await expect(controls).toHaveCount(5);
+      // Heavy is encoded by an upward Attack swipe on touch layouts.
+      await expect(controls).toHaveCount(4);
+      await expect(page.getByRole("button", { name: "Heavy attack" })).toBeHidden();
       const stick = await page.getByRole("group", { name: "Movement joystick" }).boundingBox();
       const boxes = [];
       for (const control of await controls.all()) boxes.push(await control.boundingBox());
@@ -290,4 +292,10 @@ test("all combat controls stay reachable on the narrowest phones", async ({ brow
       await context.close();
     }
   }
+});
+
+test("narrow fine-pointer layouts retain a visible Heavy button", async ({ page, appUrl }) => {
+  await page.setViewportSize({ width: 320, height: 640 });
+  await page.goto(`${appUrl}?scenario=training&seed=42`);
+  await expect(page.getByRole("button", { name: "Heavy attack" })).toBeVisible();
 });

@@ -1043,7 +1043,6 @@ select {
   .hud p {
     font-size: 0.78rem;
   }
-  /* Five controls wrap into rows beside the movement stick instead of overflowing. */
   .combat-actions {
     flex-wrap: wrap-reverse;
     justify-content: flex-end;
@@ -1065,6 +1064,13 @@ select {
     letter-spacing: 0;
   }
   .combat-action span {
+    display: none;
+  }
+}
+
+/* Narrow mouse-only viewports retain a clickable Heavy button. */
+@media (hover: none) and (pointer: coarse) {
+  .combat-action-secondary {
     display: none;
   }
 }

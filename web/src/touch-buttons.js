@@ -1,4 +1,17 @@
 import { useEffect, useRef } from "react";
+import { classifyActionButtonStroke, updateActionButtonStroke } from "./touch-action-gesture.js";
+
+function isTouchClick(event, lastTouchTime) {
+  const native = event.nativeEvent;
+  return (
+    native.pointerType === "touch" ||
+    native.sourceCapabilities?.firesTouchEvents ||
+    (!native.pointerType &&
+      event.detail > 0 &&
+      event.timeStamp >= lastTouchTime &&
+      event.timeStamp - lastTouchTime < 1000)
+  );
+}
 
 // Mobile browsers need not synthesize a click for a non-primary finger.
 // Dispatch touch presses on pointerdown, but preserve clicks for mouse and keyboard.
@@ -17,16 +30,7 @@ export function usePressButton(onPress) {
     },
     onClick: (event) => {
       // A primary touch may also produce a click. Never dispatch that action twice.
-      const native = event.nativeEvent;
-      if (
-        native.pointerType === "touch" ||
-        native.sourceCapabilities?.firesTouchEvents ||
-        (!native.pointerType &&
-          event.detail > 0 &&
-          event.timeStamp >= lastTouch.current &&
-          event.timeStamp - lastTouch.current < 1000)
-      )
-        return;
+      if (isTouchClick(event, lastTouch.current)) return;
       onPress();
     },
   };
@@ -79,6 +83,87 @@ export function useHeldButton(onHeldChange, enabled) {
       if (!keyboardHeld.current) return;
       keyboardHeld.current = false;
       publish(true);
+    },
+    onContextMenu: (event) => event.preventDefault(),
+  };
+}
+
+// One pointer owns a sword attack gesture. Nothing is dispatched until release,
+// so an upward swipe cannot also trigger the primary attack on pointerdown.
+export function useGestureButton(onGesture, enabled, gestureEpochRef) {
+  const active = useRef(null);
+  const lastTouch = useRef(-Infinity);
+
+  useEffect(() => {
+    if (!enabled) active.current = null;
+  }, [enabled]);
+
+  useEffect(() => {
+    const cancel = () => {
+      active.current = null;
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") cancel();
+    };
+    window.addEventListener("blur", cancel);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      cancel();
+      window.removeEventListener("blur", cancel);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, []);
+
+  const update = (event) => {
+    const stroke = active.current;
+    if (!stroke || stroke.pointerId !== event.pointerId) return;
+    // Some mobile browsers coalesce an entire out-and-back movement into one
+    // delivered pointermove. Preserve its furthest excursion.
+    updateActionButtonStroke(stroke, [...(event.nativeEvent?.getCoalescedEvents?.() ?? []), event]);
+  };
+
+  const cancel = (event) => {
+    if (active.current?.pointerId !== event.pointerId) return;
+    active.current = null;
+    lastTouch.current = event.timeStamp;
+  };
+
+  return {
+    onPointerDown: (event) => {
+      if (event.pointerType !== "touch" || !enabled || active.current !== null) return;
+      event.preventDefault();
+      lastTouch.current = event.timeStamp;
+      active.current = {
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        endX: event.clientX,
+        endY: event.clientY,
+        maxTravel: 0,
+        gestureEpoch: gestureEpochRef.current,
+      };
+      event.currentTarget.setPointerCapture?.(event.pointerId);
+    },
+    onPointerMove: update,
+    onPointerUp: (event) => {
+      if (active.current?.pointerId !== event.pointerId) return;
+      update(event);
+      const stroke = active.current;
+      active.current = null;
+      lastTouch.current = event.timeStamp;
+      // A switch/session transition invalidates the stroke before snapshots
+      // arrive, including when training is paused or networked.
+      if (stroke.gestureEpoch !== gestureEpochRef.current) return;
+      const gesture = classifyActionButtonStroke(stroke);
+      if (gesture) onGesture(gesture);
+    },
+    onPointerCancel: cancel,
+    onLostPointerCapture: cancel,
+    // Mouse and keyboard retain ordinary click semantics. Touch synthesised
+    // clicks are ignored even if the gesture was cancelled or was diagonal.
+    onClick: (event) => {
+      if (!enabled || isTouchClick(event, lastTouch.current)) return;
+      onGesture("tap");
     },
     onContextMenu: (event) => event.preventDefault(),
   };

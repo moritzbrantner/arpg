@@ -530,6 +530,9 @@ function App() {
   const touchStickRef = useRef(null);
   const touchKnobRef = useRef(null);
   const touchPointerIdRef = useRef(null);
+  // Synchronous epoch invalidation protects gestures across a pending
+  // weapon switch/session change, even before a new game snapshot arrives.
+  const touchGestureEpochRef = useRef(0);
   const saveFileInputRef = useRef(null);
   const [initialRequest] = useState(() => {
     const training = readTrainingRequest(location.search);
@@ -604,12 +607,20 @@ function App() {
     }
   }, []);
 
-  const releaseInput = useCallback(() => {
+  // Weapon changes and world/focus transitions invalidate action strokes.
+  // Ordinary joystick release only resets its own visual and movement.
+  const invalidateTouchGestures = useCallback(() => {
+    touchGestureEpochRef.current += 1;
     resetTouchVisual();
+  }, [resetTouchVisual]);
+
+  const releaseInput = useCallback(() => {
+    invalidateTouchGestures();
     runtime.releaseInput();
-  }, [resetTouchVisual, runtime]);
+  }, [invalidateTouchGestures, runtime]);
 
   const resetTouchStick = () => {
+    // Ending movement must never invalidate a different finger's attack.
     resetTouchVisual();
     runtime.setTouchMovement(0, 0);
   };
@@ -642,11 +653,6 @@ function App() {
     resetTouchStick();
   };
 
-  const triggerCombatAction = (type) => {
-    if (!playerId || !currentPlayer()?.alive) return;
-    runtime.dispatch({ type });
-  };
-
   // Reads the focused player from the runtime, so long-lived input handlers never hold a
   // stale player id.
   const focusedPlayer = useCallback(() => {
@@ -654,9 +660,28 @@ function App() {
     return snapshotStore.getSnapshot()?.players.find((player) => player.id === id) ?? null;
   }, [runtime, snapshotStore]);
 
+  // Keyboard and touch gestures submit the same input-bindings action vocabulary.
+  // Only arpg-core adjudicates whether a submitted command is possible or succeeds.
+  const triggerCombatAction = useCallback(
+    (action) => {
+      if (!focusedPlayer()?.alive) return;
+      if (action === "game.cycleTarget") return runtime.cycleTarget();
+      if (action === "game.clearTarget") return runtime.clearTarget();
+      const type = {
+        "game.primaryAttack": "primaryAttack",
+        "game.secondaryAttack": "secondaryAttack",
+        "game.interact": "interact",
+      }[action];
+      if (type) runtime.dispatch({ type });
+    },
+    [focusedPlayer, runtime],
+  );
+
   const switchWeapon = useCallback(() => {
     const player = focusedPlayer();
     if (!player?.alive) return;
+    // A touch already in progress belongs to the previous weapon.
+    touchGestureEpochRef.current += 1;
     // Switching never fires: any held draw is cancelled first.
     runtime.cancelBowDraw();
     runtime.dispatch({
@@ -670,7 +695,7 @@ function App() {
   };
 
   const startTraining = (seed, fixture = trainingFixture) => {
-    resetTouchVisual();
+    invalidateTouchGestures();
     runtime.startLocal({ seed, training: true, scenario: fixture });
     initialRunSeedRef.current = null;
     setTrainingSeedDraft(String(seed));
@@ -711,7 +736,7 @@ function App() {
     if (!ready) return;
     const selectedId = persistSelectedCharacterId(undefined, selectedCharacterId);
     const selected = resolveCharacter(selectedId);
-    resetTouchVisual();
+    invalidateTouchGestures();
     runtime.startLocal({ seed: initialRunSeedRef.current ?? freshRunSeed() });
     initialRunSeedRef.current = null;
     leaveTrainingUrl();
@@ -721,7 +746,7 @@ function App() {
 
   const returnToCharacters = () => {
     runtime.stop();
-    resetTouchVisual();
+    invalidateTouchGestures();
     setSettingsOpen(false);
     setInWorld(false);
     leaveTrainingUrl();
@@ -729,27 +754,27 @@ function App() {
   };
 
   const startLocal = () => {
-    resetTouchVisual();
+    invalidateTouchGestures();
     runtime.startLocal();
     leaveTrainingUrl();
     setStatus(`Local game · ${selectedCharacter.name}`);
   };
 
   const startDedicated = async () => {
-    resetTouchVisual();
+    invalidateTouchGestures();
     const connecting = runtime.startDedicated(dedicatedUrl.trim());
     if (runtime.getState().mode === "dedicated") leaveTrainingUrl();
     await connecting;
   };
 
   const hostPeerGame = async () => {
-    resetTouchVisual();
+    invalidateTouchGestures();
     leaveTrainingUrl();
     await runtime.hostPeer(setupUrl);
   };
 
   const joinPeerGame = async () => {
-    resetTouchVisual();
+    invalidateTouchGestures();
     leaveTrainingUrl();
     await runtime.joinPeer(setupUrl, joinCode);
   };
@@ -884,19 +909,16 @@ function App() {
           if (dispatch.phase === "press") switchWeapon();
           return;
         }
-        if (dispatch.action === "game.cycleTarget" || dispatch.action === "game.clearTarget") {
-          if (dispatch.phase !== "press") return;
-          if (dispatch.action === "game.cycleTarget") runtime.cycleTarget();
-          else runtime.clearTarget();
-          return;
-        }
-        const combatCommand = {
-          "game.primaryAttack": "primaryAttack",
-          "game.secondaryAttack": "secondaryAttack",
-          "game.interact": "interact",
-        }[dispatch.action];
-        if (combatCommand && dispatch.phase === "press") {
-          runtime.dispatch({ type: combatCommand });
+        if (
+          [
+            "game.primaryAttack",
+            "game.secondaryAttack",
+            "game.interact",
+            "game.cycleTarget",
+            "game.clearTarget",
+          ].includes(dispatch.action)
+        ) {
+          if (dispatch.phase === "press") triggerCombatAction(dispatch.action);
           return;
         }
         if (dispatch.action === "game.guard") {
@@ -919,7 +941,16 @@ function App() {
       stopPropagation: true,
     });
     return detach;
-  }, [ready, inWorld, profile, settingsOpen, runtime, focusedPlayer, switchWeapon]);
+  }, [
+    ready,
+    inWorld,
+    profile,
+    settingsOpen,
+    runtime,
+    focusedPlayer,
+    switchWeapon,
+    triggerCombatAction,
+  ]);
 
   const updateProfile = (next) => {
     if (!persistStoredValue(PROFILE_KEY, JSON.stringify(next)))
@@ -997,7 +1028,7 @@ function App() {
     }
 
     const loadedGame = loadGameFromSaveStateJson(JSON.stringify(document.coreState));
-    resetTouchVisual();
+    invalidateTouchGestures();
     runtime.restore({
       game: loadedGame,
       controlledPlayerId,
@@ -1375,6 +1406,7 @@ function App() {
           store={snapshotStore}
           playerId={playerId}
           triggerCombatAction={triggerCombatAction}
+          gestureEpochRef={touchGestureEpochRef}
           setTouchGuard={(held) => runtime.setGuard("touch", held)}
           setTouchDraw={(held, interrupted = false) =>
             runtime.setBowDraw("touch", held, { interrupted })
