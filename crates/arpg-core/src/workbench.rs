@@ -413,6 +413,7 @@ impl ArpgGame {
             })?;
         self.monsters.remove(index);
         self.world.remove_body(Self::monster_body_id(monster_id));
+        self.retire_projectiles_of(&[monster_id]);
         self.arrangement_changed(room_id)
     }
 
@@ -448,6 +449,13 @@ impl ArpgGame {
         {
             self.world.remove_body(Self::monster_body_id(monster.id));
         }
+        let removed = self
+            .monsters
+            .iter()
+            .filter(|monster| monster.room_id == room_id)
+            .map(|monster| monster.id)
+            .collect::<Vec<_>>();
+        self.retire_projectiles_of(&removed);
         self.monsters.retain(|monster| monster.room_id != room_id);
         let arrangement = &self
             .workbench
@@ -457,6 +465,13 @@ impl ArpgGame {
         self.monsters.extend(arrangement.iter().copied());
         self.monsters.sort_by_key(|monster| monster.id);
         self.arrangement_changed(room_id)
+    }
+
+    /// A removed monster's shots in flight leave with it: they resolve through their source.
+    fn retire_projectiles_of(&mut self, monster_ids: &[u32]) {
+        self.arrows.retain(|arrow| {
+            !matches!(arrow.source, crate::StrikeSource::Monster(id) if monster_ids.contains(&id))
+        });
     }
 
     /// A cleared room holds no living monster: one that has them again waits dormant
@@ -732,6 +747,37 @@ mod tests {
                 .body(ArpgGame::monster_body_id(spawned))
                 .is_some()
         );
+    }
+
+    #[test]
+    fn removing_or_resetting_a_shooter_retires_its_shots_in_flight() {
+        for reset in [false, true] {
+            let mut game = ArpgGame::new_scenario(ScenarioId::Ranged, 42).unwrap();
+            game.add_player(1).unwrap();
+            let shot = (0..240)
+                .find_map(|_| {
+                    game.advance_tick().unwrap();
+                    game.arrows.iter().find_map(|arrow| match arrow.source {
+                        crate::StrikeSource::Monster(id) => Some(id),
+                        crate::StrikeSource::Player(_) => None,
+                    })
+                })
+                .expect("the archer shoots");
+            let operation = if reset {
+                WorkbenchOperation::ResetArrangement
+            } else {
+                WorkbenchOperation::RemoveMonster { monster_id: shot }
+            };
+            game.apply_workbench(&operation).unwrap();
+            assert!(
+                game.arrows
+                    .iter()
+                    .all(|arrow| arrow.source != crate::StrikeSource::Monster(shot))
+            );
+            for _ in 0..60 {
+                game.advance_tick().unwrap();
+            }
+        }
     }
 
     #[test]
