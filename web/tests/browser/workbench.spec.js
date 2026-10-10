@@ -173,7 +173,7 @@ test("workbench spawn, tuning and reset reach the reproduction", async ({ page, 
   const step = page.getByRole("button", { name: "Step", exact: true });
   await step.click();
 
-  const living = workbench.getByLabel("Living monster");
+  const living = workbench.getByLabel("Room monster");
   const before = await living.locator("option").count();
   await workbench.getByLabel("Monster", { exact: true }).selectOption("monster.skirmisher");
   await workbench.getByLabel("Offset x").fill("-250");

@@ -18,10 +18,9 @@ export function WorkbenchControls({ runtime, store, setStatus }) {
   const [error, setError] = useState(null);
   const [roomId] = useState(() => runtime.trainingWorkbenchRoom());
 
-  // Only the workbench room's monsters can be removed; others stay out of the selector.
-  const living = (snapshot?.monsters ?? []).filter(
-    (monster) => monster.alive && monster.roomId === roomId,
-  );
+  // Only the workbench room's monsters can be removed, defeated ones included (they count
+  // toward the room's bound); others stay out of the selector.
+  const living = (snapshot?.monsters ?? []).filter((monster) => monster.roomId === roomId);
   const selectedRemoveId =
     living.find((monster) => String(monster.id) === removeId)?.id ?? living[0]?.id ?? null;
 
@@ -101,9 +100,9 @@ export function WorkbenchControls({ runtime, store, setStatus }) {
 
         <div className="training-actions">
           <label>
-            <span aria-hidden="true">Living monster</span>
+            <span aria-hidden="true">Room monster</span>
             <select
-              aria-label="Living monster"
+              aria-label="Room monster"
               value={selectedRemoveId ?? ""}
               onChange={(event) => setRemoveId(event.target.value)}
               disabled={selectedRemoveId === null}
@@ -111,6 +110,7 @@ export function WorkbenchControls({ runtime, store, setStatus }) {
               {living.map((monster) => (
                 <option key={monster.id} value={monster.id}>
                   #{monster.id} {monster.definition}
+                  {monster.alive ? "" : " (defeated)"}
                 </option>
               ))}
             </select>

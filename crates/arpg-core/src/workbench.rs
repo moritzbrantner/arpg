@@ -14,7 +14,8 @@ use crate::{
     RoomEncounterState, RoomId, RoomSnapshot, Vec3i, WALL_HALF_THICKNESS, vec_to_array,
 };
 
-/// Living monsters the workbench room may hold at once, spawned or generated.
+/// Monsters the workbench room may hold at once, spawned or generated, living or defeated:
+/// every one is published in each snapshot until removed or reset.
 pub const MAX_WORKBENCH_MONSTERS: usize = 12;
 
 /// Monsters one workbench session may spawn in total (ids are never reused).
@@ -377,9 +378,14 @@ impl ArpgGame {
         {
             return Err(GameError::new("spawn offset overlaps another body"));
         }
-        if living_in_room.count() >= MAX_WORKBENCH_MONSTERS {
+        let in_room = self
+            .monsters
+            .iter()
+            .filter(|monster| monster.room_id == room_id)
+            .count();
+        if in_room >= MAX_WORKBENCH_MONSTERS {
             return Err(GameError::new(format!(
-                "the workbench room holds at most {MAX_WORKBENCH_MONSTERS} living monsters"
+                "the workbench room holds at most {MAX_WORKBENCH_MONSTERS} monsters, defeated ones included; remove some or reset"
             )));
         }
         let workbench = self.workbench.as_mut().expect("workbench presence checked");
@@ -490,7 +496,9 @@ impl ArpgGame {
             room.encounter_state = RoomEncounterState::Dormant;
         }
         self.navigation = Default::default();
-        self.reconcile_encounters()
+        self.reconcile_encounters()?;
+        // A lock on a removed monster drops now, not after the next tick.
+        self.revalidate_target_locks()
     }
 
     /// Live state never exceeds the bounds of the current tuning.
@@ -655,8 +663,7 @@ mod tests {
         assert_eq!(room_monsters(&game), before);
         assert!(!game.workbench.as_ref().unwrap().edited());
 
-        let living = before.iter().filter(|monster| monster.3 > 0).count();
-        for index in 0..MAX_WORKBENCH_MONSTERS - living {
+        for index in 0..MAX_WORKBENCH_MONSTERS - before.len() {
             let x = -400 + 100 * i32::try_from(index % 6).unwrap();
             let z = if index < 6 { -250 } else { 250 };
             game.apply_workbench(&spawn("monster.brute", x, z)).unwrap();
@@ -778,6 +785,38 @@ mod tests {
                 game.advance_tick().unwrap();
             }
         }
+    }
+
+    #[test]
+    fn defeated_monsters_count_toward_the_room_bound_and_locks_drop_on_removal() {
+        let mut game = dummy();
+        let target = room_monsters(&game)[0].0;
+        game.advance_tick().unwrap();
+        game.advance_tick().unwrap();
+        game.apply_command(PlayerCommand::new(1, 1, ArpgCommand::CycleTarget).unwrap())
+            .unwrap();
+        assert_eq!(game.players[&1].locked_monster_id, Some(target));
+        game.apply_workbench(&WorkbenchOperation::RemoveMonster { monster_id: target })
+            .unwrap();
+        assert_eq!(game.players[&1].locked_monster_id, None);
+
+        let mut spawned = 0;
+        while room_monsters(&game).len() < MAX_WORKBENCH_MONSTERS {
+            let x = -400 + 100 * (spawned % 6);
+            let z = if spawned < 6 { -250 } else { 250 };
+            game.apply_workbench(&spawn("monster.brute", x, z)).unwrap();
+            spawned += 1;
+        }
+        for monster in game.monsters.iter_mut() {
+            monster.health = 0;
+        }
+        let error = game
+            .apply_workbench(&spawn("monster.brute", 0, 150))
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("defeated ones included"),
+            "{error}"
+        );
     }
 
     #[test]
