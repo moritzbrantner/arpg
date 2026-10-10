@@ -11488,6 +11488,169 @@ mod tests {
         );
     }
 
+    fn ranged_archer_id(game: &ArpgGame) -> u32 {
+        game.monsters
+            .iter()
+            .find(|m| m.definition().id == ARCHER)
+            .unwrap()
+            .id
+    }
+
+    /// Advances until the archer's shot `shot` resolves against a player; returns that event.
+    fn land_shot(game: &mut ArpgGame, id: u32, shot: ArrowSnapshot) -> StrikeEventSnapshot {
+        let event = (0..40)
+            .find_map(|_| {
+                game.advance_tick().unwrap();
+                monster_shots(&game.snapshot().unwrap(), id).pop()
+            })
+            .expect("the shot lands");
+        assert_eq!(event.strike_tick, shot.launched_at_tick);
+        assert_eq!(event.target, StrikeTarget::Player(1));
+        event
+    }
+
+    /// Faces player 1 along x without moving it.
+    fn face_x(game: &mut ArpgGame, facing_x: i8) {
+        let state = game.players.get_mut(&1).unwrap();
+        state.facing_x = facing_x;
+        state.facing_z = 0;
+    }
+
+    #[test]
+    fn archer_shots_break_a_guard_whose_points_reach_the_shot_cost() {
+        let guard_cost = archer().strike.guard_cost;
+        assert!(guard_cost > 0, "a free shot could never break a guard");
+
+        // One point above the cost: the shot is blocked and leaves one point.
+        let mut game = ranged_scenario();
+        let id = ranged_archer_id(&game);
+        command_as(&mut game, 1, ArpgCommand::SetGuard { raised: true });
+        let shot = advance_until_shot(&mut game);
+        game.players.get_mut(&1).unwrap().guard.points = guard_cost + 1;
+        assert_eq!(
+            land_shot(&mut game, id, shot).result,
+            StrikeResult::Blocked {
+                guard_damage: guard_cost
+            }
+        );
+        let player = game.players[&1];
+        assert_eq!(player.guard.points, 1);
+        assert_eq!(player.health, BASE_MAX_HEALTH);
+
+        // Exactly the cost: the shot breaks the guard instead of being blocked.
+        let mut game = ranged_scenario();
+        let id = ranged_archer_id(&game);
+        command_as(&mut game, 1, ArpgCommand::SetGuard { raised: true });
+        let shot = advance_until_shot(&mut game);
+        let state = game.players.get_mut(&1).unwrap();
+        state.guard.points = guard_cost;
+        // A standing counter opportunity from an earlier block is lost to the break.
+        state.counter = Some(CounterOpportunity::grant(1_000, id, shot.launched_at_tick));
+        let event = land_shot(&mut game, id, shot);
+        assert_eq!(event.definition, "monster.bolt");
+        assert_eq!(event.result, StrikeResult::GuardBroken);
+        let player = game.players[&1];
+        assert_eq!(
+            player.health, BASE_MAX_HEALTH,
+            "a guard break absorbs that shot"
+        );
+        assert_eq!(player.guard.points, 0);
+        assert_eq!(player.guard.stance, None);
+        assert_eq!(player.counter, None);
+        assert!(player.guard.broken_ticks_remaining > 0);
+        assert!(player.guard.broken_ticks_remaining <= game.tuning.guard.break_ticks);
+        assert!(game.arrows.is_empty());
+    }
+
+    #[test]
+    fn an_archer_shot_from_behind_a_raised_shield_hits() {
+        let mut game = ranged_scenario();
+        let id = ranged_archer_id(&game);
+        command_as(&mut game, 1, ArpgCommand::SetGuard { raised: true });
+        let shot = advance_until_shot(&mut game);
+        // The shot flies -x from the archer; the shield faces -x, away from it.
+        assert!(shot.velocity[0] < 0 && shot.velocity[2] == 0);
+        face_x(&mut game, -1);
+        assert!(game.players[&1].guard.is_raised());
+        let event = land_shot(&mut game, id, shot);
+        assert_eq!(
+            event.result,
+            StrikeResult::Hit {
+                damage: archer().damage,
+                defeated: false
+            }
+        );
+        let player = game.players[&1];
+        assert_eq!(player.health, BASE_MAX_HEALTH - archer().damage);
+        assert_eq!(
+            player.guard.points, MAX_GUARD_POINTS,
+            "a rear hit costs no guard"
+        );
+        assert_eq!(player.counter, None, "a rear hit grants no counter");
+        assert_eq!(
+            player.guard.stance, None,
+            "an unblocked hit lowers the shield"
+        );
+    }
+
+    #[test]
+    fn an_archer_shot_is_judged_by_its_incoming_side_after_the_archer_moves() {
+        // The archer relocates to the far side of the player after release. The shield must
+        // follow where the shot comes from (+x), not where the archer now stands (-x).
+        for (facing_x, blocked) in [(1, true), (-1, false)] {
+            let mut game = ranged_scenario();
+            let id = ranged_archer_id(&game);
+            command_as(&mut game, 1, ArpgCommand::SetGuard { raised: true });
+            let shot = advance_until_shot(&mut game);
+            let player = player_position(&game);
+            assert!(
+                shot.position[0] > player.x,
+                "the shot starts on the +x side"
+            );
+            assert!(shot.velocity[0] < 0 && shot.velocity[2] == 0);
+            let moved = Vec3i::new(player.x - 300, PLAYER_Y, player.z);
+            game.world
+                .set_position(ArpgGame::monster_body_id(id), moved)
+                .unwrap();
+            game.monsters
+                .iter_mut()
+                .find(|m| m.id == id)
+                .unwrap()
+                .position = moved;
+            face_x(&mut game, facing_x);
+            let event = land_shot(&mut game, id, shot);
+            // The archer really stands on the other side when the shot lands.
+            let archer_at = game.monsters.iter().find(|m| m.id == id).unwrap().position;
+            assert!(
+                archer_at.x < player_position(&game).x,
+                "facing {facing_x}: archer at {archer_at:?}"
+            );
+            let player = game.players[&1];
+            if blocked {
+                assert_eq!(
+                    event.result,
+                    StrikeResult::Blocked {
+                        guard_damage: archer().strike.guard_cost
+                    },
+                    "facing the shot blocks it although the archer is behind"
+                );
+                assert_eq!(player.health, BASE_MAX_HEALTH);
+                assert!(player.counter.is_some());
+            } else {
+                assert_eq!(
+                    event.result,
+                    StrikeResult::Hit {
+                        damage: archer().damage,
+                        defeated: false
+                    },
+                    "facing the archer does not block a shot arriving from behind"
+                );
+                assert_eq!(player.guard.points, MAX_GUARD_POINTS);
+                assert_eq!(player.counter, None);
+            }
+        }
+    }
+
     fn heavy_scenario() -> (ArpgGame, u32) {
         let mut game = ArpgGame::new_scenario(ScenarioId::Heavy, 42).unwrap();
         game.add_player(1).unwrap();
