@@ -8546,6 +8546,76 @@ mod tests {
     }
 
     #[test]
+    fn a_counter_against_the_archer_that_backed_off_starts_but_misses() {
+        let counter = content().action(ActionKind::Counter);
+        let reach = counter.strike.unwrap().reach;
+        for seed in [0, 42, 0xdead_beef, 0xa420_0916] {
+            let mut game = ArpgGame::new_scenario(ScenarioId::Retreating, seed).unwrap();
+            game.add_player(1).unwrap();
+            command(&mut game, ArpgCommand::SetGuard { raised: true });
+            let archer_distance = |game: &ArpgGame| {
+                let player = game.snapshot().unwrap().players[0].position;
+                let snapshot = game.snapshot().unwrap();
+                let archer = snapshot
+                    .monsters
+                    .iter()
+                    .find(|monster| monster.definition == "monster.archer")
+                    .unwrap();
+                (i64::from(archer.position[0] - player[0]), archer.behavior)
+            };
+            let mut blocked = false;
+            let mut backed_off = false;
+            for _ in 0..240 {
+                game.advance_tick().unwrap();
+                backed_off |= archer_distance(&game).1 == MonsterBehavior::Retreating;
+                blocked = game.snapshot().unwrap().strike_events.iter().any(|event| {
+                    event.definition == "monster.bolt"
+                        && matches!(event.result, StrikeResult::Blocked { .. })
+                });
+                if blocked {
+                    break;
+                }
+            }
+            assert!(blocked, "{seed}: the archer's bolt is never blocked");
+            assert!(
+                backed_off,
+                "{seed}: the archer shoots without backing off first"
+            );
+            assert!(game.players[&1].counter.is_some(), "{seed}");
+            command(&mut game, ArpgCommand::SetGuard { raised: false });
+            command(&mut game, ArpgCommand::PrimaryAttack);
+            // The block opened a real counter: it starts and consumes the opportunity.
+            assert_eq!(action_kind(&game), Some(ActionKind::Counter), "{seed}");
+            assert!(game.players[&1].counter.is_none(), "{seed}");
+            let mut resolved = false;
+            for _ in 0..u64::from(counter.windup_ticks) + 2 {
+                game.advance_tick().unwrap();
+                let snapshot = game.snapshot().unwrap();
+                let active = snapshot.players[0]
+                    .action
+                    .is_some_and(|action| action.phase == ActionPhase::Active);
+                if active {
+                    resolved = true;
+                    // The archer kept its distance: the counter honours reach and whiffs.
+                    let (distance, _) = archer_distance(&game);
+                    assert!(distance > reach, "{seed}: {distance} <= {reach}");
+                    assert!(
+                        !snapshot
+                            .strike_events
+                            .iter()
+                            .any(|event| event.source == StrikeSource::Player(1)),
+                        "{seed}: the counter must not reach the retreating archer"
+                    );
+                }
+            }
+            assert!(
+                resolved,
+                "{seed}: the counter never reached its active phase"
+            );
+        }
+    }
+
+    #[test]
     fn reproductions_replay_identically_and_reject_malformed_input() {
         let reproduction = Reproduction {
             scenario: ScenarioId::Enemy,
