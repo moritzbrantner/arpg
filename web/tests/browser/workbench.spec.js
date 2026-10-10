@@ -34,7 +34,7 @@ test("an unknown scenario falls back to the generated dungeon", async ({ page, a
   await expect(page.getByLabel("Scenario")).toHaveValue("dungeon");
 });
 
-test("melee scenarios show a forward hit, an aimed-away whiff and a blocked strike", async ({
+test("melee scenarios show a forward hit, an aimed-away whiff, a blocked strike and an outrun one", async ({
   page,
   appUrl,
 }) => {
@@ -54,6 +54,13 @@ test("melee scenarios show a forward hit, an aimed-away whiff and a blocked stri
   await blocked.press("Space");
   await blocked.stepUntil(blocked.timeline, "obstructed");
   await expect(blocked.timeline).not.toContainText("hit");
+
+  // The archer starts inside the swing but backs out of reach during the wind-up.
+  const retreat = await openScenario(page, appUrl, "retreating");
+  await retreat.press("Space");
+  await retreat.stepUntil(retreat.diagnostics, "primaryAttack · recovery");
+  await expect(retreat.diagnostics).toContainText("Retreating1");
+  await expect(retreat.timeline).toContainText("No events yet");
 });
 
 test("a block opens a counter window that expires", async ({ page, appUrl }) => {

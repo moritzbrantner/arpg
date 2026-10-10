@@ -27,6 +27,7 @@ const scenarios = new Set([
   "archeryObstructed",
   "ranged",
   "heavy",
+  "retreating",
 ]);
 const parties = new Set(["player", "monster"]);
 const strikeResults = new Set(["hit", "blocked", "guardBroken", "obstructed"]);
