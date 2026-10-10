@@ -185,6 +185,9 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
   const drawSources = new Set<GuardSource>();
   // The aim intent last sent to the authority; repeated identical aims are not resent.
   let aim: AimDirection = null;
+  // Whether a raised guard ever reached the current source's authority, which may then
+  // still hold it after a press or release was lost.
+  let guardRaiseSent = false;
 
   const update = (patch: Partial<ClientState>) => {
     let changed = false;
@@ -271,6 +274,7 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
     guardSources.clear();
     drawSources.clear();
     aim = null;
+    guardRaiseSent = false;
   };
 
   // Replaces the current source. The returned token identifies the new generation.
@@ -333,6 +337,21 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
       status(String(error));
       return false;
     }
+  };
+
+  const sendGuard = (raised: boolean) => {
+    if (dispatch({ type: "setGuard", raised }) && raised) guardRaiseSent = true;
+  };
+
+  // Re-asserts the guard this client actually holds once a remote authority (re-)assigns
+  // its player: a press made before the assignment never reached an authority, a press or
+  // release may have been lost to a link that died unnoticed before a dedicated resume, and
+  // a re-joined peer player starts with its guard down. A held guard is always re-asserted
+  // (the authority treats a repeated raise as a continued hold); a released one only when
+  // the authority may still hold an earlier raise.
+  const syncGuardOnAssignment = () => {
+    const held = guardSources.size > 0;
+    if (held || guardRaiseSent) sendGuard(held);
   };
 
   const flushMovement = () => {
@@ -451,7 +470,10 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
         role: "guest",
         isCurrent: () => isCurrent(generation) && peer === session,
         getGame: () => null,
-        onPlayer: (playerId) => update({ playerId, lifecycle: "running" }),
+        onPlayer: (playerId) => {
+          update({ playerId, lifecycle: "running" });
+          syncGuardOnAssignment();
+        },
         onSnapshot: (snapshot) => options.snapshots.publish(snapshot),
         onStatus: status,
         localContentRevision: options.localContentRevision,
@@ -496,6 +518,7 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
             if (!current()) return;
             update({ playerId: welcome.playerId, lifecycle: "running" });
             status(`Dedicated authority · player ${welcome.playerId} · ${welcome.tickHz} Hz`);
+            syncGuardOnAssignment();
           },
           onSnapshot: (frame) => {
             if (!current()) return;
@@ -585,7 +608,7 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
       if (held) guardSources.add(source);
       else guardSources.delete(source);
       const isHeld = guardSources.size > 0;
-      if (isHeld !== wasHeld) dispatch({ type: "setGuard", raised: isHeld });
+      if (isHeld !== wasHeld) sendGuard(isHeld);
     },
 
     // Held bow draw per device: the first hold draws; releasing the last hold shoots
@@ -639,7 +662,7 @@ export function createGameClientRuntime(options: GameClientRuntimeOptions) {
       flushMovement();
       if (guardSources.size > 0) {
         guardSources.clear();
-        dispatch({ type: "setGuard", raised: false });
+        sendGuard(false);
       }
       // Losing focus or opening a menu must never fire a drawn bow.
       if (drawSources.size > 0) {
