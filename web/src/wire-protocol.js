@@ -1,6 +1,6 @@
 // Browser projection of the arpg-protocol v16 envelope. This adapter validates
 // only data consumed by presentation; gameplay rules remain in arpg-core.
-export const PROTOCOL_VERSION = 17;
+export const PROTOCOL_VERSION = 18;
 const MAX_SNAPSHOT_CHARACTERS = 65_535;
 const integer = (value) => Number.isSafeInteger(value);
 const nonNegative = (value) => integer(value) && value >= 0;
@@ -210,7 +210,14 @@ export function decodeSnapshot(encoded) {
         ) &&
         optional(monster.reaction, (value) => reaction(value, "stagger")) &&
         MONSTER_BEHAVIORS.has(monster.behavior) &&
-        optional(monster.targetPlayerId, nonNegative),
+        optional(monster.targetPlayerId, nonNegative) &&
+        optional(
+          monster.guard,
+          (value) => guardPhases.has(value?.phase) && nonNegative(value.ticksRemaining),
+        ) &&
+        nonNegative(monster.guardPoints) &&
+        nonNegative(monster.maxGuardPoints) &&
+        monster.guardPoints <= monster.maxGuardPoints,
     ) &&
     list(
       "rooms",

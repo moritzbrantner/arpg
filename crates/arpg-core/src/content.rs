@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{ActionKind, ComboInput};
 
-pub const CONTENT_FORMAT_VERSION: u16 = 6;
+pub const CONTENT_FORMAT_VERSION: u16 = 7;
 /// Touching monster and player bodies keep their centres up to √2 times their
 /// combined XZ half extents apart (85 units), and pursuit stops one navigation
 /// cell inside strike reach, so a monster strike must reach past both.
@@ -195,6 +195,9 @@ pub struct MonsterData {
     /// The attack launches this projectile at its target instead of striking around the
     /// monster. `null` strikes.
     pub projectile: Option<ProjectileData>,
+    /// Shield user (#92): an engaged monster holds the shared shield guard (`guard`
+    /// tuning, `guard_outcome` rules) while it is free and lowers it to attack.
+    pub shield: bool,
 }
 
 /// A monster projectile: it flies the shared arrow path and resolves through the
@@ -270,6 +273,7 @@ pub(crate) struct MonsterDefinition {
     pub separation_range: i64,
     pub retreat_range: Option<i64>,
     pub projectile: Option<ProjectileDefinition>,
+    pub shield: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -656,6 +660,7 @@ impl ContentBundle {
                             speed: i32::from(projectile.speed),
                             lifetime_ticks: projectile.lifetime_ticks,
                         }),
+                        shield: monster.shield,
                     });
                 }
                 None => fail(path, "references an unknown strike"),

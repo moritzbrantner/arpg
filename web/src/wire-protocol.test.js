@@ -174,7 +174,33 @@ const monster = {
   reaction: null,
   behavior: "pursuing",
   targetPlayerId: 1,
+  guard: null,
+  guardPoints: 0,
+  maxGuardPoints: 0,
 };
+
+test("shield monsters publish their guard like players and malformed guards are rejected", () => {
+  const defender = {
+    ...monster,
+    definition: "monster.defender",
+    health: 140,
+    maxHealth: 140,
+    guard: { phase: "raised", ticksRemaining: 0 },
+    guardPoints: 80,
+    maxGuardPoints: 100,
+  };
+  const decoded = decodeSnapshot(encode({ ...payload, monsters: [monster, defender] }));
+  expect(decoded.monsters[0].guard).toBeNull();
+  expect(decoded.monsters[1].guard).toEqual({ phase: "raised", ticksRemaining: 0 });
+  expect(decoded.monsters[1].guardPoints).toBe(80);
+  for (const candidate of [
+    { ...defender, guard: { phase: "lowered", ticksRemaining: 0 } },
+    { ...defender, guardPoints: 101 },
+    { ...defender, guardPoints: undefined },
+    { ...defender, maxGuardPoints: -1 },
+  ])
+    expect(() => decodeSnapshot(encode({ ...payload, monsters: [candidate] }))).toThrow();
+});
 
 test("monsters publish their authoritative behaviour and engaged target", () => {
   const decoded = decodeSnapshot(encode({ ...payload, monsters: [monster] }));

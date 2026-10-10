@@ -224,6 +224,25 @@ function dungeonFloor(snapshot, scale) {
   };
 }
 
+// The primitive shield board of a raised or rising guard, `offset` in front of `position`
+// along the unit direction it faces. Players and shield monsters share it.
+function shieldBoard(id, position, [directionX, directionZ], offset, look) {
+  const yaw = Math.atan2(directionX, directionZ);
+  return {
+    id,
+    geometry: { kind: "box", size: [0.5, 0.6, 0.08] },
+    color: look === "blocked" ? "#e8f4ff" : look === "raised" ? "#8fb3d9" : "#55687d",
+    transform: {
+      translation: [
+        position[0] + directionX * offset,
+        Math.max(position[1], 0.5),
+        position[2] + directionZ * offset,
+      ],
+      rotationQuaternion: [0, Math.sin(yaw / 2), 0, Math.cos(yaw / 2)],
+    },
+  };
+}
+
 function buildFrame(snapshot, focusPlayerId, width, height, focusPlayerAccent = "#d6b45f") {
   const scale = snapshot.worldUnitsPerMeter;
   const focus =
@@ -310,27 +329,15 @@ function buildFrame(snapshot, focusPlayerId, width, height, focusPlayerAccent = 
       const guardLength = Math.hypot(guardFacing[0], guardFacing[1]) || 1;
       const guardX = guardFacing[0] / guardLength;
       const guardZ = guardFacing[1] / guardLength;
-      const shieldYaw = Math.atan2(guardX, guardZ);
       const shield = player.guard
         ? [
-            {
-              id: `player-shield-${player.id}`,
-              geometry: { kind: "box", size: [0.5, 0.6, 0.08] },
-              color:
-                player.reaction?.kind === "blocked"
-                  ? "#e8f4ff"
-                  : player.guard.phase === "raised"
-                    ? "#8fb3d9"
-                    : "#55687d",
-              transform: {
-                translation: [
-                  position[0] + guardX * 0.42,
-                  Math.max(position[1], 0.5),
-                  position[2] + guardZ * 0.42,
-                ],
-                rotationQuaternion: [0, Math.sin(shieldYaw / 2), 0, Math.cos(shieldYaw / 2)],
-              },
-            },
+            shieldBoard(
+              `player-shield-${player.id}`,
+              position,
+              [guardX, guardZ],
+              0.42,
+              player.reaction?.kind === "blocked" ? "blocked" : player.guard.phase,
+            ),
           ]
         : [];
       const bow =
@@ -419,6 +426,24 @@ function buildFrame(snapshot, focusPlayerId, width, height, focusPlayerAccent = 
             transform: { translation },
           },
         ];
+        // A shield monster's authoritative guard faces its engaged target (#92).
+        const guardTarget = snapshot.players.find(
+          (candidate) => candidate.id === monster.targetPlayerId,
+        );
+        if (monster.guard && guardTarget) {
+          const towardX = guardTarget.position[0] - monster.position[0];
+          const towardZ = guardTarget.position[2] - monster.position[2];
+          const length = Math.hypot(towardX, towardZ) || 1;
+          nodes.push(
+            shieldBoard(
+              `monster-shield-${monster.id}`,
+              translation,
+              [towardX / length, towardZ / length],
+              0.55,
+              monster.guard.phase,
+            ),
+          );
+        }
         // The focused player's authoritative target lock rings its monster.
         if (focus?.lockedMonsterId === monster.id) {
           for (let index = 0; index < 8; index += 1) {
