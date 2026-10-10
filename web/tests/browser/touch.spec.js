@@ -214,10 +214,7 @@ test("horizontal sword swipes reuse target commands without accidentally attacki
   }
 });
 
-test("a cancelled or ambiguous swipe never becomes a light attack", async ({
-  browser,
-  appUrl,
-}) => {
+test("a cancelled or ambiguous swipe never becomes a light attack", async ({ browser, appUrl }) => {
   const { context, page, cdp } = await phone(browser, appUrl);
   try {
     const attack = page.getByRole("button", { name: "Primary attack" });
@@ -288,9 +285,7 @@ test("guard hold survives another finger's targeting swipe and releases in order
     await page.getByRole("button", { name: "Step", exact: true }).click();
     const commands = (await exportedCommands(page))
       .filter((command) => ["setGuard", "cycleTarget", "primaryAttack"].includes(command.type))
-      .map((command) =>
-        command.type === "setGuard" ? `guard:${command.raised}` : command.type,
-      );
+      .map((command) => (command.type === "setGuard" ? `guard:${command.raised}` : command.type));
     expect(commands).toEqual(["guard:true", "cycleTarget", "guard:false"]);
   } finally {
     await context.close();
