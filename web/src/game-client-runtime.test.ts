@@ -68,7 +68,11 @@ class FakeGame {
   }
   applyCommand(playerId, sequence, encoded) {
     if (this.freed) throw new Error("used after free");
-    this.commands.push({ playerId, sequence, payload: JSON.parse(encoded).payload });
+    this.commands.push({
+      playerId,
+      sequence,
+      payload: JSON.parse(encoded).payload,
+    });
   }
   advanceTick() {
     if (this.freed) throw new Error("used after free");
@@ -81,7 +85,25 @@ class FakeGame {
     return JSON.stringify({ tick: this.tick });
   }
   reproductionJson() {
-    return JSON.stringify({ seed: this.seed, ticks: this.tick, commands: this.commands.length });
+    return JSON.stringify({
+      seed: this.seed,
+      ticks: this.tick,
+      commands: this.commands.length,
+    });
+  }
+  operations = [];
+  applyWorkbench(encoded) {
+    const operation = JSON.parse(encoded);
+    if (operation.type === "setTuning" && operation.value < 1) {
+      throw new Error(`${operation.parameter}: must be positive`);
+    }
+    this.operations.push(operation);
+  }
+  workbenchRoomId() {
+    return 2;
+  }
+  tuningJson() {
+    return JSON.stringify([{ parameter: "guard.maxPoints", value: 100 }]);
   }
   free() {
     this.freed = true;
@@ -126,7 +148,10 @@ class FakeDedicatedSession {
     return this.ready.promise;
   }
   async sendCommand(sequence, payload) {
-    this.commands.push({ sequence, payload: new TextDecoder().decode(payload) });
+    this.commands.push({
+      sequence,
+      payload: new TextDecoder().decode(payload),
+    });
   }
   close() {
     this.closed = true;
@@ -278,7 +303,10 @@ test("local → host → guest → dedicated changes close every previous source
 
   const hosting = runtime.hostPeer("http://setup");
   expect(games[0].freed).toBe(true);
-  expect(runtime.getState()).toMatchObject({ mode: "local", lifecycle: "starting" });
+  expect(runtime.getState()).toMatchObject({
+    mode: "local",
+    lifecycle: "starting",
+  });
   peers[0].host.resolve({ displayCode: "ABCD" });
   await hosting;
   expect(runtime.getState()).toMatchObject({
@@ -302,10 +330,16 @@ test("local → host → guest → dedicated changes close every previous source
   peers[1].join.resolve({});
   await joining;
   attachments[1].options.onPlayer(3);
-  expect(runtime.getState()).toMatchObject({ playerId: 3, lifecycle: "running" });
+  expect(runtime.getState()).toMatchObject({
+    playerId: 3,
+    lifecycle: "running",
+  });
   runtime.dispatch({ type: "interact" });
   expect(peers[1].sent).toEqual([
-    { peerId: "host", data: { kind: "command", sequence: 1, encoded: expect.any(String) } },
+    {
+      peerId: "host",
+      data: { kind: "command", sequence: 1, encoded: expect.any(String) },
+    },
   ]);
 
   const connecting = runtime.startDedicated("https://server/arpg");
@@ -362,7 +396,10 @@ test("a failed host keeps the local authority running solo", async () => {
   expect(peers[0].closed).toBe(true);
   expect(games[0].freed).toBe(false);
   expect(timers.size).toBe(1);
-  expect(runtime.getState()).toMatchObject({ mode: "local", lifecycle: "running" });
+  expect(runtime.getState()).toMatchObject({
+    mode: "local",
+    lifecycle: "running",
+  });
   expect(statuses.at(-1)).toBe("Could not host: Error: offline");
 });
 
@@ -373,7 +410,10 @@ test("a failed join reports a usable failed state", async () => {
   await joining;
 
   expect(peers[0].closed).toBe(true);
-  expect(runtime.getState()).toMatchObject({ mode: "guest", lifecycle: "failed" });
+  expect(runtime.getState()).toMatchObject({
+    mode: "guest",
+    lifecycle: "failed",
+  });
   expect(statuses.at(-1)).toBe("Could not join: Error: unknown lobby");
 });
 
@@ -385,14 +425,20 @@ test("late dedicated callbacks from a replaced session are ignored", async () =>
   const localSnapshot = snapshots.getSnapshot();
 
   stale.callbacks.onWelcome({ playerId: 3, tickHz: 20 });
-  stale.callbacks.onSnapshot({ payload: new TextEncoder().encode(snapshotJson(99)) });
+  stale.callbacks.onSnapshot({
+    payload: new TextEncoder().encode(snapshotJson(99)),
+  });
   stale.callbacks.onStateChange("disconnected");
   stale.ready.reject(new Error("closed"));
   await connecting;
 
   expect(stale.closed).toBe(true);
   expect(snapshots.getSnapshot()).toBe(localSnapshot);
-  expect(runtime.getState()).toMatchObject({ mode: "local", playerId: 1, lifecycle: "running" });
+  expect(runtime.getState()).toMatchObject({
+    mode: "local",
+    playerId: 1,
+    lifecycle: "running",
+  });
   expect(statuses.some((status) => status.includes("Dedicated authority"))).toBe(false);
 });
 
@@ -405,10 +451,16 @@ test("dedicated reconnect callbacks move between disconnected and running", asyn
   await connecting;
 
   session.callbacks.onStateChange("disconnected");
-  expect(runtime.getState()).toMatchObject({ lifecycle: "disconnected", playerId: null });
+  expect(runtime.getState()).toMatchObject({
+    lifecycle: "disconnected",
+    playerId: null,
+  });
   runtime.dispatch({ type: "interact" });
   session.callbacks.onWelcome({ playerId: 2, tickHz: 20 });
-  expect(runtime.getState()).toMatchObject({ lifecycle: "running", playerId: 2 });
+  expect(runtime.getState()).toMatchObject({
+    lifecycle: "running",
+    playerId: 2,
+  });
   expect(session.commands).toEqual([]);
 });
 
@@ -417,11 +469,16 @@ test("startup failures and rejected payloads become failed states, not black scr
   const failing = runtime.startDedicated("https://server/arpg");
   dedicatedSessions[0].ready.reject(new Error("handshake timed out"));
   await failing;
-  expect(runtime.getState()).toMatchObject({ lifecycle: "failed", mode: "dedicated" });
+  expect(runtime.getState()).toMatchObject({
+    lifecycle: "failed",
+    mode: "dedicated",
+  });
   expect(statuses.at(-1)).toBe("Could not connect dedicated server: Error: handshake timed out");
 
   const connecting = runtime.startDedicated("https://server/arpg");
-  dedicatedSessions[1].callbacks.onSnapshot({ payload: new TextEncoder().encode("{}") });
+  dedicatedSessions[1].callbacks.onSnapshot({
+    payload: new TextEncoder().encode("{}"),
+  });
   expect(dedicatedSessions[1].closed).toBe(true);
   expect(runtime.getState().lifecycle).toBe("failed");
   expect(statuses.at(-1)).toStartWith("Rejected dedicated snapshot");
@@ -438,7 +495,10 @@ test("a dedicated authority running other content is refused with a clear reason
   });
   expect(dedicatedSessions[0].closed).toBe(true);
   expect(snapshots.getSnapshot()).toBeNull();
-  expect(runtime.getState()).toMatchObject({ lifecycle: "failed", playerId: null });
+  expect(runtime.getState()).toMatchObject({
+    lifecycle: "failed",
+    playerId: null,
+  });
   expect(statuses.at(-1)).toBe(
     "Incompatible game content: the dedicated authority runs content revision " +
       "fedcba9876543210, this client runs 0123456789abcdef. Both sides need the same game build.",
@@ -456,7 +516,10 @@ test("a guest whose host runs other content stops and releases the session", asy
   attachments[0].options.onIncompatible("Incompatible game content: host differs");
   expect(peers[0].closed).toBe(true);
   expect(attachments[0].detached).toBe(true);
-  expect(runtime.getState()).toMatchObject({ lifecycle: "failed", playerId: null });
+  expect(runtime.getState()).toMatchObject({
+    lifecycle: "failed",
+    playerId: null,
+  });
   expect(statuses.at(-1)).toBe("Incompatible game content: host differs");
 });
 
@@ -486,7 +549,11 @@ test("a simulation error stops the loop and fails closed", () => {
 test("training pause, step and speed are owned by the runtime loop", () => {
   const { runtime, games, tick } = harness();
   runtime.startLocal({ seed: 42, training: true });
-  expect(runtime.getState().training).toEqual({ paused: false, speed: 1, scenario: "dungeon" });
+  expect(runtime.getState().training).toEqual({
+    paused: false,
+    speed: 1,
+    scenario: "dungeon",
+  });
   tick(2);
   expect(games[0].tick).toBe(2);
 
@@ -512,14 +579,22 @@ test("restoring a save resumes its sequence fence and movement", () => {
   runtime.startLocal({ seed: 1 });
   const restored = new FakeGame(5);
   restored.addPlayer(2);
-  runtime.restore({ game: restored, controlledPlayerId: 2, lastSequence: 40, movement: [1, 0] });
+  runtime.restore({
+    game: restored,
+    controlledPlayerId: 2,
+    lastSequence: 40,
+    movement: [1, 0],
+  });
 
   expect(games[0].freed).toBe(true);
   expect(timers.size).toBe(1);
   runtime.setHeldMovement("right", true);
   runtime.dispatch({ type: "interact" });
   expect(restored.commands).toEqual([{ playerId: 2, sequence: 41, payload: { type: "interact" } }]);
-  expect(runtime.captureSaveState()).toEqual({ saveStateJson: '{"tick":0}', playerId: 2 });
+  expect(runtime.captureSaveState()).toEqual({
+    saveStateJson: '{"tick":0}',
+    playerId: 2,
+  });
 });
 
 test("disposal releases everything and makes the runtime inert", async () => {
@@ -749,10 +824,51 @@ test("only local training sessions export a reproduction", () => {
   runtime.startLocal({ seed: 42, training: true, scenario: "dummy" });
   runtime.dispatch({ type: "primaryAttack" });
   tick(3);
-  expect(JSON.parse(runtime.exportReproduction())).toEqual({ seed: 42, ticks: 3, commands: 1 });
+  expect(JSON.parse(runtime.exportReproduction())).toEqual({
+    seed: 42,
+    ticks: 3,
+    commands: 1,
+  });
 
   void runtime.hostPeer("http://setup");
   expect(runtime.exportReproduction()).toBeNull();
   runtime.stop();
   expect(runtime.exportReproduction()).toBeNull();
+});
+
+test("workbench operations reach only the local training authority", () => {
+  const { runtime, tick, games, snapshots } = harness();
+  runtime.startLocal({ seed: 1 });
+  expect(() => runtime.applyWorkbench({ type: "resetArrangement" })).toThrow("local training only");
+  expect(runtime.trainingTuning()).toBeNull();
+
+  runtime.startLocal({ seed: 42, training: true, scenario: "dummy" });
+  runtime.setTrainingPaused(true);
+  tick(1);
+  let published = 0;
+  snapshots.subscribe(() => published++);
+  const spawn = {
+    type: "spawnMonster",
+    definition: "monster.brute",
+    offset: [100, -40],
+  };
+  runtime.applyWorkbench(spawn);
+  expect(games.at(-1).operations).toEqual([spawn]);
+  // A paused session republishes so the new arrangement shows immediately.
+  expect(published).toBe(1);
+  expect(() =>
+    runtime.applyWorkbench({
+      type: "setTuning",
+      parameter: "guard.maxPoints",
+      value: 0,
+    }),
+  ).toThrow("guard.maxPoints: must be positive");
+  expect(games.at(-1).operations).toEqual([spawn]);
+  expect(runtime.trainingTuning()).toEqual([{ parameter: "guard.maxPoints", value: 100 }]);
+  expect(runtime.trainingWorkbenchRoom()).toBe(2);
+
+  void runtime.hostPeer("http://setup");
+  expect(() => runtime.applyWorkbench({ type: "resetArrangement" })).toThrow();
+  expect(runtime.trainingTuning()).toBeNull();
+  expect(runtime.trainingWorkbenchRoom()).toBeNull();
 });

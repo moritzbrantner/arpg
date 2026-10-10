@@ -85,6 +85,16 @@ browser training arena (`?scenario=training&seed=<u32>`) runs the same authority
 `fixture=retreating` places that archer inside the light swing's reach, where it backs off
 at once so a swing started on the first tick misses once its wind-up ends.
 
+To try a definition or a tuning value without editing the bundle, the training panel's
+**Arrangement and tuning** section applies workbench operations (`WorkbenchOperation` in
+[`workbench.rs`](../crates/arpg-core/src/workbench.rs)) to the local authority: spawn a
+content monster at an exact offset from the scenario room's centre, remove one, reset the
+room to the scenario's arrangement, or set one of the counter, guard and bow values
+(`TuningParameter`, named by its bundle path) to an exact number validated with the same
+bounds as the bundle. They are not commands, so no peer or dedicated client can send them.
+An exported reproduction records them among the commands (`operations`) and replays them;
+a session they changed can no longer be saved.
+
 ## Packaging and compatibility
 
 The bundle is compiled into `arpg-core` (`include_str!`), so the Wasm build and the dedicated

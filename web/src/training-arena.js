@@ -58,3 +58,35 @@ export function withTrainingRequest(href, enabled, seed, fixture = DEFAULT_SCENA
   }
   return url.toString();
 }
+
+// Monster definitions the workbench can spawn: arpg-core content ids. The core validates
+// every operation; this list only fills the selector.
+export const WORKBENCH_MONSTERS = Object.freeze([
+  { id: "monster.brute", label: "Brute" },
+  { id: "monster.skirmisher", label: "Skirmisher" },
+  { id: "monster.archer", label: "Archer" },
+  { id: "monster.bruiser", label: "Bruiser" },
+]);
+
+// An exact workbench input: a whole number written in plain decimal, or null. Bounds are
+// the core's to check, so its validation message names the violated content bound.
+export function parseWorkbenchInteger(value) {
+  if (typeof value !== "string" || !/^-?\d+$/.test(value.trim())) return null;
+  const parsed = Number(value.trim());
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+// The spawn operation for the drafted inputs, or the reason it cannot be sent.
+export function spawnOperation(definition, offsetX, offsetZ) {
+  const x = parseWorkbenchInteger(offsetX);
+  const z = parseWorkbenchInteger(offsetZ);
+  if (x === null || z === null) return { error: "Offsets must be whole numbers" };
+  return { operation: { type: "spawnMonster", definition, offset: [x, z] } };
+}
+
+// The tuning operation for the drafted value, or the reason it cannot be sent.
+export function tuningOperation(parameter, value) {
+  const parsed = parseWorkbenchInteger(value);
+  if (parsed === null) return { error: `${parameter}: enter a whole number` };
+  return { operation: { type: "setTuning", parameter, value: parsed } };
+}

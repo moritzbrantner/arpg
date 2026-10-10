@@ -3,8 +3,11 @@ import { expect, test } from "bun:test";
 import {
   DEFAULT_TRAINING_SEED,
   parseRunSeed,
+  parseWorkbenchInteger,
   readTrainingRequest,
+  spawnOperation,
   trainingTicksForFrame,
+  tuningOperation,
   withTrainingRequest,
 } from "./training-arena.js";
 
@@ -94,4 +97,26 @@ test("writes the named scenario only when it is not the plain dungeon", () => {
   expect(plain.searchParams.has("fixture")).toBe(false);
   const left = new URL(withTrainingRequest(archery.toString(), false, 5));
   expect(left.searchParams.has("fixture")).toBe(false);
+});
+
+test("workbench inputs accept only exact whole numbers", () => {
+  expect(parseWorkbenchInteger("40")).toBe(40);
+  expect(parseWorkbenchInteger(" -250 ")).toBe(-250);
+  for (const invalid of ["", "1.5", "1e3", "0x10", "abc", "99999999999999999999", null]) {
+    expect(parseWorkbenchInteger(invalid)).toBeNull();
+  }
+  expect(spawnOperation("monster.brute", "100", "-40")).toEqual({
+    operation: {
+      type: "spawnMonster",
+      definition: "monster.brute",
+      offset: [100, -40],
+    },
+  });
+  expect(spawnOperation("monster.brute", "1.5", "0").error).toMatch("whole numbers");
+  expect(tuningOperation("guard.maxPoints", "30")).toEqual({
+    operation: { type: "setTuning", parameter: "guard.maxPoints", value: 30 },
+  });
+  expect(tuningOperation("guard.maxPoints", "").error).toBe(
+    "guard.maxPoints: enter a whole number",
+  );
 });

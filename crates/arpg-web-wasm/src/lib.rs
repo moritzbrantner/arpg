@@ -2,7 +2,7 @@
 
 use arpg_core::{
     ArpgGame, ArpgSaveState, AuthoritativeGame, PlayerCommand, ReproductionRecorder, ScenarioId,
-    content_revision,
+    WorkbenchOperation, content_revision,
 };
 use arpg_protocol::{JsonProtocol, WireProtocol};
 use wasm_bindgen::prelude::*;
@@ -93,6 +93,27 @@ impl WasmGame {
         Ok(())
     }
 
+    /// Applies one workbench operation (`WorkbenchOperation` JSON: spawn, remove, reset or
+    /// exact tuning) and records it for the reproduction. Only workbench sessions accept
+    /// them; an invalid operation fails with its validation message and changes nothing.
+    #[wasm_bindgen(js_name = applyWorkbench)]
+    pub fn apply_workbench(&mut self, encoded_operation: &str) -> Result<(), JsValue> {
+        self.workbench_operation(encoded_operation)
+            .map_err(js_error)
+    }
+
+    /// The room workbench operations arrange; `undefined` outside workbench sessions.
+    #[wasm_bindgen(js_name = workbenchRoomId)]
+    pub fn workbench_room_id(&self) -> Option<u32> {
+        self.recorder.as_ref().and(self.game.workbench_room())
+    }
+
+    /// The tuning values the session runs, as `[{ parameter, value }]` JSON.
+    #[wasm_bindgen(js_name = tuningJson)]
+    pub fn tuning_json(&self) -> Result<String, JsValue> {
+        serde_json::to_string(&self.game.tuning_values()).map_err(js_error)
+    }
+
     /// The recorded workbench session as portable `Reproduction` JSON, which the native
     /// `replay_reproduction` runner replays. Fails for sessions that do not record.
     #[wasm_bindgen(js_name = reproductionJson)]
@@ -132,6 +153,20 @@ pub fn load_game_from_save_state_json(encoded: &str) -> Result<WasmGame, JsValue
 }
 
 impl WasmGame {
+    fn workbench_operation(&mut self, encoded_operation: &str) -> Result<(), String> {
+        let recorder = self
+            .recorder
+            .as_mut()
+            .ok_or("only workbench sessions accept workbench operations")?;
+        let operation = serde_json::from_str::<WorkbenchOperation>(encoded_operation)
+            .map_err(|error| format!("invalid workbench operation: {error}"))?;
+        self.game
+            .apply_workbench(&operation)
+            .map_err(|error| error.to_string())?;
+        recorder.record_workbench(&operation);
+        Ok(())
+    }
+
     fn export_reproduction(&self) -> Result<String, String> {
         let recorder = self
             .recorder
@@ -192,6 +227,72 @@ mod tests {
                 .any(|snapshot| !snapshot.strike_events.is_empty())
         );
         assert_eq!(replayed, live);
+    }
+
+    #[test]
+    fn workbench_operations_are_recorded_and_replay_natively() {
+        let mut game = WasmGame::new_scenario("enemy", 42).unwrap();
+        game.add_player(1).unwrap();
+        let protocol = JsonProtocol;
+        let encode = |command: ArpgCommand| {
+            String::from_utf8(protocol.encode_command(&command).unwrap()).unwrap()
+        };
+        game.workbench_operation(
+            r#"{"type":"setTuning","parameter":"guard.maxPoints","value":30}"#,
+        )
+        .unwrap();
+        let mut live = Vec::new();
+        for tick in 0..90 {
+            if tick == 3 {
+                game.apply_command(1, 1, &encode(ArpgCommand::SetGuard { raised: true }))
+                    .unwrap();
+                game.workbench_operation(
+                    r#"{"type":"spawnMonster","definition":"monster.skirmisher","offset":[-200,0]}"#,
+                )
+                .unwrap();
+            }
+            game.advance_tick().unwrap();
+            live.push(game.game.snapshot().unwrap());
+        }
+        let error = game
+            .workbench_operation(r#"{"type":"setTuning","parameter":"guard.maxPoints","value":0}"#)
+            .unwrap_err();
+        assert!(error.contains("guard.maxPoints"), "{error}");
+        assert!(
+            game.workbench_operation(r#"{"type":"launchMeteor"}"#)
+                .is_err()
+        );
+        let tuning: serde_json::Value = serde_json::from_str(&game.tuning_json().unwrap()).unwrap();
+        assert!(
+            tuning
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!({ "parameter": "guard.maxPoints", "value": 30 }))
+        );
+
+        let reproduction: Reproduction =
+            serde_json::from_str(&game.export_reproduction().unwrap()).unwrap();
+        assert_eq!(reproduction.operations.len(), 2);
+        assert_eq!(replay_reproduction(&reproduction).unwrap(), live);
+        // An edited session is reproducible, not saveable.
+        assert!(game.game.save_state().is_err());
+    }
+
+    #[test]
+    fn only_workbench_sessions_accept_operations() {
+        let mut game = WasmGame::new(42).unwrap();
+        game.add_player(1).unwrap();
+        let error = game
+            .workbench_operation(r#"{"type":"resetArrangement"}"#)
+            .unwrap_err();
+        assert!(error.contains("only workbench sessions"), "{error}");
+        assert_eq!(game.workbench_room_id(), None);
+        assert!(
+            WasmGame::new_scenario("ranged", 42)
+                .unwrap()
+                .workbench_room_id()
+                .is_some()
+        );
     }
 
     #[test]

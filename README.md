@@ -42,6 +42,7 @@ The near-term execution order is the content-readiness roadmap [#50](https://git
 | Gold drop and explicit pickup | Implemented | [`arpg-core`](crates/arpg-core/src/lib.rs) | `kill_drop_pickup_requires_explicit_interaction`, `interaction_respects_pickup_range` |
 | Seeded dungeon, rooms, doors and encounters | Implemented | [`arpg-core`](crates/arpg-core/src/lib.rs) | [`dungeon_properties.rs`](crates/arpg-core/tests/dungeon_properties.rs), `entering_combat_room_locks_connected_doors_until_encounter_is_cleared` |
 | Training scenario (`?scenario=training&seed=<u32>`) | Implemented | [`training-arena.js`](web/src/training-arena.js) | `training-arena.test.js`; `app.spec.js`, `hotkeys.spec.js` |
+| Workbench spawn/remove/reset and exact tuning | Implemented (local training only) | [`workbench.rs`](crates/arpg-core/src/workbench.rs), [`workbench-controls.jsx`](web/src/workbench-controls.jsx) | `recorded_operations_replay_in_their_order_among_commands`, `exact_tuning_values_are_validated_with_the_content_bounds`, `workbench_operations_are_recorded_and_replay_natively`, `workbench.spec.js` |
 | Versioned savestates | Implemented | [`arpg-core`](crates/arpg-core/src/lib.rs), [`save-state.js`](web/src/save-state.js) | `save_state_*` tests, `save-state.test.js`, `savestate.spec.js` |
 | Local Rust/Wasm authority | Implemented | [`arpg-web-wasm`](crates/arpg-web-wasm/src/lib.rs) | `bun run test:physics-wasm`; all browser specs |
 | Peer-hosted co-op | Implemented | [`peer-session.js`](web/src/peer-session.js) | `peer-session.test.js`, `turn.spec.ts` |

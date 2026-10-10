@@ -74,6 +74,7 @@ import {
 } from "./training-arena.js";
 import { createGameClientRuntime } from "./game-client-runtime.ts";
 import { createActiveCueTracker } from "./frame-cues.js";
+import { WorkbenchControls } from "./workbench-controls.jsx";
 import "./styles.css";
 
 // Monster body colours and head cues by published behaviour (#109); attack phases and
@@ -134,7 +135,11 @@ const inputRegistry = {
         categoryPath: ["ARPG", "System"],
         repeatPolicy: "never",
         allowedDevices: ["keyboard"],
-        defaults: [physical("game.settings.default", "game.settings", "Escape", { op: "always" })],
+        defaults: [
+          physical("game.settings.default", "game.settings", "Escape", {
+            op: "always",
+          }),
+        ],
         provenance: { source: "arpg", version: "1" },
       },
     ]),
@@ -439,7 +444,9 @@ function buildFrame(snapshot, focusPlayerId, width, height, focusPlayerAccent = 
             id: `monster-${monster.id}-behavior`,
             geometry: { kind: "sphere", radius: 0.09 },
             color: cue,
-            transform: { translation: [translation[0], translation[1] + 0.62, translation[2]] },
+            transform: {
+              translation: [translation[0], translation[1] + 0.62, translation[2]],
+            },
           });
         const targetPlayer = snapshot.players.find(
           (candidate) => candidate.id === monster.action?.targetPlayerId,
@@ -477,7 +484,10 @@ function buildFrame(snapshot, focusPlayerId, width, height, focusPlayerAccent = 
             const angle = (index / 12) * Math.PI * 2;
             nodes.push({
               id: `monster-${monster.id}-telegraph-${index}`,
-              geometry: { kind: "sphere", radius: phase === "active" ? 0.1 : 0.075 },
+              geometry: {
+                kind: "sphere",
+                radius: phase === "active" ? 0.1 : 0.075,
+              },
               color: telegraphColor,
               transform: {
                 translation: [
@@ -1368,6 +1378,13 @@ function App() {
               Export reproduction
             </button>
           </div>
+
+          <WorkbenchControls
+            key={client.sourceGeneration}
+            runtime={runtime}
+            store={snapshotStore}
+            setStatus={setStatus}
+          />
 
           <TrainingDiagnostics store={snapshotStore} playerId={playerId} />
           <StrikeTimeline store={snapshotStore} />
