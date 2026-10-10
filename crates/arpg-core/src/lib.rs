@@ -398,10 +398,13 @@ pub enum ScenarioId {
     Ranged,
     /// A heavy enemy inside its reach, winding up its long telegraphed slam (#108).
     Heavy,
+    /// A ranged enemy inside the light swing's reach and its own retreat range: it backs
+    /// away at once, so a strike started now misses once its wind-up ends (#90, #94).
+    Retreating,
 }
 
 impl ScenarioId {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Dungeon,
         Self::Dummy,
         Self::Enemy,
@@ -410,6 +413,7 @@ impl ScenarioId {
         Self::ArcheryObstructed,
         Self::Ranged,
         Self::Heavy,
+        Self::Retreating,
     ];
 
     /// The URL/query name, identical to the serialised form.
@@ -423,6 +427,7 @@ impl ScenarioId {
             Self::ArcheryObstructed => "archeryObstructed",
             Self::Ranged => "ranged",
             Self::Heavy => "heavy",
+            Self::Retreating => "retreating",
         }
     }
 
@@ -440,6 +445,7 @@ impl ScenarioId {
             Self::Enemy => Some(150),
             Self::Archery | Self::ArcheryObstructed | Self::Ranged => Some(500),
             Self::Heavy => Some(150),
+            Self::Retreating => Some(RETREATING_TARGET_OFFSET),
         }
     }
 
@@ -447,7 +453,7 @@ impl ScenarioId {
     /// use the first combat room.
     const fn enemy(self) -> Option<&'static str> {
         match self {
-            Self::Ranged => Some("monster.archer"),
+            Self::Ranged | Self::Retreating => Some("monster.archer"),
             Self::Heavy => Some("monster.bruiser"),
             _ => None,
         }
@@ -648,6 +654,8 @@ impl ReproductionRecorder {
 }
 
 const SCENARIO_ROOM: RoomId = 2;
+/// Inside the light swing's reach, so only the enemy's retreat makes the swing miss.
+const RETREATING_TARGET_OFFSET: i32 = 210;
 const SCENARIO_PILLAR_HALF_EXTENTS: Vec3i = Vec3i::new(20, WALL_HALF_HEIGHT, 60);
 
 /// One resolved strike as published in a snapshot for diagnostics and feedback.
@@ -8482,6 +8490,59 @@ mod tests {
         assert_eq!(hit.len(), 1);
         assert_eq!(hit[0].definition, "bow.arrow");
         assert!(scenario_player_events(ScenarioId::ArcheryObstructed, &shot, 60).is_empty());
+    }
+
+    #[test]
+    fn a_swing_at_the_retreating_enemy_misses_once_it_backs_out_of_reach() {
+        let light = content().action(ActionKind::PrimaryAttack);
+        let reach = light.strike.unwrap().reach;
+        let windup = u64::from(light.windup_ticks);
+        for seed in [0, 42, 0xdead_beef, 0xa420_0916] {
+            let reproduction = Reproduction {
+                scenario: ScenarioId::Retreating,
+                seed,
+                players: vec![1],
+                ticks: windup + 2,
+                commands: vec![ReproductionCommand {
+                    tick: 0,
+                    player_id: 1,
+                    sequence: 1,
+                    command: ArpgCommand::PrimaryAttack,
+                }],
+            };
+            let snapshots = replay_reproduction(&reproduction).unwrap();
+            let distance = |snapshot: &ArpgSnapshot| {
+                let player = snapshot.players[0].position;
+                let archer = snapshot
+                    .monsters
+                    .iter()
+                    .find(|monster| monster.definition == "monster.archer")
+                    .unwrap();
+                (i64::from(archer.position[0] - player[0]), archer.behavior)
+            };
+            // Standing still, the archer would be inside the swing; it backs off instead.
+            let (start, _) = distance(&snapshots[0]);
+            assert!(start <= reach, "{seed}: {start} > {reach}");
+            // The swing resolves on the tick its active phase opens.
+            let strike_tick = snapshots
+                .iter()
+                .find(|snapshot| {
+                    snapshot.players[0]
+                        .action
+                        .is_some_and(|action| action.phase == ActionPhase::Active)
+                })
+                .unwrap();
+            assert_eq!(strike_tick.tick, windup, "{seed}");
+            let (at_strike, behavior) = distance(strike_tick);
+            assert_eq!(behavior, MonsterBehavior::Retreating, "{seed}");
+            assert!(at_strike > reach, "{seed}: {at_strike} <= {reach}");
+            assert!(
+                snapshots
+                    .iter()
+                    .all(|snapshot| snapshot.strike_events.is_empty()),
+                "{seed}: the swing whiffs and the archer has not shot yet"
+            );
+        }
     }
 
     #[test]

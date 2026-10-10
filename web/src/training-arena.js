@@ -12,6 +12,7 @@ export const SCENARIOS = Object.freeze([
   { id: "archeryObstructed", label: "Archery behind a pillar" },
   { id: "ranged", label: "Ranged enemy" },
   { id: "heavy", label: "Heavy enemy" },
+  { id: "retreating", label: "Retreating enemy in reach" },
 ]);
 const SCENARIO_IDS = new Set(SCENARIOS.map((scenario) => scenario.id));
 

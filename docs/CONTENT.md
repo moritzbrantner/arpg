@@ -81,7 +81,9 @@ place the player and the generated monster, advance ticks, and assert timings, r
 damage and rewards from the definition rather than from literals. For a recorded session,
 replay a `Reproduction` (scenario, seed, players, commands) with `replay_reproduction`; the
 browser training arena (`?scenario=training&seed=<u32>`) runs the same authority, and its
-`fixture=ranged` and `fixture=heavy` arrange the first archer and bruiser rooms.
+`fixture=ranged` and `fixture=heavy` arrange the first archer and bruiser rooms, and
+`fixture=retreating` places that archer inside the light swing's reach, where it backs off
+at once so a swing started on the first tick misses once its wind-up ends.
 
 ## Packaging and compatibility
 
