@@ -78,7 +78,7 @@ Peer-hosted authority is a convenience/trust model, not an anti-cheat boundary. 
 
 `game-server` remains responsible for server-owned player/session identity, tick scheduling, command watermarks, snapshots, reconnect/resume, replay evidence, multi-match hosting, draining, and graceful recovery. ARPG does not duplicate those mechanisms.
 
-The accepted initial game-server dependency is pinned to commit `81cad7a4d80849d13c37120a411d3a053c46f9a0` rather than following a branch tip.
+The game-server dependency is pinned to a full commit in `Cargo.toml` (and resolved in `Cargo.lock`) rather than following a branch tip; Renovate proposes digest updates. `Cargo.toml` is the only source of the accepted revision.
 
 ## Shared multiplayer protocol
 

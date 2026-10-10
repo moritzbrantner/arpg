@@ -4,8 +4,6 @@ use arpg_core::{AuthoritativeGame, PlayerCommand};
 use arpg_protocol::WireProtocol;
 use game_server::{GameSimulation, SimulationError, SimulationSnapshot};
 
-pub const PINNED_GAME_SERVER_REVISION: &str = "81cad7a4d80849d13c37120a411d3a053c46f9a0";
-
 pub struct GameServerAdapter<G, P> {
     game: G,
     protocol: P,
