@@ -323,3 +323,33 @@ test("weapon switch invalidates a held sword swipe before the next snapshot", as
     await context.close();
   }
 });
+
+test("releasing the movement finger first still commits the independent Attack gesture", async ({
+  browser,
+  appUrl,
+}) => {
+  const { context, page, cdp } = await phone(browser, appUrl);
+  try {
+    const stick = await page.getByRole("group", { name: "Movement joystick" }).boundingBox();
+    const attack = await page.getByRole("button", { name: "Primary attack" }).boundingBox();
+    const origin = center(1, stick);
+    const right = point(1, origin.x + stick.width * 0.4, origin.y);
+    const strike = center(2, attack);
+
+    await touch(cdp, "touchStart", origin);
+    await touch(cdp, "touchMove", right);
+    await touch(cdp, "touchStart", right, strike);
+    await touch(cdp, "touchEnd", right);
+    await touch(cdp, "touchEnd", strike);
+
+    await page.getByRole("button", { name: "Step", exact: true }).click();
+    const commands = (await exportedCommands(page))
+      .filter((command) => ["setMovement", "primaryAttack"].includes(command.type))
+      .map((command) =>
+        command.type === "setMovement" ? `${command.x},${command.z}` : command.type,
+      );
+    expect(commands).toEqual(["1,0", "0,0", "primaryAttack"]);
+  } finally {
+    await context.close();
+  }
+});

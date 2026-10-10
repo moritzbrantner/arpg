@@ -601,19 +601,26 @@ function App() {
   );
 
   const resetTouchVisual = useCallback(() => {
-    touchGestureEpochRef.current += 1;
     touchPointerIdRef.current = null;
     if (touchKnobRef.current) {
       touchKnobRef.current.style.transform = "translate3d(0px, 0px, 0)";
     }
   }, []);
 
-  const releaseInput = useCallback(() => {
+  // Weapon changes and world/focus transitions invalidate action strokes.
+  // Ordinary joystick release only resets its own visual and movement.
+  const invalidateTouchGestures = useCallback(() => {
+    touchGestureEpochRef.current += 1;
     resetTouchVisual();
+  }, [resetTouchVisual]);
+
+  const releaseInput = useCallback(() => {
+    invalidateTouchGestures();
     runtime.releaseInput();
-  }, [resetTouchVisual, runtime]);
+  }, [invalidateTouchGestures, runtime]);
 
   const resetTouchStick = () => {
+    // Ending movement must never invalidate a different finger's attack.
     resetTouchVisual();
     runtime.setTouchMovement(0, 0);
   };
@@ -688,7 +695,7 @@ function App() {
   };
 
   const startTraining = (seed, fixture = trainingFixture) => {
-    resetTouchVisual();
+    invalidateTouchGestures();
     runtime.startLocal({ seed, training: true, scenario: fixture });
     initialRunSeedRef.current = null;
     setTrainingSeedDraft(String(seed));
@@ -729,7 +736,7 @@ function App() {
     if (!ready) return;
     const selectedId = persistSelectedCharacterId(undefined, selectedCharacterId);
     const selected = resolveCharacter(selectedId);
-    resetTouchVisual();
+    invalidateTouchGestures();
     runtime.startLocal({ seed: initialRunSeedRef.current ?? freshRunSeed() });
     initialRunSeedRef.current = null;
     leaveTrainingUrl();
@@ -739,7 +746,7 @@ function App() {
 
   const returnToCharacters = () => {
     runtime.stop();
-    resetTouchVisual();
+    invalidateTouchGestures();
     setSettingsOpen(false);
     setInWorld(false);
     leaveTrainingUrl();
@@ -747,27 +754,27 @@ function App() {
   };
 
   const startLocal = () => {
-    resetTouchVisual();
+    invalidateTouchGestures();
     runtime.startLocal();
     leaveTrainingUrl();
     setStatus(`Local game · ${selectedCharacter.name}`);
   };
 
   const startDedicated = async () => {
-    resetTouchVisual();
+    invalidateTouchGestures();
     const connecting = runtime.startDedicated(dedicatedUrl.trim());
     if (runtime.getState().mode === "dedicated") leaveTrainingUrl();
     await connecting;
   };
 
   const hostPeerGame = async () => {
-    resetTouchVisual();
+    invalidateTouchGestures();
     leaveTrainingUrl();
     await runtime.hostPeer(setupUrl);
   };
 
   const joinPeerGame = async () => {
-    resetTouchVisual();
+    invalidateTouchGestures();
     leaveTrainingUrl();
     await runtime.joinPeer(setupUrl, joinCode);
   };
@@ -1021,7 +1028,7 @@ function App() {
     }
 
     const loadedGame = loadGameFromSaveStateJson(JSON.stringify(document.coreState));
-    resetTouchVisual();
+    invalidateTouchGestures();
     runtime.restore({
       game: loadedGame,
       controlledPlayerId,
