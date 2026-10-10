@@ -61,7 +61,17 @@ jobs:
         run: cargo build --locked -p arpg-game-server --bin server
       - name: Verify browser workflows
         working-directory: web
-        run: bun run test:browser
+        env:
+          # Chromium's stderr explains renderer crashes (signal, OOM, GPU) that Playwright reports only as "Target crashed".
+          DEBUG: pw:browser
+        run: bun run test:browser -- --repeat-each=3
+      - name: Keep browser failure traces
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: browser-test-results
+          path: web/test-results
+          retention-days: 7
       - name: Verify build kept lockfiles unchanged
         run: git diff --exit-code -- Cargo.lock web/bun.lock
 
