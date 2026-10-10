@@ -107,8 +107,10 @@ window minus the round trip. Both topologies publish a snapshot every tick, so s
 cadence adds no whole-tick loss. Ticks and command delivery are independent events (the
 browser host's tick interval and its reliable-channel callback; the game-server tick loop and
 its datagram receiver), so a command that arrives at a tick boundary may be applied on either
-adjacent tick: read each figure below as exact on the authority's tick grid and ±1 tick
-(about 17 ms) in wall-clock reaction time.
+adjacent tick: read each figure below as exact on the authority's tick grid and ±1 tick at
+a boundary. The millisecond values are nominal, assuming steady 60 Hz scheduling; a throttled
+or stalled peer host (for example a hidden tab) slows the simulation instead of catching up,
+so the same ticks then span more wall-clock time. The rule itself is always judged in ticks.
 
 Measured by [`counter_latency.rs`](../crates/arpg-game-server/tests/counter_latency.rs)
 through the peer host and `MatchRuntime` with the real wire encoding, with the bundle's
