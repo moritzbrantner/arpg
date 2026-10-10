@@ -81,10 +81,12 @@ pub enum TuningParameter {
     BowArrowLifetimeTicks,
     #[serde(rename = "bow.arrowStaggerTicks")]
     BowArrowStaggerTicks,
+    #[serde(rename = "bow.maxLiveArrows")]
+    BowMaxLiveArrows,
 }
 
 impl TuningParameter {
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::CounterWindowTicks,
         Self::GuardRaiseTicks,
         Self::GuardMaxPoints,
@@ -99,6 +101,7 @@ impl TuningParameter {
         Self::BowArrowFullDamage,
         Self::BowArrowLifetimeTicks,
         Self::BowArrowStaggerTicks,
+        Self::BowMaxLiveArrows,
     ];
 
     /// The content path, identical to the serialised form.
@@ -118,6 +121,7 @@ impl TuningParameter {
             Self::BowArrowFullDamage => "bow.arrowFullDamage",
             Self::BowArrowLifetimeTicks => "bow.arrowLifetimeTicks",
             Self::BowArrowStaggerTicks => "bow.arrowStaggerTicks",
+            Self::BowMaxLiveArrows => "bow.maxLiveArrows",
         }
     }
 }
@@ -167,6 +171,7 @@ impl Tuning {
             TuningParameter::BowArrowFullDamage => bow.arrow_full_damage.into(),
             TuningParameter::BowArrowLifetimeTicks => bow.arrow_lifetime_ticks.into(),
             TuningParameter::BowArrowStaggerTicks => bow.arrow_stagger_ticks.into(),
+            TuningParameter::BowMaxLiveArrows => bow.max_live_arrows.into(),
         }
     }
 
@@ -204,6 +209,9 @@ impl Tuning {
             }
             TuningParameter::BowArrowStaggerTicks => {
                 bow.arrow_stagger_ticks = exact(parameter, value)?;
+            }
+            TuningParameter::BowMaxLiveArrows => {
+                bow.max_live_arrows = exact(parameter, value)?;
             }
         }
         let mut errors = Vec::new();
@@ -286,7 +294,7 @@ impl ArpgGame {
             WorkbenchOperation::RemoveMonster { monster_id } => {
                 self.remove_workbench_monster(room_id, *monster_id)?;
             }
-            WorkbenchOperation::ResetArrangement => self.reset_workbench_arrangement(room_id),
+            WorkbenchOperation::ResetArrangement => self.reset_workbench_arrangement(room_id)?,
             WorkbenchOperation::SetTuning { parameter, value } => {
                 self.tuning = self.tuning.with(*parameter, *value)?;
                 self.clamp_to_tuning();
@@ -352,8 +360,7 @@ impl ArpgGame {
             return Err(GameError::new("spawn offset overlaps level geometry"));
         }
         let overlaps = |other: Vec3i, half: Vec3i| {
-            (position.x - other.x).abs() < MONSTER_BODY_HALF_EXTENTS.x + half.x
-                && (position.z - other.z).abs() < MONSTER_BODY_HALF_EXTENTS.z + half.z
+            bodies_overlap(position, MONSTER_BODY_HALF_EXTENTS, other, half)
         };
         let living_in_room = self
             .monsters
@@ -389,8 +396,7 @@ impl ArpgGame {
         // Ids only grow, so pushing keeps the monster list in id order.
         self.monsters
             .push(MonsterState::new(id, definition_index, room_id, position));
-        self.arrangement_changed(room_id);
-        Ok(())
+        self.arrangement_changed(room_id)
     }
 
     fn remove_workbench_monster(
@@ -407,11 +413,34 @@ impl ArpgGame {
             })?;
         self.monsters.remove(index);
         self.world.remove_body(Self::monster_body_id(monster_id));
-        self.arrangement_changed(room_id);
-        Ok(())
+        self.arrangement_changed(room_id)
     }
 
-    fn reset_workbench_arrangement(&mut self, room_id: RoomId) {
+    fn reset_workbench_arrangement(&mut self, room_id: RoomId) -> Result<(), GameError> {
+        let arrangement = &self
+            .workbench
+            .as_ref()
+            .expect("workbench presence checked")
+            .arrangement;
+        let blocked = arrangement.iter().any(|monster| {
+            self.players.keys().any(|&player_id| {
+                self.world
+                    .body(Self::player_body_id(player_id))
+                    .is_some_and(|body| {
+                        bodies_overlap(
+                            monster.position,
+                            MONSTER_BODY_HALF_EXTENTS,
+                            body.position(),
+                            PLAYER_HALF_EXTENTS,
+                        )
+                    })
+            })
+        });
+        if blocked {
+            return Err(GameError::new(
+                "a player stands where the arrangement places a monster",
+            ));
+        }
         for monster in self
             .monsters
             .iter()
@@ -427,12 +456,14 @@ impl ArpgGame {
             .arrangement;
         self.monsters.extend(arrangement.iter().copied());
         self.monsters.sort_by_key(|monster| monster.id);
-        self.arrangement_changed(room_id);
+        self.arrangement_changed(room_id)
     }
 
     /// A cleared room holds no living monster: one that has them again waits dormant
-    /// until occupied, as generated. Navigation is rebuilt from the new arrangement.
-    fn arrangement_changed(&mut self, room_id: RoomId) {
+    /// until occupied, as generated. The encounter and door locks are reconciled at once,
+    /// so the next physics step already sees the new arrangement, and navigation is
+    /// rebuilt from it.
+    fn arrangement_changed(&mut self, room_id: RoomId) -> Result<(), GameError> {
         let living = self
             .monsters
             .iter()
@@ -444,14 +475,28 @@ impl ArpgGame {
             room.encounter_state = RoomEncounterState::Dormant;
         }
         self.navigation = Default::default();
+        self.reconcile_encounters()
     }
 
     /// Live state never exceeds the bounds of the current tuning.
     fn clamp_to_tuning(&mut self) {
         let Tuning {
-            guard: tuning, bow, ..
+            counter_window_ticks,
+            guard: tuning,
+            bow,
         } = self.tuning;
+        let excess = self
+            .arrows
+            .len()
+            .saturating_sub(usize::from(bow.max_live_arrows));
+        // Like launching beyond the cap, lowering it retires the oldest projectiles.
+        self.arrows.drain(..excess);
         for player in self.players.values_mut() {
+            if let Some(counter) = player.counter.as_mut() {
+                counter.expires_at_tick = counter
+                    .expires_at_tick
+                    .min(counter.usable_from_tick + counter_window_ticks);
+            }
             let guard = &mut player.guard;
             guard.points = guard.points.min(tuning.max_points);
             guard.broken_ticks_remaining = guard.broken_ticks_remaining.min(tuning.break_ticks);
@@ -466,6 +511,12 @@ impl ArpgGame {
             }
         }
     }
+}
+
+/// Whether two bodies' footprints on the gameplay plane overlap.
+fn bodies_overlap(left: Vec3i, left_half: Vec3i, right: Vec3i, right_half: Vec3i) -> bool {
+    (left.x - right.x).abs() < left_half.x + right_half.x
+        && (left.z - right.z).abs() < left_half.z + right_half.z
 }
 
 #[cfg(test)]
@@ -648,18 +699,11 @@ mod tests {
     }
 
     #[test]
-    fn a_cleared_room_reactivates_when_it_holds_monsters_again() {
+    fn the_encounter_follows_each_arrangement_change_at_once() {
         let mut game = dummy();
         let room_id = game.workbench.as_ref().unwrap().room_id;
-        for monster in room_monsters(&game) {
-            game.apply_workbench(&WorkbenchOperation::RemoveMonster {
-                monster_id: monster.0,
-            })
-            .unwrap();
-        }
-        for _ in 0..3 {
-            game.advance_tick().unwrap();
-        }
+        game.advance_tick().unwrap();
+        game.advance_tick().unwrap();
         let state = |game: &ArpgGame| {
             game.rooms
                 .iter()
@@ -667,12 +711,77 @@ mod tests {
                 .unwrap()
                 .encounter_state
         };
+        assert_eq!(state(&game), RoomEncounterState::Active);
+        for monster in room_monsters(&game) {
+            game.apply_workbench(&WorkbenchOperation::RemoveMonster {
+                monster_id: monster.0,
+            })
+            .unwrap();
+        }
+        // The emptied room clears before the next physics step, unlocking its doors.
         assert_eq!(state(&game), RoomEncounterState::Cleared);
+        assert!(game.doors.iter().all(|door| !door.locked));
+        // The occupied room holds a monster again: it activates without waiting a tick.
         game.apply_workbench(&spawn("monster.brute", 300, 0))
             .unwrap();
-        assert_eq!(state(&game), RoomEncounterState::Dormant);
-        game.advance_tick().unwrap();
         assert_eq!(state(&game), RoomEncounterState::Active);
+        game.advance_tick().unwrap();
+        let spawned = room_monsters(&game)[0].0;
+        assert!(
+            game.world
+                .body(ArpgGame::monster_body_id(spawned))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn a_reset_never_restores_a_monster_onto_a_player() {
+        let mut game = dummy();
+        let (target, _, position, _) = room_monsters(&game)[0].clone();
+        game.apply_workbench(&WorkbenchOperation::RemoveMonster { monster_id: target })
+            .unwrap();
+        game.world
+            .set_position(ArpgGame::player_body_id(1), crate::array_to_vec(position))
+            .unwrap();
+        let error = game
+            .apply_workbench(&WorkbenchOperation::ResetArrangement)
+            .unwrap_err();
+        assert!(error.to_string().contains("player stands"), "{error}");
+        assert!(
+            room_monsters(&game)
+                .iter()
+                .all(|monster| monster.0 != target)
+        );
+    }
+
+    #[test]
+    fn lowered_bounds_clamp_counters_and_live_arrows() {
+        let mut game = dummy();
+        let counter = crate::CounterOpportunity::grant(30, 1, 0);
+        game.players.get_mut(&1).unwrap().counter = Some(counter);
+        game.apply_workbench(&tune(TuningParameter::CounterWindowTicks, 5))
+            .unwrap();
+        let clamped = game.players[&1].counter.unwrap();
+        assert_eq!(clamped.expires_at_tick, counter.usable_from_tick + 5);
+
+        let arrow = crate::ArrowSnapshot {
+            id: 1,
+            source: crate::StrikeSource::Player(1),
+            launched_at_tick: 0,
+            position: [0, PLAYER_Y, 0],
+            velocity: [10, 0, 0],
+            damage: 1,
+            ticks_remaining: 10,
+        };
+        game.arrows = (1..=3)
+            .map(|id| crate::ArrowSnapshot { id, ..arrow })
+            .collect();
+        game.apply_workbench(&tune(TuningParameter::BowMaxLiveArrows, 1))
+            .unwrap();
+        assert_eq!(
+            game.arrows.iter().map(|arrow| arrow.id).collect::<Vec<_>>(),
+            [3]
+        );
     }
 
     #[test]
