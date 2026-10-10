@@ -64,7 +64,7 @@ jobs:
         env:
           # Chromium's stderr explains renderer crashes (signal, OOM, GPU) that Playwright reports only as "Target crashed".
           DEBUG: pw:browser
-        run: bun run test:browser -- --repeat-each=3
+        run: bun run test:browser
       - name: Keep browser failure traces
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
