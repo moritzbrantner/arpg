@@ -95,6 +95,45 @@ bounds as the bundle. They are not commands, so no peer or dedicated client can 
 An exported reproduction records them among the commands (`operations`) and replays them;
 a session they changed can no longer be saved.
 
+## Counter window under remote latency
+
+`counterWindowTicks` is a half-open command window `[usableFromTick, expiresAtTick)` judged
+at the tick the authority **applies** a command. There is no lag compensation: a peer host
+applies a guest command when the reliable channel delivers it, and the dedicated
+`game-server` runtime when the datagram arrives; commands carry no tick, so neither can be
+judged as of the past. A remote player sees the opportunity one-way delay *d* after it was
+granted and its attack arrives *d* later again, so the practical reaction window is the
+window minus the round trip. Both topologies publish a snapshot every tick, so snapshot
+cadence adds no whole-tick loss. Ticks and command delivery are independent events (the
+browser host's tick interval and its reliable-channel callback; the game-server tick loop and
+its datagram receiver), so a command that arrives at a tick boundary may be applied on either
+adjacent tick: read each figure below as exact on the authority's tick grid and ±1 tick at
+a boundary. The millisecond values are nominal, assuming steady 60 Hz scheduling; a throttled
+or stalled peer host (for example a hidden tab) slows the simulation instead of catching up,
+so the same ticks then span more wall-clock time. The rule itself is always judged in ticks.
+
+Measured by [`counter_latency.rs`](../crates/arpg-game-server/tests/counter_latency.rs)
+through the peer host and `MatchRuntime` with the real wire encoding, with the bundle's
+30-tick window at 60 Hz (identical for both topologies; whole-tick round trips, ±1 tick at
+a boundary as above):
+
+| One-way delay | Round trip | Reaction window that still counters |
+| --- | --- | --- |
+| 0 ms | 0 ticks | 30 ticks (500 ms) |
+| 25 ms | 3 ticks | 27 ticks (450 ms) |
+| 50 ms | 6 ticks | 24 ticks (400 ms) |
+| 75 ms | 9 ticks | 21 ticks (350 ms) |
+| 100 ms | 12 ticks | 18 ticks (300 ms) |
+
+A reaction one tick later arrives at or after `expiresAtTick` and starts an ordinary primary
+attack. The same tests show that delay, reordering, duplication and reconnect never grant
+extra time or a second counter: a counter command overtaken by a newer sequence is ignored
+as stale, a duplicated one spends one counter only, and a reconnect within the grace period
+neither moves `expiresAtTick` nor restores a spent opportunity (the runtime's sequence
+watermark survives it). Tune the window with the remote round trip in mind. Any future lag
+compensation must stay authority-owned and bounded: it may never let a delayed, reordered
+or replayed command extend a window or earn a second counter without a new block.
+
 ## Packaging and compatibility
 
 The bundle is compiled into `arpg-core` (`include_str!`), so the Wasm build and the dedicated
