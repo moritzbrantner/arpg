@@ -614,7 +614,11 @@ pub struct ReproductionRecorder {
 impl ReproductionRecorder {
     /// Starts recording `game`, which must be fresh: no tick advanced and no player yet.
     pub fn start(game: &ArpgGame) -> Result<Self, GameError> {
-        if game.tick != 0 || !game.players.is_empty() {
+        // Workbench edits made before recording would be missing from the reproduction.
+        if game.tick != 0
+            || !game.players.is_empty()
+            || game.workbench.as_ref().is_some_and(Workbench::edited)
+        {
             return Err(GameError::new(
                 "a reproduction must be recorded from a fresh game",
             ));

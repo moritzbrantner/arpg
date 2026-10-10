@@ -297,8 +297,9 @@ impl ArpgGame {
             }
             WorkbenchOperation::ResetArrangement => self.reset_workbench_arrangement(room_id)?,
             WorkbenchOperation::SetTuning { parameter, value } => {
+                let previous = self.tuning;
                 self.tuning = self.tuning.with(*parameter, *value)?;
-                self.clamp_to_tuning();
+                self.clamp_to_tuning(previous);
             }
         }
         self.workbench
@@ -502,12 +503,22 @@ impl ArpgGame {
     }
 
     /// Live state never exceeds the bounds of the current tuning.
-    fn clamp_to_tuning(&mut self) {
+    /// Shortened durations count the time already elapsed under `previous`; lengthened
+    /// ones apply from the next start. A monster's stagger has no record of whether an
+    /// arrow or a melee strike applied it, so like dealt damage it keeps its duration and
+    /// `bow.arrowStaggerTicks` applies to later hits.
+    fn clamp_to_tuning(&mut self, previous: Tuning) {
         let Tuning {
             counter_window_ticks,
             guard: tuning,
             bow,
         } = self.tuning;
+        let old = previous.guard;
+        // What is left of a timer of `old_total` with `remaining` ticks under `new_total`.
+        let shortened = |remaining: u8, old_total: u8, new_total: u8| {
+            let elapsed = old_total.saturating_sub(remaining);
+            remaining.min(new_total.saturating_sub(elapsed))
+        };
         let excess = self
             .arrows
             .len()
@@ -536,12 +547,32 @@ impl ArpgGame {
             }
             let guard = &mut player.guard;
             guard.points = guard.points.min(tuning.max_points);
-            guard.broken_ticks_remaining = guard.broken_ticks_remaining.min(tuning.break_ticks);
-            guard.block_reaction_ticks_remaining = guard
-                .block_reaction_ticks_remaining
-                .min(tuning.block_reaction_ticks);
-            if let Some(stance) = guard.stance.as_mut() {
-                stance.ticks_remaining = stance.ticks_remaining.min(tuning.raise_ticks);
+            guard.broken_ticks_remaining = shortened(
+                guard.broken_ticks_remaining,
+                old.break_ticks,
+                tuning.break_ticks,
+            );
+            guard.block_reaction_ticks_remaining = shortened(
+                guard.block_reaction_ticks_remaining,
+                old.block_reaction_ticks,
+                tuning.block_reaction_ticks,
+            );
+            if let Some(stance) = guard.stance.as_mut()
+                && stance.phase == crate::GuardPhase::Raising
+            {
+                let left = shortened(stance.ticks_remaining, old.raise_ticks, tuning.raise_ticks);
+                // A raise that already took the new duration completes now.
+                *stance = if left == 0 {
+                    crate::GuardStance {
+                        phase: crate::GuardPhase::Raised,
+                        ticks_remaining: 0,
+                    }
+                } else {
+                    crate::GuardStance {
+                        phase: crate::GuardPhase::Raising,
+                        ticks_remaining: left,
+                    }
+                };
             }
             if let Some(drawn) = player.draw_ticks.as_mut() {
                 *drawn = (*drawn).min(bow.full_draw_ticks);
@@ -966,10 +997,59 @@ mod tests {
             game.players[&1].guard.stance.unwrap().phase,
             GuardPhase::Raised
         );
-        // Lowering the bound clamps the live stance.
-        game.apply_workbench(&tune(TuningParameter::GuardRaiseTicks, 2))
+    }
+
+    #[test]
+    fn shortened_guard_timers_count_the_time_already_elapsed() {
+        let mut game = dummy();
+        game.apply_workbench(&tune(TuningParameter::GuardRaiseTicks, 12))
             .unwrap();
-        assert!(game.players[&1].guard.stance.unwrap().ticks_remaining <= 2);
+        game.apply_command(
+            PlayerCommand::new(1, 1, ArpgCommand::SetGuard { raised: true }).unwrap(),
+        )
+        .unwrap();
+        for _ in 0..5 {
+            game.advance_tick().unwrap();
+        }
+        let stance = |game: &ArpgGame| game.players[&1].guard.stance.unwrap();
+        // 4 of 12 raising ticks have elapsed: under 6 only 2 are left.
+        assert_eq!(stance(&game).ticks_remaining, 8);
+        game.apply_workbench(&tune(TuningParameter::GuardRaiseTicks, 6))
+            .unwrap();
+        assert_eq!(stance(&game).phase, GuardPhase::Raising);
+        assert_eq!(stance(&game).ticks_remaining, 2);
+        // Under 3 the raise already took long enough and completes now.
+        game.apply_workbench(&tune(TuningParameter::GuardRaiseTicks, 3))
+            .unwrap();
+        assert_eq!(stance(&game).phase, GuardPhase::Raised);
+
+        // 40 of a 45-tick break have elapsed: under 10 it is over.
+        let break_ticks = game.tuning.guard.break_ticks;
+        game.players
+            .get_mut(&1)
+            .unwrap()
+            .guard
+            .broken_ticks_remaining = break_ticks - 40;
+        game.apply_workbench(&tune(TuningParameter::GuardBreakTicks, 10))
+            .unwrap();
+        assert_eq!(game.players[&1].guard.broken_ticks_remaining, 0);
+        // Lengthening applies from the next break; the running one keeps its end.
+        game.players
+            .get_mut(&1)
+            .unwrap()
+            .guard
+            .broken_ticks_remaining = 4;
+        game.apply_workbench(&tune(TuningParameter::GuardBreakTicks, 60))
+            .unwrap();
+        assert_eq!(game.players[&1].guard.broken_ticks_remaining, 4);
+    }
+
+    #[test]
+    fn recording_cannot_start_after_workbench_edits() {
+        let mut game = ArpgGame::new_scenario(ScenarioId::Dummy, 42).unwrap();
+        game.apply_workbench(&tune(TuningParameter::GuardMaxPoints, 200))
+            .unwrap();
+        assert!(ReproductionRecorder::start(&game).is_err());
     }
 
     #[test]
